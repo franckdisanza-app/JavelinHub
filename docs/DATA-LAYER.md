@@ -1,0 +1,858 @@
+# The data layer — a guide for everyone building on top of it
+
+If you are building pages, forms, server actions or route handlers, this is the
+only document you need in order to talk to persistence. You never touch the
+filesystem, the JSON store, or `@supabase/supabase-js` directly.
+
+## The 30-second version
+
+```ts
+import { getDataClient, isDataError } from '@/lib/data';
+
+const db = getDataClient();
+
+// public reads — no actor
+const listings = await db.listListings({ q: 'javelin', category: 'training_plan' });
+
+// mutations — actor first, always
+try {
+  await db.createListing({ userId: session.userId }, {
+    title, description, price_cents, category,
+  });
+} catch (error) {
+  if (isDataError(error)) return { error: error.message }; // safe to render
+  throw error;
+}
+```
+
+That is the whole contract. The rest of this document explains why it is shaped
+that way, so you do not accidentally work around it.
+
+## Six rules that are easy to break
+
+1. **Never render a `Profile` on a public page.** `Profile` carries `email`.
+   `getProfile(actor, userId)` returns it only to the owner or an admin and
+   throws `forbidden` otherwise. For coach names and anything else a visitor
+   may see, use `getPublicProfile(userId)` — or `listCoaches()` /
+   `getPublicCoach(id)`, which return `PublicCoach`, for the coach directory.
+   `getPublicProfile` returns a `PublicProfile` —
+   exactly `id`, `full_name`, `is_approved_coach`, and nothing else. It carries
+   no `email`, and deliberately no `role` or `coach_status`: publishing `role`
+   to anonymous callers would enumerate every administrator, and `coach_status`
+   would make every rejected application world-readable. For a verified-coach
+   badge use `is_approved_coach` — the raw enum is intentionally unavailable on
+   the public surface. This mirrors the `public.public_profiles` SQL view, which
+   projects the same three columns.
+2. **Becoming a coach only ever raises privilege.** An admin who redeems an
+   invite code, or who is approved as a coach, stays an admin. Do not write UI
+   that assumes `coach_status === 'approved'` implies `role === 'coach'`.
+3. **The sales count is public; the orders behind it are not.** `getCoachStats`
+   and `getOfferStats` take no actor and publish numbers. Every `Order` read
+   takes an actor and is scoped to the buyer, the selling coach or an admin —
+   a single order row says who bought what from whom.
+4. **Never render a zero as a rating.** `rating_average` is `null`, never `0`,
+   when nothing has been reviewed. Branch on it. `0.0` reads as *bad*, not
+   *new*, and it is the first thing a coach with one listing will see. No write
+   path can store a rating of 0 (they are integers 1-5, checked in
+   `createReview` and by a SQL constraint) — but see "the mock store, for when
+   something looks odd": a hand-edited `db.json` is not validated on load, so
+   the guarantee is about the code paths, not about the file.
+5. **A withdrawn offer is gone from every public read, and gone from none of
+   the account-level ones.** `listListings`, `getListing`,
+   `listListingsByCoach`, `getOfferStats`, `listOfferStats` and
+   `listReviewsForListing` all filter `deleted_at is null`; `getCoachStats` and
+   `listReviewsForCoach` deliberately do not. Do not "make them consistent" —
+   see "Withdrawal" below. Both directions are asserted in
+   `scripts/verify-authz.mts`.
+6. **The coach directory filters to approved coaches server-side.** `listCoaches`
+   and `getPublicCoach` carry the predicate themselves, in the data layer and in
+   the `public.public_coaches` view, and no parameter widens either. Never
+   rebuild it as a client-side filter over a wider read — that renders
+   identically on screen and ships every learner's and every administrator's row
+   to the browser. `PublicCoach` has no `role` and no `coach_status`, so the
+   shape cannot leak them either: the row's *existence* is the approval.
+
+## Files
+
+| File | What it is |
+|---|---|
+| `src/lib/data/index.ts` | `getDataClient()` — **the only import calling code should use** |
+| `src/lib/data/client.ts` | the `DataClient` interface: the swap surface, fully documented |
+| `src/lib/data/types.ts` | domain types, `Actor`, `DataError`, `isDataError`, `dataErrorStatus` |
+| `src/lib/data/mock/mockClient.ts` | the JSON-backed implementation + all authorization checks |
+| `src/lib/data/mock/store.ts` | JSON load/save, seeding, password hashing, the mutex |
+| `src/lib/data/supabase/supabaseClient.ts` | the Postgres implementation — authorization enforced by RLS, not by this file |
+| `src/lib/data/supabase/serverClient.ts` | the request-scoped Supabase client; the only place a client is built |
+| `src/lib/data/supabase/errors.ts` | SQLSTATE → `DataError`, and which database messages are safe to show |
+| `src/lib/data/validation.ts` | input validation, **shared by both implementations** |
+| `src/lib/data/invite-code.ts` | invite-code minting, shared for the same reason |
+| `src/lib/env.ts` | every `process.env` read in the app |
+| `scripts/verify-authz.mts` | the authorization regression suite — `npm run verify:authz` |
+| `scripts/verify-pages.mts` | the rendered-page regression suite — `npm run verify:pages` |
+
+`src/lib/data/supabase/` is that second implementation, and it has landed:
+**no calling code changed for it.** That is the deal, and it only holds while you
+go through `getDataClient()`.
+
+Which one you are talking to is `DATA_BACKEND`, and from a page you should never
+be able to tell. If you ever find yourself needing to know, something has leaked
+through the interface — say so rather than branching on it.
+
+## The actor rule
+
+```ts
+export type Actor = { userId: string } | null;   // null = anonymous
+```
+
+An actor carries a user id and **nothing else**. There is no `role` field, no
+`coachStatus` field, and adding one would be a security regression. Every
+mutating method takes the actor as its first argument and then looks the
+privileges up from the store itself.
+
+This mirrors Postgres row-level security, which is allowed to trust exactly one
+thing — `auth.uid()` — and reads everything else from the database. If the data
+layer accepted `{ userId, role: 'admin' }` from a caller, then any code path that
+built an actor carelessly (a cookie parse, a query param, a stale session) would
+be a privilege escalation. Instead, the worst a bad actor value can do is
+impersonate a *user id*, which is the session layer's problem, not the data
+layer's.
+
+Practical consequences:
+
+* **Do not gate mutations in the UI and skip the data layer's check.** The check
+  is not yours to make. Hiding a button is presentation; refusing the write is
+  authorization, and it happens inside `mockClient.ts` (and inside Postgres,
+  later).
+* **Do check first for rendering.** `getProfile(actor, actor.userId)` gives you
+  the signed-in user's own `coach_status`; use it to decide whether to show the
+  "Create a listing" button. Then call the method anyway and render whatever
+  `DataError` comes back.
+* **Never pass ownership ids in input.** `createListing` has no `coach_id` field
+  and `createCoachApplication` has no `user_id` field, on purpose. They come
+  from the resolved actor.
+
+## Errors
+
+Everything expected throws `DataError`, and only `DataError`:
+
+| `code` | Meaning | HTTP |
+|---|---|---|
+| `unauthorized` | not signed in, but sign-in is required | 401 |
+| `forbidden` | signed in, but not permitted | 403 |
+| `not_found` | the target row does not exist | 404 |
+| `invalid` | input failed validation | 400 |
+| `conflict` | conflicts with current state (already reviewed, duplicate email, …) | 409 |
+
+`error.message` is written for end users — no stack traces, no ids, no SQL, no
+paths — so you can render it verbatim. `dataErrorStatus(code)` gives you the
+status for a route handler. Use `isDataError(error)`, not `instanceof`; the
+guard also matches across module-instance boundaries, which Next.js's bundler
+can produce.
+
+Reads that find nothing return `null` or `[]` rather than throwing. Only
+operations targeting a specific row throw `not_found`.
+
+In a server action, the idiom is:
+
+```ts
+'use server';
+import { getDataClient, isDataError, isListingCategory } from '@/lib/data';
+
+export async function createListingAction(formData: FormData) {
+  const db = getDataClient();
+  const category = String(formData.get('category') ?? '');
+  // A form field is untrusted input; narrow it before it can be passed at all.
+  if (!isListingCategory(category)) return { ok: false, message: 'Choose a category.' };
+  try {
+    await db.createListing(await currentActor(), {
+      title: String(formData.get('title') ?? ''),
+      description: String(formData.get('description') ?? ''),
+      price_cents: Number(formData.get('price_cents') ?? NaN),
+      category,
+    });
+  } catch (error) {
+    if (isDataError(error)) return { ok: false, message: error.message };
+    throw error;
+  }
+  return { ok: true };
+}
+```
+
+Note `price_cents` is a **number of cents** and must be a non-negative safe
+integer. Parse the currency in the form layer; the data layer will reject
+`12.5`, `-1`, `NaN` and `"1000"` with `invalid`.
+
+## Searching
+
+`listListings({ q, category })` matches `q` case-insensitively against **title
+and description only**, and `category` as an exact match. It deliberately does
+*not* search coach names or category text: those are the columns Postgres
+indexes for this query (`listings_title_trgm_idx`,
+`listings_description_trgm_idx`, `listings_search_tsv_idx`), and search results
+must not change when the backend is swapped. Neither the category slug nor its
+label is searchable — categories are a filter, not a keyword.
+
+## Categories
+
+`category` is a **fixed taxonomy of eight**, not free text. The **slug is
+stored, the label is rendered**, so rewording a category is a copy change rather
+than a data migration and a `?category=` URL survives the rewording.
+
+| slug | label |
+|---|---|
+| `training_plan` | Training plan |
+| `recovery_plan` | Recovery plan |
+| `mobility_plan` | Mobility plan |
+| `weightlifting_plan` | Weightlifting plan |
+| `nutrition_plan` | Nutrition plan |
+| `video_review` | Video review |
+| `mental_training` | Mental training |
+| `other` | Other |
+
+Everything you need is in `src/lib/data/types.ts`: the `ListingCategory` union,
+`LISTING_CATEGORIES` (the fixed **display order** — `other` is pinned last and
+is never sorted alphabetically into the middle), `LISTING_CATEGORY_LABELS`,
+`StoredListingCategory` (see "reads are wider" below), `isListingCategory()` for
+anything arriving from a form or a query string, and `listingCategoryLabel()`
+for rendering.
+
+Four things follow, and each one is load-bearing:
+
+* **`listCategories()` returns all eight, in that order** — not the distinct
+  values in use. It is a property of the schema (`enum_range(null::listing_category)`),
+  not of the data, so a fresh install with no listings still shows a complete
+  filter and the control never changes shape as inventory arrives. Three seeded
+  categories — `recovery_plan`, `nutrition_plan` and `other` — are deliberately
+  empty for exactly this reason, and `scripts/verify-authz.mts` asserts that it
+  is those three.
+* **Never render a raw slug.** Use `listingCategoryLabel(listing.category)`.
+  `LISTING_CATEGORY_LABELS[listing.category]` **does not compile** — that is
+  deliberate, see below.
+* **A category outside the taxonomy matches nothing.** `listListings({ category })`
+  with an unrecognised value returns `[]` — it is *not* treated as "no filter".
+  In Postgres the comparison is against an enum column, where the value would be
+  a cast error rather than a wider result set, and silently widening would answer
+  a filtered URL with the whole catalogue. Validate `?category=` with
+  `isListingCategory()` before you use it; `/browse` shows an explicit "no such
+  category" state rather than falling back to everything.
+* **`createListing` refuses anything else with `invalid`**, whatever the type
+  says — a Server Action is a public HTTP endpoint and the union is erased at
+  runtime. `scripts/verify-authz.mts` asserts the refusal for unknown slugs,
+  labels-instead-of-slugs, the empty string and injection-shaped input.
+
+### Writes are closed, reads are wider — and the types say so
+
+A store written before this taxonomy existed can still hold free-text
+categories, and `data/db.json` is gitignored and long-lived, so a real machine
+may be holding `"Track & Field"` right now. **Reads pass such a value through
+untouched** rather than laundering it into `other` — relabelling a coach's offer
+would be a claim the data does not support.
+
+That means the read type and the write type are deliberately different:
+
+| | type | why |
+|---|---|---|
+| write — `CreateListingInput.category` | `ListingCategory` (the strict eight) | `createListing` refuses everything else with `invalid`, so nothing new can enter |
+| read — `Listing.category`, `ListingWithCoach.category` | `StoredListingCategory` | it must admit the legacy value that is genuinely in the column |
+
+`StoredListingCategory` is `ListingCategory | (string & {})`: the eight literals
+stay visible to a reader and to autocomplete, but the type as a whole is **not a
+valid key** of `LISTING_CATEGORY_LABELS`, so
+
+```ts
+LISTING_CATEGORY_LABELS[listing.category]   // ✗ TS7053 — does not compile
+listingCategoryLabel(listing.category)      // ✓ total, handles the legacy case
+```
+
+`TS7053` specifically rests on `noImplicitAny` (on here via `"strict": true` in
+`tsconfig.json`) — relax that flag and the indexing above compiles again,
+silently. The guard does not rest on it *alone*, though: assigning a stored
+category to `CreateListingInput.category`, to `ListingFilter.category`, or to a
+bare `ListingCategory` fails with `TS2322`, and `LISTING_CATEGORIES.includes()`
+on one fails with `TS2345`. Those are assignability errors and hold under any
+compiler configuration.
+
+Declaring the strict union on the row instead would be a lie the compiler then
+enforces on you: it promises that indexing is total, and on a legacy row that
+expression evaluates to `undefined` while TypeScript types it `string` — a blank
+badge, no error anywhere. Narrow with `isListingCategory()` when you need the
+strict union.
+
+Legacy values never appear in `listCategories()`, no filter can reach them (the
+control only offers the eight), and nothing can create another one.
+`scripts/verify-authz.mts` pins all of this against a deliberately planted
+pre-taxonomy row. Delete `data/db.json` to reseed clean.
+
+## Reviews, sales, and the price epoch
+
+Every review points at an **order**. That single constraint is what makes the
+system non-spammable — you cannot review what you did not buy, and you cannot
+review the same purchase twice (`reviews.order_id` is `UNIQUE` in SQL, not just
+checked in code) — and it is also where "Verified purchase" comes from: it is a
+fact about the schema, not a badge somebody decided to render.
+
+All of the order and review data in this POC is **fabricated**. There is no
+checkout, so `DataClient` has no `createOrder` and the SQL grants no client any
+`INSERT` on `orders`. `createReview` is real, because a signed-in learner
+holding a seeded unreviewed order can genuinely write one.
+
+### The read shapes
+
+| method | actor | returns |
+|---|---|---|
+| `getOfferStats(listingId)` | none — public | `OfferStats \| null` |
+| `listOfferStats(ids)` | none — public | `OfferStats[]`, unknown ids dropped |
+| `getCoachStats(coachId)` | none — public | `CoachStats`, always a row |
+| `listReviewsForListing(id)` | none — public | `PublicReview[]`, current epoch |
+| `listReviewsForCoach(id)` | none — public | `PublicReviewWithListing[]`, every epoch |
+| `getOrder(actor, id)` | buyer / selling coach / admin | `OrderWithListing \| null` |
+| `listMyOrders(actor)` | signed in | the actor's own purchases |
+| `listOrdersForCoach(actor, id)` | that coach, or an admin | that coach's sales |
+| `createReview(actor, input)` | owner of an unreviewed order | `Review` |
+
+### `listOfferStats` — key the result by id, never zip it by index
+
+It returns rows "in the order given", and that promise is asserted in
+`scripts/verify-authz.mts` — against a fixture list that is deliberately
+**neither its ascending nor its descending sort**, because a guard that
+excludes one ordering excludes only that one. (Until E5 there was no order
+assertion at all: `sort()` and `sort().reverse()` both survived the whole
+suite, harmlessly, because nothing rendered offer stats yet.)
+
+Do not rely on it anyway. **This method DROPS ids it has no row for** — an
+unknown id, and a withdrawn offer — which `listCoachStats` never does. A
+positional zip is therefore wrong by construction here: one dropped row shifts
+every card after it and prints one offer's rating under another offer's title.
+Build a `Map` keyed by `listing_id`, and render nothing for a card whose id is
+missing. Never substitute a zeros row for it: zeros are the claim "nothing has
+sold", and a page that simply did not get an answer is not entitled to make it.
+
+Orders are **not public** — `listOrdersForCoach` is the one that takes an id
+rather than deriving it, so it checks: publishing it would let any visitor list
+a competitor's customers by asking for their coach id.
+
+Reviews are **public read, through a projection**. `PublicReview` is not
+`Review`: it is `{ id, listing_id, rating, body, created_at, author_name }` and
+deliberately drops three columns the row has.
+
+* `order_id` — a valid argument to `getOrder()`, which is scoped to the buyer,
+  the selling coach and an admin. Publishing it on a public page would make the
+  private surface half-reachable.
+* `author_id` — the author is attributed by display name, which is what a
+  review is for; the id only adds machine-linkability to an account.
+* `price_epoch` — how many times a coach has raised a price is not a visitor's
+  business. It still selects *which* reviews come back.
+
+"Verified purchase" does not need `order_id` on the shape: a review cannot exist
+without an order, so every row you get is one. In SQL the same split is
+`public.public_reviews` (a view, granted to `anon`) over a `reviews` table that
+has no anonymous policy at all — the `public_profiles` pattern exactly.
+
+### Zero is not a rating
+
+`OfferStats.rating_average` and `CoachStats.rating_average` are
+`number | null`, and they are `null` exactly when `review_count === 0`.
+
+```ts
+const stats = await db.getOfferStats(listing.id);
+if (stats && stats.rating_average !== null) renderRating(stats.rating_average);
+else renderNoReviewsYet();               // never renderRating(0)
+```
+
+A rating of `0` cannot occur — ratings are integers 1-5, enforced in
+`createReview` and by a check constraint — so `null` is unambiguous. The
+alternative (`0` for "unrated") makes a brand-new offer look like a badly
+reviewed one, and there is no way for the UI to recover the distinction once the
+data layer has thrown it away.
+
+`sales_count` and `review_count` are plain numbers and *are* `0` when there is
+nothing. Zero sales is a real fact; zero rating is not.
+
+### `price_epoch`, and why the two levels disagree on purpose
+
+`listings.price_epoch` is an integer starting at 1, incremented **only when the
+price goes up**. Orders and reviews carry a copy of the value that was current
+when they were created.
+
+| level | epoch | effect |
+|---|---|---|
+| **offer** — `getOfferStats`, `listReviewsForListing` | current only | a price rise archives that offer's rating, review count and sales; it reads as new |
+| **coach account** — `getCoachStats`, `listReviewsForCoach` | all | a price rise changes nothing; neither does withdrawing an offer |
+
+Nothing is ever deleted by this. The archived reviews still exist, still belong
+to the same listing row, still render on the coach's profile, and still count
+toward the coach's average. The offer-level number is "how is the thing you can
+buy today being received", and the account-level number is "how is this coach".
+
+A review is stamped with **the epoch of the order it reviews**, not with the
+listing's current one. A review is feedback on the version that was actually
+bought. The accepted consequence, and it is deliberate: if you buy, the coach
+raises the price, and *then* you review, your review is archived the moment it
+is written — it never appears on the offer page, because that offer genuinely
+did get a fresh slate. It still counts toward the coach's account rating, where
+every epoch counts, so the writing is never lost.
+
+Seeded example, if you need to see it: offer `…0103` is at epoch 2 with two
+epoch-1 sales and one epoch-2 sale. It reports **1 sale, 1 review**; its coach
+reports **10 sales, 8 reviews** across everything.
+
+## The offer lifecycle — edit, withdraw, restore
+
+An offer has three verbs after creation, and the interesting thing about them is
+that **they do not share an actor rule**:
+
+| method | who | why that, and not something simpler |
+|---|---|---|
+| `updateListing(actor, id, input)` | the owner, **never an admin** | an admin who can silently rewrite a coach's copy publishes words under that coach's byline that the coach never wrote — worse than the problem it solves. A moderator takes an offer down; they do not edit it. |
+| `softDeleteListing(actor, id)` | the owner, **or an admin** | the admin arm is the takedown. Removing something from sale is a moderation action in a way that rewriting it is not. |
+| `restoreListing(actor, id)` | the owner **if they withdrew it**, or an admin | a takedown the coach undoes in one click is not a takedown. See below. |
+| `listListingRevisions(actor, id)` | the owner, or an admin | **not public**: publishing it would publish the full price history of every offer on the site. |
+
+The asymmetry between rows one and two is deliberate and is the thing most
+likely to be "tidied up" by someone who reads only the signatures.
+
+### Who may restore what — and why `deleted_by` never reaches you
+
+Because *both* the owner and an admin may withdraw, `deleted_at` alone cannot
+say which happened. `listings.deleted_by` records the actor, and
+`restoreListing` uses it:
+
+| withdrawn by | the coach may restore | an admin may restore |
+|---|---|---|
+| the coach themselves | **yes** | yes |
+| an admin (a takedown) | **no — `forbidden`** | yes |
+
+`forbidden`, not `conflict`: the row *is* restorable, just not by this actor.
+A `null` `deleted_by` counts as unattributed and the owner may restore — failing
+open on an audit column grants nothing an owner did not already have, whereas
+failing closed would strand a row nobody could restore.
+
+**`deleted_by` is never on any shape you receive.** After a takedown it holds an
+*administrator's* id, and handing that to a visitor, to a buyer reading a
+tombstone, or even to the coach who owns the offer is administrator enumeration
+— the same disclosure `PublicProfile` drops `role` to prevent. So
+`ListingWithCoach` is declared as `Omit<Listing, 'deleted_by'>` and *every*
+listing-returning method returns that shape: re-adding the column does not
+merely leak, it fails to compile.
+
+Where the fact matters, the derived boolean is published instead.
+`listMyListings` returns `OwnedListing`, which is the projection plus
+`withdrawn_by_admin: boolean` — enough to decide whether to render a Restore
+control, and never enough to learn which administrator acted. Same trade as
+`is_approved_coach`.
+
+### Editing a withdrawn offer is allowed
+
+`updateListing` works on a withdrawn offer, and this is deliberate rather than an
+oversight. Once an admin takedown can only be lifted by an admin, refusing edits
+too would leave the coach unable to do the one thing that should be open to them
+— fix whatever got the offer taken down. They could neither restore it nor
+repair it.
+
+The edit changes nothing about visibility: `deleted_at` is untouched, so the
+offer stays invisible to every public read throughout, and a revision is
+appended exactly as for any other edit. It also matches the SQL, which never
+forbade it — so the two backends agree instead of silently diverging.
+
+Editing additionally requires the owner's **stored** `coach_status` to still be
+`'approved'`. Withdrawing does not: a coach whose approval was revoked and who
+cannot take their own offers off sale is the worst of both worlds — the offers
+stay published and only an admin can act.
+
+**The id never changes on an edit.** That is what lets the offer's reviews and
+orders keep pointing at the same row, and it is why the edit path exists at all
+rather than delete-and-recreate.
+
+### `price_epoch` moves only on an INCREASE
+
+`updateListing` increments the epoch when — and only when — the new price is
+**strictly greater** than the old one. An unchanged price does not bump it. A
+price **cut** does not bump it. A content-only edit does not bump it.
+
+This matters because the bump is destructive to an offer's social proof: after
+it, `getOfferStats` reports zero sales, zero reviews and a `null` rating, and
+`listReviewsForListing` returns nothing. Doing that for a discount, or for a
+coach who hit Save twice, would silently throw away an offer's reputation in
+exchange for nothing.
+
+The increment happens **inside the data layer, in the same atomic step as the
+price write**. There is no ordering in which a caller gets the new price without
+the archive, so a confirmation dialog ("this will archive N reviews and M
+sales") is a courtesy the UI adds, not the thing that enforces it — posting the
+form directly cannot skip it. In SQL the same guarantee is a `BEFORE UPDATE`
+trigger that derives the column, so a client that `PATCH`es `price_cents`
+through PostgREST gets the archive whether it asked for one or not. A caller
+cannot supply `price_epoch` on either side.
+
+Nothing is deleted by any of this. The archived reviews still exist, still
+belong to the same listing row, still render on the coach's profile, and still
+count toward the coach's account rating.
+
+### `listing_revisions` — what the epoch rule does not cover
+
+A coach who rewrites an offer end to end **at the same price keeps every
+review**. That is a stated, accepted limit, not an oversight — and it is the
+reason revisions exist: if the text can change without the reviews changing,
+then the superseded text has to survive, or a reader cannot tell which reviews
+predate the rewrite.
+
+`updateListing` appends one `ListingRevision` on **every** edit, including one
+that changes nothing. Each row is the version that edit **superseded**, so:
+
+```
+listing_revisions (oldest → newest)  +  the live listings row  =  the whole history
+```
+
+`created_at` on a revision is the moment that version was **replaced**, not the
+moment it was written. `listListingRevisions` returns newest first.
+
+Withdrawing and restoring append nothing — they are not content edits.
+
+### Withdrawal is a soft delete, and it is the only kind
+
+`softDeleteListing` stamps `deleted_at`. **No code path removes a listing row**,
+and there is no DELETE policy on `listings` in SQL for anybody. A hard delete
+would either cascade and destroy the offer's reviews, or be refused outright by
+`orders.listing_id`'s `ON DELETE RESTRICT` the moment the offer had sold — i.e.
+a coach could never withdraw anything anyone had bought.
+
+What withdrawal does, and what it deliberately does not:
+
+| | withdrawn offer |
+|---|---|
+| `listListings` (incl. `q` / `category` filters) | **hidden** |
+| `getListing` | **`null`** — a 404 for the public |
+| `listListingsByCoach` (public coach profile) | **hidden**, and passing an actor does not widen it |
+| `getOfferStats` / `listOfferStats` | **no row**, exactly like an unknown id |
+| `listReviewsForListing` | **`[]`** |
+| `getCoachStats` sales, reviews, rating | **unchanged** |
+| `listReviewsForCoach` | **still there**, still joined to the offer title |
+| `listMyOrders` / `listOrdersForCoach` | **still there**, still joined to the offer title |
+| `listMyListings` (the owner) | **there**, with `deleted_at` set |
+| `getListingForViewer` | a tombstone, for the entitled — see below |
+
+The second half of that table is not an oversight to be cleaned up. The coaching
+**was** sold and reviewed; withdrawing the offer does not undo that, and a coach
+who lost their whole rating by taking one old offer off sale would never take
+anything off sale. `getCoachStats` scans `orders.coach_id` directly and resolves
+reviews through the raw listings collection, never through the public reads,
+precisely so this holds by construction.
+
+`restoreListing` clears the column. Nothing else changes — same id, same epoch,
+same reviews, same sales — because nothing was destroyed.
+
+### The tombstone: `getListingForViewer`
+
+**If you are building an offer detail page, call this and not `getListing`.**
+
+```ts
+const detail = await db.getListingForViewer(actor, id);
+if (!detail) notFound();
+if (detail.state === 'withdrawn') return <NoLongerAvailable on={detail.withdrawn_at} />;
+return <Offer listing={detail.listing} />;   // state === 'published'
+```
+
+It returns a discriminated union rather than a nullable flag so that the Buy
+control can only be written under `state === 'published'`. The `withdrawn` arm
+carries `withdrawn_at` as a **non-nullable** string — the same value as
+`listing.deleted_at`, restated at a type you do not have to null-check.
+
+| viewer | published | withdrawn |
+|---|---|---|
+| anonymous, or any stranger | `published` | **`null`** |
+| anyone holding an order for it | `published` | `withdrawn` |
+| the coach who owns it | `published` | `withdrawn` |
+| an admin | `published` | `withdrawn` |
+
+The buyer row is the reason the method exists: without it a purchase history
+links into a dead end. A viewer with no entitlement gets `null` rather than a
+`forbidden` throw, because a refusal would confirm that something once existed
+at that id.
+
+### The dashboard shape — what E6 should call
+
+`listMyListings(actor)` returns the actor's own offers, newest first,
+**including withdrawn ones**, as `ListingWithCoach[]`. Branch on `deleted_at`:
+
+```ts
+const mine = await db.listMyListings(actor);           // OwnedListing[]
+const live = mine.filter((l) => l.deleted_at === null);
+const withdrawn = mine.filter((l) => l.deleted_at !== null);
+
+// Only offer Restore where it will actually work. A takedown is an admin's to lift.
+withdrawn.map((l) => (l.withdrawn_by_admin ? <RemovedByAdmin /> : <RestoreButton id={l.id} />));
+```
+
+The coach id comes from the resolved actor and is **never a parameter**, so
+there is no shape of this call that reads someone else's withdrawn offers —
+the same construction as `listMyOrders`, for the same reason.
+`listListingsByCoach` stays strictly public and strictly published-only; it is
+deliberately not dual-mode.
+
+Pair it with `listOfferStats(ids)` for the numbers, remembering that withdrawn
+ids are absent from that result — a withdrawn row has no public stats, which is
+the correct thing for a dashboard to show as "not on sale" rather than "0 sales".
+
+### Empty states are fixtures, not accidents
+
+The seed deliberately contains all of them, and `scripts/verify-authz.mts`
+pins them so nobody "fixes" the data later:
+
+* `…0106` — an offer with **zero sales and zero reviews**;
+* `…0105` — an offer **sold once and never reviewed** (a third state: it has a
+  sales count but no rating);
+* Nils Berg (`…0004`) — an **approved coach with nothing at all**: no offers,
+  no sales, no reviews, and no headline, bio or years coaching either;
+* `recovery_plan`, `nutrition_plan`, `other` — still empty, from the taxonomy
+  round.
+
+## The public coach profile
+
+Coaches have **their own public fields** — `coach_headline`, `coach_bio`,
+`coach_years_coaching`, all on `profiles` and all nullable.
+
+| method | actor | returns |
+|---|---|---|
+| `listCoaches({ q })` | none — public | `PublicCoach[]`, **approved coaches only**, newest first |
+| `getPublicCoach(id)` | none — public | `PublicCoach \| null` |
+| `listCoachStats(ids)` | none — public | `CoachStats[]`, one per id **in the order given** |
+| `updateMyCoachProfile(actor, input)` | the actor themselves, **and only while approved** | the actor's own `Profile` |
+
+`PublicCoach` is `{ id, full_name, coach_headline, coach_bio,
+coach_years_coaching }`. Note what is missing, and do not add it back: `email`,
+`role`, `coach_status`, and `is_approved_coach`. The last would be a column
+whose value is the constant `true` — every row these methods return is an
+approved coach, because the predicate lives in the data layer and in the SQL
+view, so no caller-supplied filter widens it.
+
+`getPublicCoach` returns `null` for an unknown id **and** for a real user who is
+not an approved coach, deliberately indistinguishable. A learner, a pending
+applicant, a rejected applicant, an administrator and a uuid belonging to nobody
+all get exactly `null` — strictly less than the
+`getPublicProfile(id).is_approved_coach` flag that is already public. Render it
+as a 404.
+
+**A published offer does not guarantee its coach has a public profile**, so a
+`/coaches/<listing.coach_id>` link must be gated on `getPublicCoach` (or on
+membership of `listCoaches()`) rather than written unconditionally. The state is
+reachable, and was demonstrated end to end rather than assumed: a learner files
+an application, redeems an invite code — which approves them **without closing
+the pending application** — publishes an offer, and an admin then rejects that
+still-pending application, which sets `coach_status = 'rejected'` under them.
+The profile is left at `role: 'coach', coach_status: 'rejected'`; the offer stays
+in `listListings` and `getListing` (neither filters on the coach's status),
+while `getPublicCoach` returns `null` and the directory drops them. An
+unconditional link would 404. Same rule, and same reason, as a coach profile
+only linking a review's offer title when that offer is still published.
+
+`q` matches `full_name` **only** — not the headline, not the bio. Same rule as
+`listListings`, same reason: `profiles_full_name_trgm_idx` is the only index
+Postgres can serve it from, so matching more here would change results at the
+backend swap. The order is **newest first**, not alphabetical: `order by
+full_name` is collation-dependent and the mock cannot reproduce it for
+non-ASCII names.
+
+`listCoachStats` differs from `listOfferStats` in one way that matters: it
+**keeps unknown ids**, as zeros with a `null` average. `getCoachStats` always
+returns a row, so a batch that dropped ids would disagree with the single form
+and would misalign any caller zipping ids to rows.
+
+### The bio is copied at approval. It is not a live join.
+
+This is the most important thing about these fields.
+
+`coach_applications.bio` is a **review artifact** — written for an
+administrator, readable only by its author and by admins. Publishing it live
+would put text on the public internet that the applicant wrote for an audience
+of one, and would republish every later edit of it.
+
+So `reviewCoachApplication` copies it **once**, at approval, into
+`profiles.coach_bio`, and **only when that column is still empty** — a coach who
+has since written their own words keeps them. From then on the column is the
+coach's, editable through `updateMyCoachProfile`, and the application has
+nothing further to do with it.
+
+The distinction, stated as the test that pins it: approve an applicant, then
+edit the application row afterwards, and the public bio **does not move**. A
+live join passes every other assertion and fails that one.
+
+Only `bio` is copied. `experience` is prose written to a reviewer, no integer
+can be recovered from free text, and there is no public `sport` field anywhere
+because there is one sport — so `coach_headline` and `coach_years_coaching` stay
+`null` for the coach to fill in.
+
+**A coach who arrived by invite code has no bio at all**, having filed no
+application. "An approved coach with an empty profile" is a normal state, not an
+edge case, and the UI must render it — Nils Berg (`…0004`) is seeded in exactly
+it.
+
+The apply form discloses this at the point of collection ("If you are approved,
+this becomes the first draft of your public coach profile"). Do not remove that
+hint without also removing the copy.
+
+### Only an approved coach may write the three coach columns
+
+`updateMyCoachProfile` throws `forbidden` for anyone whose stored
+`coach_status` is not `'approved'` — a learner, an applicant awaiting review, a
+rejected applicant, and an admin who is not also an approved coach. It is
+**self only**: the subject is the resolved actor and is never a parameter, and
+an admin editing somebody else's bio is refused for the same reason
+`updateListing` refuses one.
+
+The same rule is enforced in Postgres by
+`guard_profile_privilege_columns()`, not only in the data layer. That matters
+more than it looks: without it a learner could `PATCH` their own `coach_bio`
+through PostgREST before applying, and because the approval copy only fires
+when the column is empty, that pre-written bio would **suppress the copy** — so
+the two backends would publish different text for the same user actions.
+
+### Zero years is not the same as no years
+
+`coach_years_coaching` is `number | null`. `null` is "not stated"; `0` is "first
+season coaching". Two different answers, rendered differently — the same
+distinction `rating_average` makes, for the same reason. Branch on `=== null`,
+never on falsiness. The mock store's backfill does the same, so a stored `0`
+survives a reload.
+
+### What the profile page shows, and why two of its reads disagree
+
+`/coaches/[id]` puts three reads side by side, and the disagreement is the
+design rather than a bug:
+
+| read | epoch | withdrawn offers |
+|---|---|---|
+| `getCoachStats` | all | **included** |
+| `listReviewsForCoach` | all | **included** |
+| `listListingsByCoach` | n/a | **excluded** — it is a public listing read |
+
+So a coach profile can legitimately show "8 reviews" above four offers, and a
+review can name an offer that is no longer for sale. **Do not make them
+consistent.**
+
+The consequence a page has to handle: a review's offer title should only be a
+**link** when that offer is still published, or the link is a 404. Build the
+published set from `listListingsByCoach` and check membership before linking.
+
+## Who may do what
+
+| Operation | Requirement |
+|---|---|
+| `listListings`, `getListing`, `listCategories`, `listListingsByCoach`, `getPublicProfile` | none — public (published offers only) |
+| `listCoaches`, `getPublicCoach`, `listCoachStats` | none — public (**approved coaches only**, filtered in the data layer) |
+| `getListingForViewer` | none for a published offer; a withdrawn one needs the owner, an admin, or an order for it — everyone else gets `null` |
+| `listMyListings` | any signed-in actor; returns only their own offers |
+| `updateListing` | the offer's **owner**, whose stored `coach_status` is `'approved'` — **never an admin** |
+| `softDeleteListing` | the offer's owner (approval not required), **or an admin** |
+| `restoreListing` | an admin; or the owner, but only if the owner is who withdrew it — an admin takedown is `forbidden` to the coach |
+| `listListingRevisions` | the offer's owner, or an admin |
+| `getOfferStats`, `listOfferStats`, `getCoachStats`, `listCoachStats`, `listReviewsForListing`, `listReviewsForCoach` | none — public (aggregates and reviews only) |
+| `updateMyCoachProfile` | the actor themselves, whose stored `coach_status` is `'approved'` — **never an admin**, the same asymmetry `updateListing` carries |
+| `getProfile` | the actor is the subject, or is an admin |
+| `getOrder` | the buyer, the coach who sold it, or an admin |
+| `listOrdersForCoach` | that coach, or an admin |
+| `createReview` | signed in, owns the order, has not reviewed it, is not the offer's coach |
+| `signUp`, `signInWithPassword` | none |
+| `listMyOrders`, `createCoachApplication`, `getMyCoachApplication`, `redeemInviteCode` | any signed-in actor |
+| `createListing` | the actor's **stored** `coach_status` is `'approved'` |
+| `createInvite`, `listInvites`, `revokeInvite`, `listCoachApplications`, `reviewCoachApplication` | the actor's **stored** `role` is `'admin'` |
+
+The two routes to `coach_status: 'approved'`:
+
+1. **Invite** — an admin mints a code (`createInvite`), the user redeems it
+   (`redeemInviteCode`), and they are immediately `role: 'coach'`,
+   `coach_status: 'approved'`. Codes are matched case-insensitively and trimmed;
+   unknown, revoked, expired and already-redeemed codes all fail identically
+   with `invalid` so the form cannot be used to guess codes.
+2. **Application** — the user files one (`createCoachApplication`), which moves
+   their own `coach_status` to `'pending_review'`. An admin decides
+   (`reviewCoachApplication`): `approved` sets `role: 'coach'` and
+   `coach_status: 'approved'`; `rejected` sets `coach_status: 'rejected'` and
+   leaves the role alone. Reviewing twice throws `conflict`.
+
+A user may hold at most one `pending` application, and an already-approved coach
+cannot apply again — both are `conflict`.
+
+## Server-only
+
+`src/lib/data/**` uses `node:fs` and `node:crypto`. Import it from server
+components, server actions and route handlers only. `store.ts` throws on import
+if `window` is defined, so a mistake surfaces immediately rather than as a
+confusing bundler error.
+
+If a client component needs data, fetch it in a server component and pass it
+down as props, or call a server action.
+
+## The mock store, for when something looks odd
+
+* Lives at `MOCK_DB_PATH` (default `./data/db.json`, gitignored). Delete the file
+  to reset; it reseeds on the next request.
+* Seeded accounts and the two demo passwords are listed in the root `README.md`.
+  The admin password comes from `SEED_ADMIN_PASSWORD` and has no default — the
+  app throws a message telling you exactly what to add if it is missing.
+* Seeding is idempotent, so an existing store picks up newly added fixtures
+  without being wiped.
+* All access is serialised through an in-process promise-chain mutex, and
+  mutations are applied to a deep copy that is only promoted on success. That is
+  what makes multi-step operations — claim an invite *and* promote the profile —
+  atomic without a transaction manager.
+* Writes go to a temp file and are then renamed, so an interrupted write cannot
+  leave a truncated store.
+* The cache is stashed on `globalThis` so Next.js dev hot-reload does not create
+  a second, unsynchronised copy.
+
+## Changing the data layer
+
+There are TWO implementations now, and a change to one is usually a change to
+both. `listMyListings` returning a field the Supabase client cannot produce is
+not a compile error — it is a runtime difference between environments, and the
+suites below only run the mock. When you add or change a method, check it against
+the mapping table in `supabase/README.md` and write the SQL half at the same
+time; migration `0003_read_models.sql` exists because four methods were specified
+against a schema that could not serve them, and nothing caught it until somebody
+sat down to write the queries.
+
+Validation belongs in `src/lib/data/validation.ts`, not in either client. SQL
+carries only the coarse constraints, and a `23514` reads
+`violates check constraint "listings_price_cents_check"` — so every field-level
+message the UI renders comes from application code in both backends. A second
+copy of a rule means the wording of a form changes when `DATA_BACKEND` flips.
+
+If you touch `mockClient.ts`, run `npm run verify:authz` before you hand off. It
+builds a throwaway store in the OS temp directory (never `data/db.json`), needs
+no `.env.local`, and asserts every authorization rule on this page — including
+that a forged `role` on an `Actor` is ignored, that promotion never demotes an
+admin, and that an admin cannot self-approve. It exits non-zero on any failure.
+
+If you touch a **page**, run `npm run verify:pages` as well. It builds its own
+throwaway store the same way, plants the states the seed deliberately lacks,
+starts a server against it and asserts on the rendered markup. `verify:authz`
+renders nothing, so it is structurally blind to an empty state collapsing, a
+cross-link pointing at a 404 or a demo-data note going missing — five such
+regressions once shipped green through `tsc`, `lint` and `verify:authz`
+together.
+
+## What is deliberately not here
+
+* **No hard delete of a listing, anywhere, by anyone.** That is a feature, not a
+  gap — see "Withdrawal is a soft delete" above. There is no DELETE policy on
+  `listings` in SQL for any role.
+* **No edit path for a `ListingRevision`.** The table is append-only; nothing in
+  the data layer updates or removes a row in it, and no client role holds
+  `INSERT` on it in SQL either — the trigger that writes it runs as
+  `javelin_privileged`, so a coach cannot suppress or rewrite the history of
+  their own offer.
+* No pagination. `listListings` returns everything, newest first. Fine for a POC
+  with six fixtures; add a cursor before it is not. `listReviewsForCoach` has
+  the same property and will need it sooner.
+* **No purchase path.** There is no `createOrder`, and the SQL grants no client
+  `INSERT` on `orders` — a client-supplied `price_cents_at_purchase` is not
+  something that should ever be insertable. Orders come from the seed. A real
+  checkout gets its own RPC.
+* **No review edit or delete in the interface.** SQL has admin-only
+  `reviews_update_admin` / `reviews_delete_admin` for moderation; authors get no
+  update path at all, for the same reason applicants get none on
+  `coach_applications` — an `UPDATE` grant would let them rewrite `order_id`,
+  `listing_id` or `price_epoch`, and pinning those for a self-update needs an
+  OLD-vs-NEW comparison, i.e. another guard trigger.
+* No session handling. Building an `Actor` from a cookie belongs to the auth
+  layer, not here.

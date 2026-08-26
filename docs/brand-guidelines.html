@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JavelinHub — Brand Guidelines v1.1</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@100;200;300;400;500;600;700;800;900&family=Newsreader:ital,wght@0,200..700;1,200..500&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0D1014;
+    --chalk:#E9ECE4;
+    --sheet:#F6F7F2;
+    --white:#FFFFFF;
+    --sector:#1B3AE0;
+    --turf:#1F4F33;
+    --foul:#B3261E;
+    --steel:#5A615A;
+    --rule:#CFD4C8;
+    --angle:-34deg;
+    --grid: rgba(13,16,20,0.055);
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    color:var(--ink);
+    font-family:'Newsreader',Georgia,serif;
+    font-weight:400;
+    font-size:17px;
+    line-height:1.6;
+    background-color:var(--sheet);
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size:34px 34px;
+  }
+  .disp{
+    font-family:'Barlow Condensed','Arial Narrow',sans-serif;
+    text-transform:uppercase;
+    line-height:0.86;
+    letter-spacing:0.005em;
+  }
+  .mono{font-family:'IBM Plex Mono',monospace;}
+
+  section{
+    max-width:1000px;
+    margin:0 auto;
+    padding:110px 44px;
+    position:relative;
+  }
+  section + section::before{
+    content:'';
+    position:absolute;
+    top:0; left:44px; right:44px;
+    height:1px;
+    background:var(--rule);
+  }
+  h2{
+    font-family:'Barlow Condensed','Arial Narrow',sans-serif;
+    text-transform:uppercase;
+    font-weight:900;
+    font-size:clamp(40px,6vw,76px);
+    line-height:0.88;
+    margin:0 0 34px 0;
+  }
+  h2 em{font-style:normal;font-weight:100;display:block;}
+  p{margin:0 0 18px 0;}
+  .lead{
+    font-size:20px;
+    max-width:620px;
+    font-weight:400;
+    color:#232821;
+  }
+  .eyebrow{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;
+    letter-spacing:0.22em;
+    text-transform:uppercase;
+    color:var(--sector);
+    display:flex;
+    align-items:center;
+    gap:12px;
+    margin-bottom:20px;
+  }
+  .eyebrow::before{
+    content:'';
+    width:24px;height:2px;
+    background:var(--sector);
+    transform:rotate(var(--angle));
+    flex:none;
+  }
+  .amend{
+    border-left:3px solid var(--foul);
+    background:rgba(179,38,30,0.045);
+    padding:14px 18px;
+    margin:26px 0;
+    font-size:15.5px;
+  }
+  .amend .lbl{
+    font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--foul);margin-bottom:7px;
+  }
+  .amend p{margin:0;}
+
+  /* ---------- COVER ---------- */
+  .cover{
+    min-height:100svh;
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+    overflow:hidden;
+  }
+  .cover .traj{
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    pointer-events:none;
+    z-index:0;
+  }
+  .cover-inner{position:relative;z-index:1;}
+  .kicker{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;
+    letter-spacing:0.24em;
+    color:var(--steel);
+    text-transform:uppercase;
+    margin-bottom:30px;
+  }
+  .lockup{
+    font-family:'Barlow Condensed','Arial Narrow',sans-serif;
+    text-transform:uppercase;
+    line-height:0.8;
+    font-size:clamp(72px,17vw,190px);
+  }
+  .lockup .a{font-weight:100;display:block;}
+  .lockup .b{font-weight:900;display:block;color:var(--ink);}
+  .cover .tagline{
+    font-family:'Newsreader',serif;
+    font-style:italic;
+    font-weight:300;
+    font-size:clamp(19px,2.4vw,25px);
+    max-width:540px;
+    margin-top:34px;
+    color:#232821;
+  }
+  .cover .toc{
+    margin-top:64px;
+    display:flex;
+    flex-wrap:wrap;
+    gap:26px;
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;
+    letter-spacing:0.12em;
+    color:var(--steel);
+    text-transform:uppercase;
+  }
+  .cover .toc a{color:var(--steel);text-decoration:none;border-bottom:1px solid var(--rule);padding-bottom:3px;}
+  .cover .toc a:hover{color:var(--sector);border-color:var(--sector);}
+
+  /* stagger */
+  .rise{opacity:0;transform:translateY(18px);animation:rise .9s cubic-bezier(.2,.7,.3,1) forwards;}
+  @keyframes rise{to{opacity:1;transform:none;}}
+  .d1{animation-delay:.12s}.d2{animation-delay:.26s}.d3{animation-delay:.40s}
+  .d4{animation-delay:.56s}.d5{animation-delay:.72s}
+  .draw{stroke-dasharray:1400;stroke-dashoffset:1400;animation:draw 2.4s cubic-bezier(.35,.05,.2,1) .3s forwards;}
+  @keyframes draw{to{stroke-dashoffset:0;}}
+  .pop{opacity:0;animation:pop .5s ease 2.3s forwards;}
+  @keyframes pop{to{opacity:1;}}
+
+  /* ---------- TRAITS ---------- */
+  .traits{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--rule);border:1px solid var(--rule);margin-top:48px;}
+  .traits > div{background:var(--sheet);padding:30px 26px;}
+  .traits .n{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--sector);letter-spacing:.14em;}
+  .traits h3{
+    font-family:'Barlow Condensed','Arial Narrow',sans-serif;
+    text-transform:uppercase;font-weight:700;font-size:34px;margin:10px 0 12px;line-height:0.9;
+  }
+  .traits p{font-size:15.5px;margin:0;color:#39403A;}
+
+  /* ---------- LOGO ---------- */
+  .logo-stage{
+    background:var(--white);
+    border:1px solid var(--rule);
+    padding:78px 40px;
+    display:flex;justify-content:center;align-items:center;
+    position:relative;
+  }
+  .logo-stage::after{
+    content:'CLEAR SPACE = HEIGHT OF THE MARK';
+    position:absolute;bottom:12px;right:16px;
+    font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;color:var(--steel);
+  }
+  .wordmark{display:flex;align-items:center;gap:14px;}
+  .wordmark .mk{width:78px;height:52px;color:var(--sector);flex:none;display:block;}
+  .wordmark .txt{
+    font-family:'Barlow Condensed','Arial Narrow',sans-serif;
+    text-transform:uppercase;font-size:60px;line-height:0.85;
+  }
+  .wordmark .txt .l{font-weight:100;}
+  .wordmark .txt .h{font-weight:900;}
+  .wordmark.small .mk{width:39px;height:26px;}
+  .wordmark.small .txt{font-size:29px;}
+  .wordmark.inv .txt{color:var(--sheet);}
+  .wordmark.inv .mk{color:var(--sheet);}
+
+  .stage-row{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:24px;}
+  .mini-stage{border:1px solid var(--rule);padding:36px;display:flex;align-items:center;justify-content:center;}
+  .mini-stage.dark{background:var(--ink);border-color:var(--ink);}
+  .rules{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;margin-top:36px;}
+  .rule-card{border-top:2px solid var(--ink);padding-top:14px;}
+  .rule-card .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--steel);margin-bottom:8px;}
+  .rule-card p{font-size:15px;margin:0;}
+  .dont-list{margin-top:34px;border-left:3px solid var(--sector);padding:4px 0 4px 20px;}
+  .dont-list .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.16em;color:var(--sector);text-transform:uppercase;margin-bottom:10px;}
+  .dont-list ul{margin:0;padding-left:18px;font-size:15.5px;}
+  .dont-list li{margin-bottom:6px;}
+
+  /* ---------- COLOR ---------- */
+  .swatches{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--rule);border:1px solid var(--rule);}
+  .sw{height:190px;padding:16px 14px;display:flex;flex-direction:column;justify-content:flex-end;}
+  .sw .nm{font-family:'Barlow Condensed','Arial Narrow',sans-serif;text-transform:uppercase;font-weight:700;font-size:20px;line-height:1;}
+  .sw .hx{font-family:'IBM Plex Mono',monospace;font-size:11px;margin-top:5px;opacity:.85;}
+  .sw .use{font-family:'IBM Plex Mono',monospace;font-size:10px;margin-top:9px;opacity:.7;letter-spacing:.06em;text-transform:uppercase;}
+  .sw .cr{font-family:'IBM Plex Mono',monospace;font-size:10px;margin-top:4px;opacity:.7;letter-spacing:.06em;}
+  .ratio{display:flex;height:34px;margin-top:34px;border:1px solid var(--rule);}
+  .ratio span{display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.1em;}
+  .color-notes{display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px;margin-top:22px;font-size:15px;}
+  .color-notes .h{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--steel);margin-bottom:7px;}
+
+  /* ---------- TYPE ---------- */
+  .type-spec{border-top:1px solid var(--rule);padding:30px 0;display:grid;grid-template-columns:1fr 210px;gap:30px;align-items:end;}
+  .type-spec:last-of-type{border-bottom:1px solid var(--rule);}
+  .type-spec .meta{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--steel);line-height:1.9;text-align:right;}
+  .s-display{font-family:'Barlow Condensed','Arial Narrow',sans-serif;text-transform:uppercase;font-size:clamp(44px,8vw,92px);line-height:0.82;}
+  .s-display .thin{font-weight:100;}
+  .s-display .fat{font-weight:900;}
+  .s-body{font-family:'Newsreader',serif;font-size:22px;line-height:1.5;font-weight:400;}
+  .s-mono{font-family:'IBM Plex Mono',monospace;font-size:20px;font-weight:500;}
+  .scale{display:flex;gap:26px;flex-wrap:wrap;margin-top:34px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--steel);}
+  .scale b{color:var(--ink);font-weight:500;}
+
+  /* ---------- MOTIF ---------- */
+  .motifs{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--rule);border:1px solid var(--rule);margin-top:14px;}
+  .motifs > div{background:var(--white);padding:30px 26px;min-height:180px;}
+  .motifs .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--steel);margin-bottom:22px;}
+  .marker-list{list-style:none;padding:0;margin:0;font-family:'IBM Plex Mono',monospace;font-size:13px;}
+  .marker-list li{display:flex;align-items:center;gap:12px;margin-bottom:12px;}
+  .marker-list i{width:5px;height:16px;background:var(--sector);transform:rotate(var(--angle));display:block;flex:none;}
+  .track{height:5px;background:var(--rule);position:relative;}
+  .track b{display:block;height:5px;background:var(--sector);width:64%;}
+  .div-demo{display:flex;align-items:center;gap:14px;}
+  .div-demo .bar{width:9px;height:38px;background:var(--sector);transform:rotate(var(--angle));}
+
+  /* ---------- UI ---------- */
+  .ui-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:30px;align-items:start;}
+  .btn{
+    font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.1em;text-transform:uppercase;
+    padding:14px 26px;border:1px solid transparent;cursor:pointer;transition:.18s ease;
+    min-height:44px;border-radius:0;
+  }
+  .btn-primary{background:var(--sector);color:#fff;}
+  .btn-primary:hover{background:var(--ink);}
+  .btn-ghost{background:transparent;color:var(--ink);border-color:var(--ink);}
+  .btn-ghost:hover{background:var(--ink);color:var(--sheet);}
+  .chip{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;padding:5px 10px;border:1px solid var(--turf);color:var(--turf);}
+  .chip.steel{border-color:var(--steel);color:var(--steel);}
+  .chip.foul{border-color:var(--foul);color:var(--foul);}
+  .card{background:var(--white);border:1px solid var(--rule);padding:26px;}
+  .card .top{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;}
+  .card h4{font-family:'Barlow Condensed','Arial Narrow',sans-serif;text-transform:uppercase;font-weight:700;font-size:32px;margin:0;line-height:0.9;}
+  .card .role{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--steel);text-transform:uppercase;letter-spacing:.08em;margin-top:6px;}
+  .card .pb{font-family:'IBM Plex Mono',monospace;font-size:42px;color:var(--ink);margin:24px 0 0;line-height:1;}
+  .card .pb-l{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--steel);text-transform:uppercase;letter-spacing:.14em;margin-top:6px;}
+  .card .foot{margin-top:24px;border-top:1px solid var(--rule);padding-top:16px;display:flex;justify-content:space-between;align-items:center;gap:14px;}
+  .card .price{font-family:'IBM Plex Mono',monospace;font-size:12px;}
+  .field{margin-top:26px;}
+  .field label{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--steel);display:block;margin-bottom:8px;}
+  .field .box{border:1px solid var(--rule);background:var(--white);padding:12px 14px;font-family:'IBM Plex Mono',monospace;font-size:16px;color:var(--steel);min-height:44px;}
+
+  .sysrules{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--rule);border:1px solid var(--rule);margin-top:40px;}
+  .sysrules > div{background:var(--sheet);padding:24px 22px;}
+  .sysrules .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--sector);margin-bottom:9px;}
+  .sysrules .val{font-family:'Barlow Condensed','Arial Narrow',sans-serif;text-transform:uppercase;font-weight:900;font-size:30px;line-height:0.9;margin-bottom:9px;}
+  .sysrules p{font-size:14.5px;margin:0;color:#39403A;}
+
+  /* ---------- VOICE ---------- */
+  .voice{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule);border:1px solid var(--rule);margin-bottom:20px;}
+  .voice > div{background:var(--sheet);padding:24px 26px;}
+  .voice .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:10px;}
+  .voice .say .lbl{color:var(--turf);}
+  .voice .avoid .lbl{color:var(--steel);}
+  .voice p{margin:0;font-size:17px;}
+  .voice .avoid p{color:var(--steel);}
+  .ctx{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--steel);margin:30px 0 10px;}
+
+  .changelog{margin-top:44px;border-top:2px solid var(--ink);padding-top:18px;}
+  .changelog .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--steel);margin-bottom:14px;}
+  .changelog ol{margin:0;padding-left:20px;font-size:15.5px;}
+  .changelog li{margin-bottom:9px;}
+
+  footer{
+    background:var(--ink);color:var(--chalk);
+    padding:70px 44px;text-align:center;
+  }
+  footer .wordmark{justify-content:center;}
+  footer .fine{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.2em;color:#98A096;margin-top:26px;text-transform:uppercase;}
+
+  @media (max-width:820px){
+    section{padding:70px 22px;}
+    section + section::before{left:22px;right:22px;}
+    .traits,.rules,.color-notes,.motifs,.ui-grid,.voice,.stage-row,.sysrules{grid-template-columns:1fr;}
+    .swatches{grid-template-columns:repeat(2,1fr);}
+    .type-spec{grid-template-columns:1fr;align-items:start;}
+    .type-spec .meta{text-align:left;}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .rise,.pop{opacity:1;transform:none;animation:none;}
+    .draw{stroke-dashoffset:0;animation:none;}
+    html{scroll-behavior:auto;}
+  }
+  a:focus-visible,button:focus-visible{outline:2px solid var(--sector);outline-offset:3px;}
+</style>
+</head>
+<body>
+
+<!-- The mark, defined once. Wide for the lockup, square for the icon. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <g id="jh-wide" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 40 L62 4.93"/>
+    <circle cx="44" cy="11" r="5" fill="currentColor" stroke="none"/>
+    <path d="M45 17 L46.5 29"/>
+    <path d="M45 17.5 L50 15 L54 10.32"/>
+    <path d="M45 18 L36 21"/>
+    <path d="M46.5 29 L38 34 L33 43"/>
+    <path d="M46.5 29 L53 35 L58 44"/>
+  </g>
+  <g id="jh-icon" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 25.1 L37 8.91"/>
+    <circle cx="24" cy="11" r="5" fill="currentColor" stroke="none"/>
+    <path d="M25 17 L26.5 29"/>
+    <path d="M25 17.5 L30 15 L34 10.32"/>
+    <path d="M25 18 L16 21"/>
+    <path d="M26.5 29 L18 34 L13 43"/>
+    <path d="M26.5 29 L33 35 L38 44"/>
+  </g>
+</defs></svg>
+
+<!-- ============ COVER ============ -->
+<section class="cover">
+  <svg class="traj" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+    <path class="draw" d="M 60 640 C 300 60, 700 40, 980 430" fill="none" stroke="#1B3AE0" stroke-width="2" opacity="0.55"/>
+    <line class="pop" x1="60" y1="640" x2="160" y2="573" stroke="#0D1014" stroke-width="1.5" opacity="0.35"/>
+    <circle class="pop" cx="60" cy="640" r="5" fill="#1B3AE0"/>
+    <circle class="pop" cx="980" cy="430" r="5" fill="#1F4F33"/>
+    <text class="pop mono" x="176" y="566" font-size="13" fill="#5A615A" font-family="IBM Plex Mono, monospace">34°</text>
+  </svg>
+
+  <div class="cover-inner">
+    <div class="kicker rise d1">Brand Guidelines · Version 1.1 · August 2026</div>
+    <div class="lockup">
+      <span class="a rise d2">Javelin</span>
+      <span class="b rise d3">Hub</span>
+    </div>
+    <p class="tagline rise d4">Where throwers find the coach, the plan, and the second pair of eyes on their run-up.</p>
+    <nav class="toc rise d5">
+      <a href="#foundation">01 / Foundation</a>
+      <a href="#mark">02 / Mark</a>
+      <a href="#color">03 / Color</a>
+      <a href="#type">04 / Type</a>
+      <a href="#motif">05 / Motif</a>
+      <a href="#ui">06 / Interface</a>
+      <a href="#voice">07 / Voice</a>
+      <a href="#changes">08 / Changes</a>
+    </nav>
+  </div>
+</section>
+
+<!-- ============ FOUNDATION ============ -->
+<section id="foundation">
+  <div class="eyebrow">01 — Foundation</div>
+  <h2><em>What we're</em>Building</h2>
+  <p class="lead">Javelin is a small, deeply technical sport. Throwers train in isolation, coaching is geographically scarce, and useful feedback on a run-up is almost impossible to get. JavelinHub connects throwers to the people who can actually help — session bookings, structured training blocks, and frame-by-frame video review.</p>
+  <p class="lead">The brand should feel like a coach's notebook, not a storefront. Measured, technical, quietly confident. Every design decision should pass one test: would this look out of place written in pencil beside a set of throw distances?</p>
+
+  <div class="traits">
+    <div>
+      <div class="n">01</div>
+      <h3>Measured</h3>
+      <p>We speak in numbers — meters, degrees, step counts, session lengths. Specificity is what credibility looks like in a technical sport.</p>
+    </div>
+    <div>
+      <div class="n">02</div>
+      <h3>Unadorned</h3>
+      <p>No hype reels, no stadium pyrotechnics. Progress in throwing comes from repetition and correction. The interface reflects that discipline.</p>
+    </div>
+    <div>
+      <div class="n">03</div>
+      <h3>On your side</h3>
+      <p>Direct like a good coach — honest about what needs work, never patronising, never selling you a dream instead of a plan.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ MARK ============ -->
+<section id="mark">
+  <div class="eyebrow">02 — The Mark</div>
+  <h2><em>One name,</em>Two weights</h2>
+  <p class="lead">The lockup sets <strong>JAVELIN</strong> at hairline weight against <strong>HUB</strong> at maximum weight — the visual equivalent of the run-up and the release. Beside it stands the thrower, drawn in one continuous line weight, the javelin held across the body at 34°: the angle the event is decided by.</p>
+  <p class="lead">The figure carries the mark and the shaft carries the angle. Everything else in the system is a rule line or a piece of type.</p>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — the mark is two drawings, and that is not a style choice</div>
+    <p>A javelin rises <span class="mono">0.559 ×</span> its own length at 34°. A shaft long enough to read as a javelin therefore needs more width than a square gives it: at full length it wants 52 units of width against 35 of rise, so a square frame holding a full-height athlete caps the shaft at <strong>17.9 units</strong> — a stub. <strong>The primary mark is landscape, minimum 1.36:1.</strong> The square icon is a separate drawing with the shaft deliberately cropped, for favicons and app icons only. Never squash the wide mark into a square; redraw it as the icon or use the icon file.</p>
+  </div>
+
+  <div class="logo-stage">
+    <div class="wordmark">
+      <svg class="mk" viewBox="0 0 72 48" aria-hidden="true"><use href="#jh-wide"/></svg>
+      <span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span>
+    </div>
+  </div>
+
+  <div class="stage-row">
+    <div class="mini-stage">
+      <div class="wordmark small">
+        <svg class="mk" viewBox="0 0 72 48" aria-hidden="true"><use href="#jh-wide"/></svg>
+        <span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span>
+      </div>
+    </div>
+    <div class="mini-stage dark">
+      <div class="wordmark small inv">
+        <svg class="mk" viewBox="0 0 72 48" aria-hidden="true"><use href="#jh-wide"/></svg>
+        <span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="rules">
+    <div class="rule-card">
+      <div class="lbl">Clear space</div>
+      <p>Leave clear space on all four sides equal to the full height of the mark. Nothing crosses it — not navigation, not imagery, not a badge. The javelin tip needs this most: it is the part that reads as broken when something clips it.</p>
+      <p style="margin-top:9px;"><strong>Persistent chrome is exempt</strong>, and takes half: the app header and footer keep <span class="mono">0.5×</span> the mark height. At full cordon a 30px mark forces a 90px sticky header — <strong>11% of a phone screen</strong>, permanently, on every route. The full rule governs the mark placed <em>in</em> something: a page, a card, a share image, print.</p>
+    </div>
+    <div class="rule-card">
+      <div class="lbl">Minimum size</div>
+      <p>The wide mark never goes below 26px tall; under that the figure's limbs merge. Below it, switch to the square icon, which holds down to 16px.</p>
+    </div>
+    <div class="rule-card">
+      <div class="lbl">On dark</div>
+      <p>On Ink, the whole mark flips to Chalk — figure and shaft together, they are one drawing. It stays Sector Blue only on White or Sheet.</p>
+    </div>
+  </div>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — accessible name</div>
+    <p>The lockup is real text, not an image. The bar is decorative and must be hidden from assistive technology; the two words carry the accessible name, which is always the single string <strong>JavelinHub</strong> — never "Javelin Hub", and never split across two separately labelled elements.</p>
+  </div>
+
+  <div class="dont-list">
+    <div class="lbl">Never</div>
+    <ul>
+      <li>Change the javelin's angle. It is 34°, always, everywhere.</li>
+      <li>Set both words at the same weight, or add a space between them.</li>
+      <li>Squash the wide mark into a square — use the icon drawing instead.</li>
+      <li>Fill the figure, add a face, or give it a uniform. It is a line, not a character.</li>
+      <li>Outline, emboss, gradient-fill, or place the lockup over busy footage.</li>
+      <li>Recolor the mark to Turf Green or Foul Red — those colours carry meaning elsewhere.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ COLOR ============ -->
+<section id="color">
+  <div class="eyebrow">03 — Color</div>
+  <h2><em>Cool paper,</em>One signal</h2>
+  <p class="lead" style="margin-bottom:38px;">The palette is deliberately near-monochrome. Sector Blue is the only colour that draws the eye, so it is reserved for two things: the mark, and the action you want the thrower to take next.</p>
+
+  <div class="swatches">
+    <div class="sw" style="background:#0D1014;color:#E9ECE4;">
+      <div class="nm">Ink</div><div class="hx">#0D1014</div><div class="use">Text · dark panels</div><div class="cr">17.71:1 on Sheet</div>
+    </div>
+    <div class="sw" style="background:#F6F7F2;color:#0D1014;">
+      <div class="nm">Sheet</div><div class="hx">#F6F7F2</div><div class="use">Page ground</div><div class="cr">base</div>
+    </div>
+    <div class="sw" style="background:#E9ECE4;color:#0D1014;">
+      <div class="nm">Chalk</div><div class="hx">#E9ECE4</div><div class="use">Panels · fills</div><div class="cr">15.97:1 vs Ink</div>
+    </div>
+    <div class="sw" style="background:#FFFFFF;color:#0D1014;">
+      <div class="nm">White</div><div class="hx">#FFFFFF</div><div class="use">Cards · inputs</div><div class="cr">raised surface</div>
+    </div>
+    <div class="sw" style="background:#1B3AE0;color:#fff;">
+      <div class="nm">Sector Blue</div><div class="hx">#1B3AE0</div><div class="use">Action · mark</div><div class="cr">7.15:1 on Sheet</div>
+    </div>
+    <div class="sw" style="background:#1F4F33;color:#E9ECE4;">
+      <div class="nm">Turf Green</div><div class="hx">#1F4F33</div><div class="use">Verified · done</div><div class="cr">8.8:1 on Sheet</div>
+    </div>
+    <div class="sw" style="background:#B3261E;color:#fff;">
+      <div class="nm">Foul Red</div><div class="hx">#B3261E</div><div class="use">Error · destructive</div><div class="cr">6.07:1 on Sheet</div>
+    </div>
+    <div class="sw" style="background:#5A615A;color:#fff;">
+      <div class="nm">Steel</div><div class="hx">#5A615A</div><div class="use">Meta · disabled</div><div class="cr">5.9:1 on Sheet</div>
+    </div>
+  </div>
+
+  <div class="ratio">
+    <span style="flex:68;background:#F6F7F2;color:#0D1014;">68 · SHEET + CHALK + WHITE</span>
+    <span style="flex:22;background:#0D1014;color:#E9ECE4;">22 · INK</span>
+    <span style="flex:7;background:#1B3AE0;color:#fff;">7 · BLUE</span>
+    <span style="flex:3;background:#1F4F33;color:#fff;">3</span>
+  </div>
+
+  <div class="color-notes">
+    <div>
+      <div class="h">The ground</div>
+      <p>Sheet, Chalk and White hold almost everything. This is a video- and text-heavy product; empty space is a feature, not a gap to fill.</p>
+    </div>
+    <div>
+      <div class="h">The signal</div>
+      <p>One Sector Blue element per screen <em>in the content area</em>. The mark and persistent chrome do not count against it. If a page body has two blue buttons, one of them isn't the primary action.</p>
+    </div>
+    <div>
+      <div class="h">The verdicts</div>
+      <p>Turf Green never initiates anything — it only confirms. Foul Red only reports: a failed payment, a rejected application, a destructive button.</p>
+    </div>
+  </div>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — the product footer is light, and Ink chrome is a trap</div>
+    <p>This document's own footer is Ink. <strong>The product's is not</strong>, and the difference is arithmetic rather than preference. On Ink, the Sector Blue focus ring measures <span class="mono">2.48:1</span> — under WCAG 1.4.11's 3:1 floor for a non-text indicator — and Steel meta text measures <span class="mono">2.99:1</span>, under this brand's own 4.5:1. A page footer holds links and meta text; this document's footer holds neither, which is the only reason it gets away with it.</p>
+    <p style="margin-top:10px;">An Ink footer in the app cannot be built without breaking one of two rules already written here: section 06's "the focus ring is never restyled per component", or the contrast floor above. <strong>Use Ink for surfaces that carry neither a focus target nor Steel text</strong> — the app icon, an inverted lockup, a display panel. Not for interactive chrome.</p>
+  </div>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — light only</div>
+    <p>JavelinHub ships one theme. There is no dark mode: Ink is an accent surface for the footer, the app icon and inverted lockups, not an alternate palette. Any surface that inverts does so because the design calls for it on that specific element, never because of a system preference.</p>
+  </div>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — contrast floor</div>
+    <p>Every <strong>enabled</strong> foreground/background pair in the product clears <strong>4.5:1</strong>. Steel was darkened from <span class="mono">#6D746C</span> (4.47:1 on Sheet — a failure, and it carried every label, eyebrow and caption in v1.0) to <span class="mono">#5A615A</span>. Steel is the lightest tone that may carry words; nothing lighter is a text colour.</p>
+    <p style="margin-top:10px;">The one carve-out is the one WCAG itself makes: <strong>disabled controls are exempt</strong> (SC 1.4.3 excludes inactive components). A dimmed button may fall below the floor — it must still be unmistakably inactive, and its state must never be carried by contrast alone.</p>
+  </div>
+</section>
+
+<!-- ============ TYPE ============ -->
+<section id="type">
+  <div class="eyebrow">04 — Typography</div>
+  <h2><em>Signage meets</em>Notebook</h2>
+
+  <div class="type-spec">
+    <div class="s-display"><span class="thin">Release</span> <span class="fat">Angle</span></div>
+    <div class="meta">BARLOW CONDENSED<br>100 / 700 / 900<br>—<br>Headlines, lockup,<br>card titles, nav</div>
+  </div>
+  <div class="type-spec">
+    <div class="s-body">The block matters more than the throw. Six weeks of consistent work beats one good afternoon.</div>
+    <div class="meta">NEWSREADER<br>variable 200–700 + italic<br>—<br>Body copy, coach bios,<br>plan descriptions</div>
+  </div>
+  <div class="type-spec">
+    <div class="s-mono">68.42m · 34° · 5-step approach</div>
+    <div class="meta">IBM PLEX MONO<br>400 / 500 / 600<br>—<br>Distances, timestamps,<br>labels, buttons, tags</div>
+  </div>
+
+  <p style="margin-top:34px;max-width:640px;">Three faces, three jobs, no overlap. Barlow Condensed is the condensed signage lettering — used at its extremes only, never for paragraphs. Newsreader carries the reading: it makes a coach's bio feel written rather than generated. Plex Mono is reserved for anything measured, so a distance never gets confused with prose.</p>
+
+  <div class="scale">
+    <span><b>Display</b> 92 / 60 / 34 / 22</span>
+    <span><b>Body</b> 20 / 17 / 15</span>
+    <span><b>Mono</b> 16 / 13 / 12 / 11 / 10</span>
+    <span><b>Tracking</b> display +0.005em</span>
+  </div>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — mono tracking is per role, not one value</div>
+    <p>Mono tracking varies by what the type is doing, and the specimens above are the spec: <strong>form labels +0.14em</strong>; <strong>buttons and chips +0.1em</strong>; <strong>section labels and eyebrows +0.16em to +0.22em</strong>, which is the widest the system goes and is reserved for type that titles a block rather than sitting inside one; column heads and swatch captions +0.06em. A single flat figure was published in an earlier draft and matched no component on this page. Likewise the mono scale carries a <strong>12px</strong> step — what buttons and prices are set in — which that draft's summary line omitted.</p>
+  </div>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — family name</div>
+    <p>The display face is <strong>Barlow Condensed</strong>, weights <span class="mono">100 / 700 / 900</span>. It replaced Big Shoulders, which two successive problems made unusable.</p>
+    <p style="margin-top:10px;">First, <span class="mono">Big Shoulders Display</span> — the family v1.0 specified — has been <strong>retired</strong>; Google consolidated it into <span class="mono">Big Shoulders</span>, and requesting the old name falls back silently to Arial Narrow, which is why v1.0 never rendered as drawn for anyone.</p>
+    <p style="margin-top:10px;">Second, the consolidated name could be fetched but never <em>measured</em>. Next's font catalogue knows only the new name while its font-metrics table still keys the old one, so no metric-matched fallback could be generated and every heading would visibly reflow when the face swapped in. <strong>No spelling satisfied both databases.</strong> Barlow Condensed is present in both, carries a true 100 and 900 — so the two-weight lockup survives — and is portable in a way the alternatives considered were not: Hammersmith One ships a single weight, and Bahnschrift is a Windows-only system font that cannot be licensed for the web at all.</p>
+  </div>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — mono floor is 10px, inputs are 16px</div>
+    <p>10px is the smallest type in the system; nothing renders below it. The one exception runs the other way: <strong>text the user types is always 16px</strong>. iOS Safari zooms the viewport whenever a focused field is under 16px, which breaks a 375px layout outright. Labels stay 10px, values are 16px.</p>
+  </div>
+</section>
+
+<!-- ============ MOTIF ============ -->
+<section id="motif">
+  <div class="eyebrow">05 — Signature Motif</div>
+  <h2><em>The</em>34° line</h2>
+  <p class="lead">The motif is the javelin lifted out of the mark and used on its own — the same angle, the same weight, without the thrower. It is the only decorative element in the system, and it is never purely decorative. It always marks something: a section boundary, a list item, progress through a training block. If it isn't carrying information, remove it.</p>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — the line is now derived, not primary</div>
+    <p>In the first draft the angled bar <em>was</em> the identity, and this section was its main home. Now the thrower is the mark and the line is what remains when the figure is taken away — a detail of the logo rather than a rival to it. That subordination is the point: at small sizes and in running text you want the angle, not a person. Use the figure where the brand is being <em>stated</em>, the line where something is being <em>marked</em>.</p>
+  </div>
+
+  <div class="motifs">
+    <div>
+      <div class="lbl">Section divider</div>
+      <div class="div-demo">
+        <span class="bar"></span>
+        <span class="mono" style="font-size:13px;">Training plans</span>
+      </div>
+    </div>
+    <div>
+      <div class="lbl">List marker</div>
+      <ul class="marker-list">
+        <li><i></i> Upload your throw</li>
+        <li><i></i> Get a coach's read</li>
+        <li><i></i> Adjust and repeat</li>
+      </ul>
+    </div>
+    <div>
+      <div class="lbl">Progress</div>
+      <div class="track"><b></b></div>
+      <div class="mono" style="font-size:11px;color:var(--steel);margin-top:12px;">WEEK 4 OF 6 · SPRING BLOCK</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ UI ============ -->
+<section id="ui">
+  <div class="eyebrow">06 — Interface</div>
+  <h2><em>Components</em>In use</h2>
+
+  <div class="ui-grid">
+    <div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;">
+        <button class="btn btn-primary">Book a session</button>
+        <button class="btn btn-ghost">See full profile</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:26px;flex-wrap:wrap;">
+        <span class="chip">Verified coach</span>
+        <span class="chip steel">2 slots left</span>
+        <span class="chip foul">Payment failed</span>
+      </div>
+      <div class="field">
+        <label>Throw distance</label>
+        <div class="box">68.42</div>
+      </div>
+      <p style="margin-top:26px;font-size:15px;color:#39403A;">Buttons and labels are set in Plex Mono at small sizes with wide tracking — they read as instruments, not marketing. Corners stay square throughout; nothing in this system is rounded.</p>
+    </div>
+
+    <div class="card">
+      <div class="top">
+        <div>
+          <h4>M. Solberg</h4>
+          <div class="role">Javelin · Grip &amp; release</div>
+        </div>
+        <span class="chip">Verified</span>
+      </div>
+      <div class="pb">78.24<span style="font-size:20px;">m</span></div>
+      <div class="pb-l">Personal best · 2023</div>
+      <div class="foot">
+        <span class="price">$60 · 45 MIN</span>
+        <button class="btn btn-primary" style="padding:12px 18px;">Book</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sysrules">
+    <div>
+      <div class="lbl">Radius</div>
+      <div class="val">0px</div>
+      <p>Every corner in the product is square — buttons, cards, inputs, chips, avatars, video frames, the focus ring. There is no radius token because there is no radius.</p>
+    </div>
+    <div>
+      <div class="lbl">Elevation</div>
+      <div class="val">None</div>
+      <p>No shadows, ever. Depth is expressed with a 1px rule line and a change of ground — White on Sheet reads as raised without a blur.</p>
+    </div>
+    <div>
+      <div class="lbl">Rule line</div>
+      <div class="val">1px</div>
+      <p><span class="mono">#CFD4C8</span>. One weight, one colour. The only heavier line is the 2px Ink rule that opens a rule-card or a section footer.</p>
+    </div>
+    <div>
+      <div class="lbl">Spacing</div>
+      <div class="val">34 / 8</div>
+      <p>Layout gutters and section rhythm follow the 34px background grid. Everything inside a component steps in multiples of 8.</p>
+    </div>
+    <div>
+      <div class="lbl">Touch target</div>
+      <div class="val">44px</div>
+      <p>Minimum 44×44 for anything tappable, including small buttons inside cards. Keyboard-only affordances and links inside a sentence are the two exceptions.</p>
+    </div>
+    <div>
+      <div class="lbl">Focus</div>
+      <div class="val">2px</div>
+      <p>A 2px Sector Blue outline at 3px offset, square, on <span class="mono">:focus-visible</span>. It is never removed and never restyled per component.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ VOICE ============ -->
+<section id="voice">
+  <div class="eyebrow">07 — Voice</div>
+  <h2><em>Write like a</em>Coach</h2>
+  <p class="lead">Say what happened and what to do next. No exclamation marks, no emoji, no marketplace vocabulary — nothing here is a solution, a journey, or an opportunity to unlock your potential.</p>
+
+  <div class="ctx">Empty state</div>
+  <div class="voice">
+    <div class="say"><div class="lbl">Write</div><p>No throws logged yet. Upload a video and a coach will break down your run-up.</p></div>
+    <div class="avoid"><div class="lbl">Not this</div><p>Looks a little empty in here! Ready to start your journey? 🚀</p></div>
+  </div>
+
+  <div class="ctx">Error</div>
+  <div class="voice">
+    <div class="say"><div class="lbl">Write</div><p>Payment didn't go through. Check the card details and try again.</p></div>
+    <div class="avoid"><div class="lbl">Not this</div><p>Oops! Something went wrong on our end. We're really sorry about that!</p></div>
+  </div>
+
+  <div class="ctx">Confirmation</div>
+  <div class="voice">
+    <div class="say"><div class="lbl">Write</div><p>Video received. Your review lands within 48 hours.</p></div>
+    <div class="avoid"><div class="lbl">Not this</div><p>Your submission has been successfully processed.</p></div>
+  </div>
+
+  <div class="amend">
+    <div class="lbl">v1.1 — units and numbers</div>
+    <p>Distances are meters to two decimals with a bare <span class="mono">m</span> (<span class="mono">68.42m</span>). Angles are whole degrees. Money is <strong>US dollars</strong>, symbol first, two decimals in prose, never <span class="mono">60$</span> and never <span class="mono">USD 60</span>. Session length is minutes (<span class="mono">45 MIN</span>). Dates are <span class="mono">18 Aug 2026</span>. Every number in the product is set in Plex Mono.</p>
+  </div>
+</section>
+
+<!-- ============ CHANGES ============ -->
+<section id="changes">
+  <div class="eyebrow">08 — Revision</div>
+  <h2><em>What changed in</em>Version 1.1</h2>
+  <p class="lead">v1.0 was written as a design document. v1.1 is what survived contact with an accessible, shipping implementation — nine amendments, each marked in red where it appears above.</p>
+
+  <div class="changelog">
+    <div class="lbl">v1.0 → v1.1</div>
+    <ol>
+      <li><strong>Steel darkened</strong> from <span class="mono">#6D746C</span> to <span class="mono">#5A615A</span>. The original measured 4.47:1 on Sheet and failed WCAG AA everywhere it was used — which was every label, eyebrow and caption in the system.</li>
+      <li><strong>Foul Red added</strong> (<span class="mono">#B3261E</span>). v1.0 had no error colour at all, while its own Voice section specified a failed-payment message. Turf Green confirms; nothing reported failure.</li>
+      <li><strong>White promoted to a named token.</strong> It was already carrying cards, inputs and stages without appearing in the palette.</li>
+      <li><strong>The one-blue rule scoped to the content area.</strong> As written it contradicted itself: blue was reserved for "the mark and the action", which is two on every screen that has a header. The mark and chrome no longer count.</li>
+      <li><strong>The display face moved to Barlow Condensed.</strong> Big Shoulders Display is retired, and its replacement could be fetched but not measured — see section 04. Barlow keeps the two-weight lockup and gets a proper metric-matched fallback.</li>
+      <li><strong>Input text raised to 16px.</strong> The v1.0 mock set fields at 13px, which makes iOS Safari zoom the viewport on focus and breaks a 375px layout. Mono floor set at 10px, and the in-card Book button raised to the 44px target.</li>
+      <li><strong>System rules made explicit</strong> — radius, elevation, rule weight, spacing, touch target, focus. v1.0 stated "corners stay square" in a body sentence and left the rest to inference.</li>
+      <li><strong>Light-only declared.</strong> There is no dark theme; Ink is an accent surface, not an alternate palette.</li>
+      <li><strong>Units and currency pinned</strong> to meters, whole degrees, minutes and US dollars.</li>
+      <li><strong>The mark is now a thrower, not a bar.</strong> The figure carries the identity; the 34° line is what is left when you take the figure away, and it keeps the divider, list-marker and progress roles. The mark exists as two drawings — a landscape primary and a square icon — because at 34° a full-length shaft cannot share a square frame with a full-height athlete.</li>
+    </ol>
+
+    <div class="lbl" style="margin-top:28px;">Corrections applied after the first implementation review</div>
+    <ol start="10">
+      <li><strong>Two contrast figures were miscalculated</strong> and are corrected above: Ink on Sheet is <span class="mono">17.71:1</span>, not 15.3; Chalk against Ink is <span class="mono">15.97:1</span>, not 14.3. Both understated the truth, so nothing built against them was at risk — but a document claiming to be what survived an accessible implementation has to have recomputed its own numbers. The other five figures verified exact.</li>
+      <li><strong>The contrast floor gained the WCAG disabled-control carve-out.</strong> As first written it was an unqualified absolute that the product's own disabled Buy control does not meet — correctly, since SC 1.4.3 exempts inactive components.</li>
+      <li><strong>The mono scale and tracking now match the specimens on this page.</strong> The summary line omitted the 12px step that buttons and prices actually use, and flattened three different tracking values into one.</li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  <div class="wordmark small inv">
+    <svg class="mk" viewBox="0 0 72 48" aria-hidden="true"><use href="#jh-wide"/></svg>
+    <span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span>
+  </div>
+  <div class="fine">Brand Guidelines v1.1 · Web · Video review · Email</div>
+</footer>
+
+</body>
+</html>

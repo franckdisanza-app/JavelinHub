@@ -1,0 +1,338 @@
+@import "tailwindcss";
+
+/*
+ * Documentation is not markup. Tailwind v4 auto-scans the whole repo, so prose
+ * in PROGRESS.md that *names* a utility class (e.g. when recording a past
+ * defect) would otherwise be compiled into the real stylesheet. That once put a
+ * dead `focus-visible:outline-none` rule in the bundle and cost a reviewer an
+ * investigation to prove it was unreachable.
+ *
+ * Markdown was only the first offender. Auditing the emitted bundle against
+ * real call sites turned up two more rules that no `src/` grep could explain:
+ *
+ *   - `.collapse { visibility: collapse }`. The source is the ordinary English
+ *     words "collapse" and "collapses" in the prose of
+ *     supabase/migrations/0002_rls.sql (that file contains no `border-collapse`
+ *     and no markup at all). The `supabase/**` line below is what removes it,
+ *     verified by compiling with and without that line: `.collapse` returns the
+ *     moment it is dropped.
+ *   - `.ring`, which emits a `box-shadow` — inside a product whose brand says
+ *     "No shadows, ever". The standing source is prose in PROGRESS.md, and the
+ *     Markdown exclusion below is what suppresses it. Do not narrow that line.
+ *     (Its glob cannot be written in this comment: the pattern contains the
+ *     two characters that end a CSS comment, which is a trap worth knowing.)
+ *
+ * The `.ring` sighting cost three separate wrong attributions before it was
+ * pinned down, and the reason is worth keeping: **the dev server's stylesheet
+ * is incremental and retains rules whose source has already been edited away.**
+ * A reviewer reading the served bundle saw `.ring`, and the candidate that
+ * originally produced it — a `.tsx` comment written mid-phase and reworded
+ * later the same day — no longer existed anywhere by the time anyone looked.
+ * Never attribute an emitted rule from the dev bundle. Compile from scratch.
+ *
+ * The general hazard that episode exposed is real and permanent, and this file
+ * cannot fix it: **a comment in a scanned `.tsx` is every bit as compilable as
+ * prose in a `.md`, and no `@source` rule can ever exclude the components
+ * themselves.** A live example sits in input.tsx, whose line-21 comment
+ * contains the bare word "outline" and duly emits `.outline`. Name a utility in
+ * a component comment and you ship it.
+ *
+ * Comments in *this* file are exempt, which is why the paragraphs above can
+ * name a class without conjuring it: Tailwind does not scan the stylesheet it
+ * is compiling. Both halves were confirmed by probe — a token added to a `.tsx`
+ * comment compiled, the same token added to a comment here did not.
+ *
+ * `docs/**` currently emits nothing, and is excluded as insurance rather than
+ * as a fix: that directory *is* scanned — a probe file placed there compiled
+ * `.shadow-2xl` into this bundle until the line below was added — so the next
+ * spec sheet that quotes a class name would otherwise ship it. Both excluded
+ * directories hold prose and schema, never markup this app renders; anything
+ * they appear to "use" is a false positive by construction.
+ */
+@source not "../../**/*.md";
+@source not "../../docs/**";
+@source not "../../supabase/**";
+
+/* ---------------------------------------------------------------------------
+ * Design tokens — JavelinHub brand guidelines v1.1.
+ *
+ * Two layers, on purpose:
+ *
+ *   1. `:root` holds the *palette* — the eight named colours from section 03 of
+ *      docs/brand-guidelines.html, plus the rule line from section 06. These
+ *      nine hexes are the only hexes in the application. Nothing outside this
+ *      block may write a colour literal.
+ *   2. `@theme inline` maps those palette values onto *semantic* names
+ *      (`surface`, `ink`, `line`, `brand`, …) which is what Tailwind turns into
+ *      utilities. Components write `bg-surface text-ink`; they never name a
+ *      palette colour and never write a hex. Re-pointing a role at a different
+ *      brand colour is then a one-line edit here rather than a sweep.
+ *
+ * There is no dark-mode block. Per the v1.1 "light only" amendment JavelinHub
+ * ships one theme: Ink is an accent surface for footers, app icons and inverted
+ * lockups, not an alternate palette. Nothing in this codebase may switch on
+ * `prefers-color-scheme`, and no component carries a `dark:` variant.
+ * ------------------------------------------------------------------------- */
+
+:root {
+  /* Palette — brand guidelines section 03. Exact values, do not adjust. */
+  --ink: #0d1014; /* text, dark panels */
+  --sheet: #f6f7f2; /* page ground */
+  --chalk: #e9ece4; /* panels, fills */
+  --white: #ffffff; /* cards, inputs */
+  --sector: #1b3ae0; /* action, mark */
+  --turf: #1f4f33; /* verified, done */
+  --foul: #b3261e; /* error, destructive */
+  --steel: #5a615a; /* meta, disabled */
+  --rule: #cfd4c8; /* the 1px rule line (section 06) */
+
+  /* The graph-paper ground. Not a tenth colour: it is Ink at 5.5% over Sheet,
+   * which is how the guidelines draw it. Kept as a token because the grid is
+   * the coach's-notebook idea made literal, and the 34px pitch is the same 34
+   * the release angle and the spacing rule are named for. */
+  --grid: rgb(13 16 20 / 0.055);
+  --grid-pitch: 34px;
+}
+
+@theme inline {
+  /* -- Grounds ------------------------------------------------------------
+   * Sheet is the page. Chalk is a panel set *into* the page. White is the
+   * raised ground — section 06: "White on Sheet reads as raised without a
+   * blur", which is the entire elevation system.
+   */
+  --color-bg: var(--sheet);
+  --color-surface: var(--white);
+  --color-surface-2: var(--chalk);
+
+  /* -- Text ---------------------------------------------------------------
+   * Ink carries reading text. `muted` and `faint` both resolve to Steel and
+   * are deliberately the same value: the v1.1 contrast-floor amendment makes
+   * Steel "the lightest tone that may carry words", so there is nothing
+   * lighter to give `faint`. Both names survive because call sites distinguish
+   * roles (meta vs. hint/placeholder), not shades.
+   */
+  --color-ink: var(--ink);
+  --color-muted: var(--steel);
+  --color-faint: var(--steel);
+
+  /* -- Lines --------------------------------------------------------------
+   * Section 06: one rule weight, one rule colour. `line-strong` is the single
+   * exception the doc allows — the Ink rule that opens a rule-card or a
+   * section footer. It is an emphasis rule, not a heavier border for inputs.
+   */
+  --color-line: var(--rule);
+  --color-line-strong: var(--ink);
+
+  /* -- Action -------------------------------------------------------------
+   * Sector Blue is the only colour that draws the eye, so it is spent on the
+   * mark and on the one action per screen. `brand-strong` is Ink because that
+   * is what the doc's primary button turns into on hover — the hover state
+   * darkens to Ink rather than to a deeper blue.
+   */
+  --color-brand: var(--sector);
+  --color-brand-strong: var(--ink);
+  --color-brand-ink: var(--white);
+
+  /* Transitional. v1.1 has no soft-tint family — a chip is a transparent box
+   * with a 1px coloured border, never a wash. These two names survive only
+   * because two page-level call sites still reference them: the landing page's
+   * step-number circle and the admin applications filter tab. They resolve to a
+   * Chalk panel with Sector text, NOT a blue tint.
+   *
+   * The nav's active item was the third, and phase B removed it — that item is
+   * now the doc's chip construction, a transparent box with a 1px Sector Blue
+   * border. Delete both tokens once phase D rebrands the two that are left;
+   * nothing in `src/components/` reaches them any more. */
+  --color-brand-soft: var(--chalk);
+  --color-brand-soft-ink: var(--sector);
+
+  /* -- Verdicts -----------------------------------------------------------
+   * Turf confirms, Foul reports. Neither ever initiates.
+   *
+   * `warn` resolves to Foul Red because the palette has no third verdict
+   * colour: v1.1 added Foul Red precisely for "a rejected application", which
+   * is what every `warn` call site in this app actually reports. An amber
+   * would be a colour the brand does not own.
+   */
+  --color-success: var(--turf);
+  --color-danger: var(--foul);
+  --color-warn: var(--foul);
+
+  /* -- Focus --------------------------------------------------------------
+   * Section 06: the focus outline is Sector Blue and is never restyled per
+   * component. It is the one place blue appears without being an action.
+   */
+  --color-focus: var(--sector);
+
+  /* -- Type ---------------------------------------------------------------
+   * Three faces, three jobs, no overlap (section 04).
+   *   display — Barlow Condensed, condensed signage. Headlines, card titles, nav.
+   *             Extreme weights only; never a paragraph.
+   *   body    — Newsreader. Everything that is read as prose.
+   *   mono    — IBM Plex Mono. Anything measured: distances, timestamps,
+   *             labels, buttons, tags.
+   * The `--font-*-face` variables are injected by next/font in layout.tsx.
+   */
+  --font-display: var(--font-face-display), 'Arial Narrow', ui-sans-serif, sans-serif;
+  --font-body: var(--font-face-body), Georgia, ui-serif, serif;
+  --font-mono: var(--font-face-mono), ui-monospace, monospace;
+
+  /* -- Type scale ---------------------------------------------------------
+   * Section 04 publishes three scales, one per face, and they do not
+   * interleave: display 92/60/34/22, body 20/17/15, mono 16/13/12/11/10.
+   * Tailwind's own steps (12/14/16/18/20/24/30/36/48) share only 16 and 20
+   * with any of them, so a primitive left on `text-sm` is off-scale by
+   * definition — which is exactly how the first pass shipped body copy at 12
+   * and 14px.
+   *
+   * The tokens are named for their pixel value on purpose. A reviewer can
+   * audit conformance by reading the class name, and no one can quietly land a
+   * fourth body step by inventing `text-body-xs`. Steps are stated in rem so
+   * they still respond to a user's browser font-size setting; the number in
+   * the name is the px equivalent at the default 16px root.
+   */
+  --text-display-92: 5.75rem;
+  --text-display-60: 3.75rem;
+  --text-display-34: 2.125rem;
+  --text-display-22: 1.375rem;
+
+  --text-body-20: 1.25rem;
+  --text-body-17: 1.0625rem;
+  --text-body-15: 0.9375rem;
+
+  /* The stat numeral, and the one mono step that is NOT on section 04's
+   * summary line. It is taken from section 06's own card specimen —
+   * `.card .pb { font-family:'IBM Plex Mono'; font-size:42px; color:var(--ink) }`
+   * with `.pb-l` at 10px Steel beneath it — which is the pattern a rating, a
+   * personal best or a sales count is set in.
+   *
+   * Adding a step is normally forbidden here, so the exception is worth
+   * justifying rather than asserting. v1.1's own type amendment says the
+   * SPECIMENS ARE THE SPEC, and it was written because the summary line had
+   * dropped a step the components really used: "the mono scale carries a 12px
+   * step — what buttons and prices are set in — which that draft's summary line
+   * omitted". 42 is the same omission one row further up. Nothing else in the
+   * product may use it: it exists for `Stat`, which is the only component that
+   * renders `.card .pb`.
+   *
+   * Not `--text-display-34`: crossing a display step onto mono type is exactly
+   * the interleaving section 04 forbids ("three scales, one per face, and they
+   * do not interleave"). */
+  --text-mono-42: 2.625rem;
+
+  --text-mono-16: 1rem;
+  --text-mono-13: 0.8125rem;
+  --text-mono-12: 0.75rem;
+  --text-mono-11: 0.6875rem;
+  --text-mono-10: 0.625rem;
+
+  /* The one documented exception to all three scales, and it runs the other
+   * way: text the user types is always 16px, whichever face it is set in,
+   * because iOS Safari zooms the viewport on a focused field below that and
+   * breaks a 375px layout outright. It is separate from `--text-mono-16` so
+   * that `Textarea` — body face, same 16px — can cite the rule rather than
+   * borrow a mono step it is not set in. Never lower this. */
+  --text-field: 1rem;
+}
+
+html {
+  /* Anchor targets and skip-links land below the sticky header. */
+  scroll-padding-top: 5rem;
+}
+
+/*
+ * Long unbroken tokens must never widen the page.
+ *
+ * This is a base rule rather than a utility on each call site because the
+ * per-site approach was tried twice and missed a field both times: a coaching
+ * application's bio, then the applicant's own name. Anything a user can type —
+ * a name, a bio, a listing title, an invite note — eventually reaches a page,
+ * and a 200-character token in any of them pushed the layout past 2000px at a
+ * 375px viewport, permanently, because nothing in this app can edit or delete
+ * that text once stored.
+ *
+ * `anywhere` and not `break-word`: only `anywhere` shrinks an element's
+ * intrinsic min-content size, which is what lets a flex or grid item narrow
+ * below its longest word. `break-word` leaves min-content at the longest
+ * token, so a grid cell keeps the whole page wide no matter how the text
+ * wraps — the exact reason an earlier fix left the offers grid at 464px.
+ *
+ * Wrapped in `:where()` so it carries zero specificity: any utility, including
+ * `truncate` or `whitespace-nowrap`, still wins on the elements that want them.
+ *
+ * The selector is `body *` rather than a list of text-bearing tags, because
+ * `overflow-wrap` only takes effect on the element that actually contains the
+ * text — it does not inherit past an unmatched ancestor. A tag list left a hole
+ * wherever a bare text node lands in a `div`: a review demonstrated a token in
+ * `Alert`'s body div taking the page to 1798px while the same token in a `p`
+ * left it at 375. Listing tags would mean revisiting this rule every time a new
+ * component echoes user text, which is the per-site approach that already
+ * failed twice.
+ */
+@layer base {
+  :where(body *) {
+    overflow-wrap: anywhere;
+  }
+}
+
+/*
+ * No `font-family` here. Newsreader is the reading face (section 04), but it
+ * reaches the page through the `font-body` utility on the `<body>` element in
+ * layout.tsx, so that `--font-body` above is the single definition of the body
+ * stack. Declaring it a second time in this rule would also *win*: this rule is
+ * unlayered and utilities live in `@layer utilities`, so the literal copy would
+ * silently override the token and edits to the token would do nothing.
+ * Display and mono stay opt-in per component and are never inherited.
+ */
+/*
+ * The page ground is graph paper, not a flat fill — two hairline gradients on a
+ * 34px pitch, exactly as the guidelines draw it. This is the "coach's notebook,
+ * not a storefront" idea doing actual work, so it belongs on the ground itself
+ * rather than on a decorative wrapper somewhere.
+ *
+ * `background-attachment: fixed` is deliberate: the grid is the paper the
+ * product is written on, so it must not slide against the content. On a scroll
+ * attachment the lines drift past a sticky header and read as a texture that is
+ * moving, which is precisely the kind of decoration section 05 forbids.
+ *
+ * Panels opt out by being opaque — cards are White and set into this ground,
+ * which is the whole elevation system now that shadows are gone.
+ */
+body {
+  background-color: var(--sheet);
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: var(--grid-pitch) var(--grid-pitch);
+  background-attachment: fixed;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Print and forced-colours want paper, not a simulation of it. */
+@media print, (forced-colors: active) {
+  body {
+    background-image: none;
+  }
+}
+
+/* A single, consistent focus treatment. Never remove it — keyboard users are
+ * the only way some people can reach these forms at all.
+ *
+ * 2px Sector Blue at 3px offset, square. `border-radius: 0` is not cosmetic
+ * housekeeping: section 06 lists the focus outline among the corners that stay
+ * square, and without it the outline inherits the element's own rounding. */
+:focus-visible {
+  outline: 2px solid var(--sector);
+  outline-offset: 3px;
+  border-radius: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

@@ -1,0 +1,1598 @@
+/**
+ * =============================================================================
+ * `SupabaseDataClient` — the Postgres implementation of `DataClient`.
+ * =============================================================================
+ *
+ * The sibling of `mock/mockClient.ts`. Same interface, same return shapes, same
+ * `DataError` codes, same user-facing wording — see `docs/DATA-LAYER.md`, which
+ * describes both, and `supabase/README.md`, which maps every authorization rule
+ * to the policy that enforces it here.
+ *
+ * -----------------------------------------------------------------------------
+ * The one structural difference from the mock, and it is the whole point
+ * -----------------------------------------------------------------------------
+ * The mock re-implements every RLS policy in TypeScript because there is no
+ * database to enforce them. Here there is. Authorization is enforced by
+ * Postgres — by the policies in `0002_rls.sql`, by `guard_listing_update()`,
+ * and by the four `SECURITY DEFINER` RPCs — against `auth.uid()`, which comes
+ * from the JWT in the request's cookies and cannot be set by a caller.
+ *
+ * So the checks written in this file are NOT the boundary. They exist for one
+ * reason: **error copy**. An RLS refusal arrives as
+ * `42501 new row violates row-level security policy for table "listings"`,
+ * which `errors.ts` must replace with something generic before a user sees it.
+ * A pre-check lets `createListing` say "Only approved coaches can publish
+ * offers. Apply to coach or redeem an invite code first." — the same sentence
+ * the mock produces — instead of "You do not have permission to do that."
+ *
+ * Two consequences worth being explicit about:
+ *
+ *   * Deleting any pre-check in this file degrades a message. It does not open
+ *     a hole; Postgres still refuses the write.
+ *   * A pre-check passing does NOT mean the write will succeed. Nothing here
+ *     may assume it did — every mutation still reads the database's answer and
+ *     translates its error.
+ *
+ * -----------------------------------------------------------------------------
+ * `SELECT *` is a bug on `listings`
+ * -----------------------------------------------------------------------------
+ * `0002_rls.sql` revokes table-level SELECT on `public.listings` and grants the
+ * columns individually, so that `deleted_by` — an administrator's id after a
+ * takedown — is unreadable through PostgREST. A role holding only column
+ * privileges gets `42501` on `select=*` rather than a row with the column
+ * quietly missing. Every listings read here therefore names its columns through
+ * {@link LISTING_COLUMNS}, and a new column on that table has to be added both
+ * to the grant in SQL and to this constant.
+ *
+ * -----------------------------------------------------------------------------
+ * Never cache the Supabase client on this instance
+ * -----------------------------------------------------------------------------
+ * `getDataClient()` caches the *client object* for the lifetime of the server
+ * process, so this class must hold no per-request state. Every method opens its
+ * own request-scoped Supabase client. A field holding one would serve the first
+ * visitor's session to every later request — see `serverClient.ts`.
+ */
+
+import type { SupabaseClient } from '@supabase/supabase-js';
+
+import type {
+  CoachApplicationFilter,
+  CoachDirectoryFilter,
+  CreateCoachApplicationInput,
+  CreateInviteInput,
+  CreateListingInput,
+  CreateReviewInput,
+  DataClient,
+  ListingFilter,
+  SignInInput,
+  SignUpInput,
+  UpdateListingInput,
+  UpdateMyCoachProfileInput,
+} from '../client';
+import { generateInviteCode } from '../invite-code';
+import {
+  COACH_BIO_MAX,
+  COACH_HEADLINE_MAX,
+  DataError,
+  LISTING_CATEGORIES,
+  isListingCategory,
+  type Actor,
+  type CoachApplication,
+  type CoachApplicationWithUser,
+  type CoachStats,
+  type Invite,
+  type ListingCategory,
+  type ListingDetail,
+  type ListingRevision,
+  type ListingWithCoach,
+  type OfferStats,
+  type Order,
+  type OrderWithListing,
+  type OwnedListing,
+  type Profile,
+  type PublicCoach,
+  type PublicProfile,
+  type PublicReview,
+  type PublicReviewWithListing,
+  type Review,
+} from '../types';
+import {
+  optionalActorId,
+  optionalText,
+  optionalYears,
+  requireActorId,
+  requireEmail,
+  requireIsoTimestamp,
+  requireListingCategory,
+  requirePriceCents,
+  requireRating,
+  requireText,
+} from '../validation';
+import { throwDataError } from './errors';
+import { createSupabaseServerClient } from './serverClient';
+
+// ---------------------------------------------------------------------------
+// Column lists.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every column of `public.listings` a client role may read. NOT `*` — see the
+ * header. `deleted_by` is absent because SELECT on it is revoked in SQL.
+ */
+const LISTING_COLUMNS = 'id, coach_id, title, description, price_cents, category, price_epoch, deleted_at, created_at, updated_at';
+
+/** The same projection from `public.owned_listings`, plus the derived flag. */
+const OWNED_LISTING_COLUMNS = `${LISTING_COLUMNS}, withdrawn_by_admin`;
+
+/** `public.public_coaches` also carries `created_at`, which is for ordering only. */
+const PUBLIC_COACH_COLUMNS = 'id, full_name, coach_headline, coach_bio, coach_years_coaching';
+
+/** `public.public_reviews`-shaped projections. */
+const PUBLIC_REVIEW_COLUMNS = 'id, listing_id, rating, body, created_at, author_name';
+
+// ---------------------------------------------------------------------------
+// Query-building helpers.
+// ---------------------------------------------------------------------------
+
+/**
+ * Escapes a user's search term for use inside a `LIKE`/`ILIKE` pattern.
+ *
+ * The mock matches a plain substring, so `50%` must find offers containing the
+ * literal text "50%". Passed through unescaped, `%` and `_` are LIKE wildcards
+ * and `50%` would match essentially everything — a different result from the
+ * same input on the other backend. `\` goes first, or it would escape the
+ * escapes added after it.
+ */
+function escapeLike(raw: string): string | null {
+  // `*` IS ALSO A WILDCARD HERE, and it is the one with no escape. PostgREST
+  // accepts `*` as an alias for `%` in `like`/`ilike` and rewrites it BEFORE
+  // Postgres sees the pattern, so it never reaches the backslash escaping
+  // below and there is no sequence that makes it literal.
+  //
+  // Returning `null` — "this term cannot be expressed" — is the only honest
+  // answer, and every caller must then produce a NARROWER result, never a
+  // wider one. Two wrong fixes, both tried:
+  //
+  //   * Leave it alone: `q = '*'` becomes `%%` and `listListings` returns the
+  //     entire catalogue on Supabase while the mock returns nothing.
+  //   * Strip it and carry on: `'*'` escapes to `''`, which `likePattern` then
+  //     wraps into `'%%'` — the same catalogue, by a longer road. `'Ja*'` is
+  //     subtler and worse: it silently widens into a `Ja` substring search.
+  //
+  // `mockClient.ts` states the rule this protects: narrowed rather than
+  // widened, so the backend swap cannot change search results.
+  if (raw.includes('*')) return null;
+
+  return raw.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
+/** `escapeLike`, wrapped so it matches anywhere in the value. `null` propagates. */
+function likePattern(raw: string): string | null {
+  const escaped = escapeLike(raw);
+  return escaped === null ? null : `%${escaped}%`;
+}
+
+/**
+ * Wraps a value for PostgREST's `or=(...)` filter.
+ *
+ * `or` is a comma-separated list and `.` separates a filter's parts, so a
+ * search for `a,b` or `a.b` would otherwise be parsed as filter SYNTAX and
+ * either error or — worse — widen the query into one the caller did not ask
+ * for. Double-quoting the value is PostgREST's documented escape hatch; inner
+ * quotes and backslashes are escaped so the quoting cannot be broken out of.
+ */
+function quoteForOr(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * PostgREST returns `numeric` and `bigint` as JSON numbers, but both are
+ * width-dependent and a driver upgrade returning `"4.5"` instead of `4.5` would
+ * put a string into a field typed `number | null` — invisible until something
+ * renders `"4.5"` or compares it. Coerced defensively, once, here.
+ *
+ * `null` stays `null` and is NOT turned into `0`: `rating_average === null`
+ * means "no reviews" and is a different answer from a rating of zero, which no
+ * write path can produce. See {@link OfferStats}.
+ */
+function toNumberOrNull(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** As above, for counts, where absent genuinely does mean zero. */
+function toCount(value: unknown): number {
+  return toNumberOrNull(value) ?? 0;
+}
+
+/**
+ * True for a canonical UUID.
+ *
+ * Used to pre-filter BATCH reads. A single malformed id inside a PostgREST
+ * `.in(...)` list fails the cast for the whole filter, so one junk id would
+ * take every valid id in the batch down with it — `listOfferStats` would return
+ * `[]` instead of the stats it did have, and `listCoachStats` would zero every
+ * coach on the page. The mock answers per id, so dropping the bad one here and
+ * letting it fall through to "no row" is what keeps the two agreeing.
+ */
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+/**
+ * SQLSTATE `invalid_text_representation` — the value is not a valid `uuid` (or
+ * not a member of an enum).
+ *
+ * Every id in this schema is a `uuid`, and ids arrive from URL segments. A
+ * request for `/offers/junk` reaches Postgres as `?id=eq.junk` and fails at the
+ * CAST, before any row is considered. A cast failure there is not a validation
+ * error a user can act on — it is simply "there is nothing at that address".
+ *
+ * The mock has no cast to fail: `db.listings.find(l => l.id === 'junk')` is
+ * `undefined`, so `getListing` returns `null` and the page 404s. That behaviour
+ * is depended on — `src/app/offers/[id]/page.tsx` says in as many words that a
+ * hand-typed URL must land on the 404 page rather than the error boundary.
+ * Letting `errors.ts` map 22P02 to `invalid` and throw turned every mistyped
+ * offer or coach URL into a 500, on Supabase and only on Supabase.
+ *
+ * So the READ paths treat it as absence. WRITE paths still throw: there,
+ * `invalid` is the right answer, because a malformed id in a submitted form is
+ * bad input rather than a missing page.
+ */
+function isMalformedId(error: unknown): boolean {
+  return error !== null && typeof error === 'object' && (error as { code?: string }).code === '22P02';
+}
+
+/** The name shown when a coach row cannot be resolved. Mirrors `coachName()`. */
+const UNKNOWN_COACH = 'Unknown coach';
+
+/** The title shown when a listing row cannot be resolved. Mirrors `listingTitle()`. */
+const UNKNOWN_LISTING = 'Unknown offer';
+
+/** The zero rollup, for a coach id with no matching row. */
+function emptyCoachStats(coachId: string): CoachStats {
+  return { coach_id: coachId, rating_average: null, review_count: 0, sales_count: 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Row shapes as they come back from PostgREST.
+// ---------------------------------------------------------------------------
+
+interface ListingRow {
+  id: string;
+  coach_id: string;
+  title: string;
+  description: string;
+  price_cents: number;
+  category: string;
+  price_epoch: number;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface OwnedListingRow extends ListingRow {
+  withdrawn_by_admin: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Request context.
+//
+// `Ctx` pairs a request-scoped client with the id Postgres will see in
+// `auth.uid()`. Resolving that id ONCE per method and passing it around is what
+// keeps a method from asking the auth server twice and, worse, from acting on
+// two different answers.
+// ---------------------------------------------------------------------------
+
+interface Ctx {
+  supabase: SupabaseClient;
+  /** The AUTHENTICATED user id — from the JWT, never from the caller. */
+  userId: string | null;
+}
+
+async function openContext(): Promise<Ctx> {
+  const supabase = await createSupabaseServerClient();
+  const { data, error } = await supabase.auth.getUser();
+  return { supabase, userId: error ? null : (data.user?.id ?? null) };
+}
+
+interface AuthedCtx extends Ctx {
+  userId: string;
+}
+
+/**
+ * Opens a context for a method that requires a signed-in actor, and reconciles
+ * the `Actor` the caller passed with the session the cookies actually carry.
+ *
+ * The mock treats `actor.userId` as the identity. Here the identity is
+ * `auth.uid()`, and the two are independent inputs that CAN disagree. They
+ * never should — every caller gets its actor from `getActor()`, which reads the
+ * same cookies — so a disagreement is a bug, and this refuses rather than
+ * guessing which one to believe. Silently preferring the JWT would let a caller
+ * that meant to act as one user act as another; silently preferring the actor
+ * would be worse still, since Postgres would ignore it and apply the JWT's
+ * privileges anyway, making the code and the database disagree about who is
+ * acting.
+ */
+async function openAuthedContext(actor: Actor): Promise<AuthedCtx> {
+  // Same message and code as the mock's `requireActorId` for a null actor.
+  const claimed = requireActorId(actor);
+  const ctx = await openContext();
+
+  if (ctx.userId === null) {
+    throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
+  }
+  if (ctx.userId !== claimed) {
+    throw new DataError('forbidden', 'You do not have permission to do that.');
+  }
+  return { supabase: ctx.supabase, userId: ctx.userId };
+}
+
+/**
+ * The actor's own profile row — this file's `resolveProfile()`.
+ *
+ * Read through `profiles_select_self`, so it is the database's answer about who
+ * the actor is, not a cached copy. `role` and `coach_status` are re-read on
+ * every call for exactly the reason `session.ts` refuses to put them in the
+ * cookie: a promotion or a revocation must take effect on the next request.
+ */
+async function resolveProfile(ctx: AuthedCtx): Promise<Profile> {
+  const { data, error } = await ctx.supabase.from('profiles').select('*').eq('id', ctx.userId).maybeSingle();
+  if (error) throwDataError(error, true);
+  if (!data) {
+    // Authenticated against GoTrue but with no profile row. `handle_new_user()`
+    // makes this close to impossible, and it is not a state to paper over.
+    throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
+  }
+  return data as Profile;
+}
+
+/** Mirrors `requireAdmin()` in the mock, and `public.is_admin()` in SQL. */
+async function requireAdminProfile(ctx: AuthedCtx): Promise<Profile> {
+  const profile = await resolveProfile(ctx);
+  if (profile.role !== 'admin') {
+    throw new DataError('forbidden', 'Only an administrator can do that.');
+  }
+  return profile;
+}
+
+/** Mirrors `requireApprovedCoach()` in the mock, and `public.is_approved_coach()`. */
+async function requireApprovedCoachProfile(ctx: AuthedCtx): Promise<Profile> {
+  const profile = await resolveProfile(ctx);
+  if (profile.coach_status !== 'approved') {
+    throw new DataError(
+      'forbidden',
+      'Only approved coaches can publish offers. Apply to coach or redeem an invite code first.',
+    );
+  }
+  return profile;
+}
+
+// ---------------------------------------------------------------------------
+// Joins.
+//
+// PostgREST resource embedding is deliberately NOT used to attach coach names.
+// Embedding `profiles` would apply that table's RLS, which has no anon policy
+// at all, so every visitor would see "Unknown coach" on every card; embedding
+// the `public_profiles` VIEW depends on PostgREST inferring a foreign key
+// through a view, which is version-dependent behaviour to hang a public page
+// on. Two explicit queries and a Map are boring, predictable, and read the same
+// view the SQL mapping table says they should.
+// ---------------------------------------------------------------------------
+
+async function coachNamesFor(ctx: Ctx, coachIds: readonly string[]): Promise<Map<string, string>> {
+  const unique = [...new Set(coachIds)].filter((id) => typeof id === 'string' && id !== '');
+  if (unique.length === 0) return new Map();
+
+  const { data, error } = await ctx.supabase.from('public_profiles').select('id, full_name').in('id', unique);
+  if (error) throwDataError(error, ctx.userId !== null);
+
+  const names = new Map<string, string>();
+  for (const row of (data ?? []) as { id: string; full_name: string }[]) {
+    names.set(row.id, row.full_name);
+  }
+  return names;
+}
+
+function toListingWithCoach(row: ListingRow, names: Map<string, string>): ListingWithCoach {
+  return {
+    id: row.id,
+    coach_id: row.coach_id,
+    title: row.title,
+    description: row.description,
+    price_cents: row.price_cents,
+    category: row.category,
+    price_epoch: row.price_epoch,
+    deleted_at: row.deleted_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    coach_name: names.get(row.coach_id) ?? UNKNOWN_COACH,
+  };
+}
+
+async function withCoachNames(ctx: Ctx, rows: readonly ListingRow[]): Promise<ListingWithCoach[]> {
+  const names = await coachNamesFor(ctx, rows.map((row) => row.coach_id));
+  return rows.map((row) => toListingWithCoach(row, names));
+}
+
+async function withCoachName(ctx: Ctx, row: ListingRow): Promise<ListingWithCoach> {
+  const [only] = await withCoachNames(ctx, [row]);
+  return only;
+}
+
+/**
+ * Resolves order rows into `OrderWithListing`.
+ *
+ * NO `deleted_at` FILTER on the title lookup, deliberately — the same rule as
+ * `listingTitle()` in the mock. Withdrawing an offer must not turn every past
+ * purchase of it into "Unknown offer"; the row survives precisely so the title
+ * still joins, and the buyer's own `listings_select_purchaser` policy (or the
+ * coach's, or an admin's) is what makes it readable.
+ *
+ * `has_review` is a separate read of `reviews`, which is reachable here because
+ * whoever may see the order may also see its review: the buyer through
+ * `reviews_select_own_author`, the selling coach through
+ * `reviews_select_own_coach`, an admin through `reviews_select_admin`.
+ */
+async function withListingTitles(ctx: Ctx, orders: readonly Order[]): Promise<OrderWithListing[]> {
+  if (orders.length === 0) return [];
+
+  const listingIds = [...new Set(orders.map((o) => o.listing_id))];
+  const orderIds = orders.map((o) => o.id);
+  const hasSession = ctx.userId !== null;
+
+  const [titlesResult, reviewsResult] = await Promise.all([
+    ctx.supabase.from('listings').select('id, title').in('id', listingIds),
+    ctx.supabase.from('reviews').select('order_id').in('order_id', orderIds),
+  ]);
+
+  if (titlesResult.error) throwDataError(titlesResult.error, hasSession);
+  if (reviewsResult.error) throwDataError(reviewsResult.error, hasSession);
+
+  const titles = new Map<string, string>();
+  for (const row of (titlesResult.data ?? []) as { id: string; title: string }[]) {
+    titles.set(row.id, row.title);
+  }
+  const reviewed = new Set(
+    ((reviewsResult.data ?? []) as { order_id: string }[]).map((row) => row.order_id),
+  );
+
+  return orders.map((order) => ({
+    ...order,
+    listing_title: titles.get(order.listing_id) ?? UNKNOWN_LISTING,
+    has_review: reviewed.has(order.id),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Auth error translation.
+//
+// GoTrue errors are not Postgres errors and do not carry a SQLSTATE, so
+// `errors.ts` cannot map them. They get their own small translation here.
+// ---------------------------------------------------------------------------
+
+interface AuthLikeError {
+  code?: string;
+  status?: number;
+  message?: string;
+}
+
+/** True when GoTrue is telling us the address is already registered. */
+function isAlreadyRegistered(error: AuthLikeError): boolean {
+  const code = error.code ?? '';
+  if (code === 'user_already_exists' || code === 'email_exists') return true;
+  return /already\s+registered|already\s+exists/i.test(error.message ?? '');
+}
+
+/** True when the failure is simply "those credentials are wrong". */
+function isInvalidCredentials(error: AuthLikeError): boolean {
+  const code = error.code ?? '';
+  if (code === 'invalid_credentials') return true;
+  return /invalid\s+login\s+credentials/i.test(error.message ?? '');
+}
+
+/**
+ * GoTrue's own messages ("Password should be at least 6 characters",
+ * "Email rate limit exceeded") are written for end users and are worth keeping.
+ * They are still length-capped and screened for anything that looks like
+ * internals, on the same fail-safe principle as `errors.ts`.
+ */
+function authMessage(error: AuthLikeError, fallback: string): string {
+  const message = typeof error.message === 'string' ? error.message.trim() : '';
+  if (message === '' || message.length > 200) return fallback;
+  if (/database|sql|postgres|schema|relation|constraint|token|jwt/i.test(message)) return fallback;
+  return message;
+}
+
+// ---------------------------------------------------------------------------
+
+export class SupabaseDataClient implements DataClient {
+  // -------------------------------------------------------------------------
+  // Auth-shaped
+  // -------------------------------------------------------------------------
+
+  /**
+   * Creates the account. The `public.profiles` row is NOT written here — the
+   * `on_auth_user_created` trigger writes it from `raw_user_meta_data`, which is
+   * why `full_name` goes into `options.data` under exactly that key.
+   *
+   * THIS PROJECT MUST HAVE EMAIL CONFIRMATION TURNED OFF. With it on, GoTrue
+   * returns a user but no session, the account cannot be read back (no session
+   * means `profiles_select_self` matches nothing), and `auth/actions.ts` would
+   * redirect a still-anonymous visitor to `/offers`. That is detected below and
+   * turned into a sentence the user can act on rather than a silent no-op — but
+   * the supported configuration is confirmation off, because nothing in this
+   * app implements a confirmation callback route. See `supabase/README.md`.
+   */
+  async signUp(input: SignUpInput): Promise<Profile> {
+    const email = requireEmail(input?.email);
+    const fullName = requireText(input?.fullName, 'Full name', 120, 2);
+    const password = requireText(input?.password, 'Password', 200, 8);
+
+    const supabase = await createSupabaseServerClient();
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { full_name: fullName } },
+    });
+
+    if (error) {
+      const authError = error as AuthLikeError;
+      if (isAlreadyRegistered(authError)) {
+        throw new DataError('conflict', 'An account with that email already exists.');
+      }
+      throw new DataError('invalid', authMessage(authError, 'That account could not be created.'));
+    }
+
+    // With Supabase's email-enumeration protection enabled — it is, by default —
+    // signing up with an address that already exists does NOT error. GoTrue
+    // returns a decoy user with an EMPTY `identities` array instead, so that an
+    // attacker cannot use this endpoint to test which addresses are registered.
+    // The mock reports a conflict here, and a real user retrying their own
+    // address deserves to be told; `identities.length === 0` is the documented
+    // way to tell the decoy apart from a genuine new account.
+    if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      throw new DataError('conflict', 'An account with that email already exists.');
+    }
+
+    if (!data.user) {
+      throw new DataError('invalid', 'That account could not be created.');
+    }
+
+    if (!data.session) {
+      throw new DataError(
+        'invalid',
+        'Your account was created. Check your email to confirm the address, then sign in.',
+      );
+    }
+
+    const profile = await this.getProfile({ userId: data.user.id }, data.user.id);
+    if (!profile) {
+      throw new DataError('invalid', 'That account could not be created.');
+    }
+    return profile;
+  }
+
+  /**
+   * Returns `null` for BOTH "no such account" and "wrong password" — never a
+   * throw that distinguishes them. `auth/actions.ts` renders one message for
+   * both, because anything finer turns this form into an account-enumeration
+   * oracle.
+   *
+   * An unconfirmed email lands here too, and is also `null`. Telling the user
+   * "confirm your email first" would be friendlier and would leak exactly what
+   * the paragraph above exists to prevent — that the address is registered. The
+   * supported configuration has confirmation off (see `signUp`), so the case
+   * should not arise; when it does, silence is the safer half of the trade.
+   */
+  async signInWithPassword(input: SignInInput): Promise<Profile | null> {
+    if (typeof input?.email !== 'string' || typeof input?.password !== 'string') return null;
+    const email = input.email.trim().toLowerCase();
+    if (email === '') return null;
+
+    const supabase = await createSupabaseServerClient();
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password: input.password });
+
+    if (error) {
+      const authError = error as AuthLikeError;
+      if (isInvalidCredentials(authError) || authError.status === 400) return null;
+      if (authError.code === 'email_not_confirmed') return null;
+      throw new DataError('invalid', authMessage(authError, 'You could not be signed in.'));
+    }
+
+    if (!data.user) return null;
+    return this.getProfile({ userId: data.user.id }, data.user.id);
+  }
+
+  async getProfile(actor: Actor, userId: string): Promise<Profile | null> {
+    if (typeof userId !== 'string' || userId === '') return null;
+    const ctx = await openAuthedContext(actor);
+
+    // Mirrors `profiles_select_self` + `profiles_select_admin`. Checked here as
+    // well as in SQL because RLS expresses a refusal as ZERO ROWS, and the mock
+    // throws `forbidden`. Without this, asking for somebody else's profile
+    // would quietly return `null` — "no such user" — instead of "not yours".
+    if (ctx.userId !== userId) {
+      const actorProfile = await resolveProfile(ctx);
+      if (actorProfile.role !== 'admin') {
+        throw new DataError('forbidden', 'You can only view your own profile.');
+      }
+    }
+
+    const { data, error } = await ctx.supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) return null;
+      throwDataError(error, true);
+    }
+    return (data as Profile | null) ?? null;
+  }
+
+  async getPublicProfile(userId: string): Promise<PublicProfile | null> {
+    if (typeof userId !== 'string' || userId === '') return null;
+    const ctx = await openContext();
+
+    const { data, error } = await ctx.supabase
+      .from('public_profiles')
+      .select('id, full_name, is_approved_coach')
+      .eq('id', userId)
+      .maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) return null;
+      throwDataError(error, ctx.userId !== null);
+    }
+    return (data as PublicProfile | null) ?? null;
+  }
+
+  // -------------------------------------------------------------------------
+  // The public coach directory
+  // -------------------------------------------------------------------------
+
+  async listCoaches(filter?: CoachDirectoryFilter): Promise<PublicCoach[]> {
+    const q = typeof filter?.q === 'string' ? filter.q.trim() : '';
+    const ctx = await openContext();
+
+    // The approval predicate lives INSIDE public_coaches, so there is nothing
+    // to filter on here and no way for a caller to widen the result.
+    let query = ctx.supabase.from('public_coaches').select(PUBLIC_COACH_COLUMNS);
+    if (q !== '') {
+      const pattern = likePattern(q);
+      // Unrepresentable term (it contains `*`). Return NOTHING rather than
+      // dropping the filter — an unexpressible search must not become a
+      // broader one. See `escapeLike`.
+      if (pattern === null) return [];
+      query = query.ilike('full_name', pattern);
+    }
+
+    // `created_at` exists on the view for this ordering only (0003) and is not
+    // selected — `PublicCoach` is exactly the five columns above.
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) throwDataError(error, ctx.userId !== null);
+    return (data ?? []) as PublicCoach[];
+  }
+
+  async getPublicCoach(coachId: string): Promise<PublicCoach | null> {
+    if (typeof coachId !== 'string' || coachId === '') return null;
+    const ctx = await openContext();
+
+    // A non-approved id simply matches no row here, which is deliberately
+    // indistinguishable from an id that does not exist.
+    const { data, error } = await ctx.supabase
+      .from('public_coaches')
+      .select(PUBLIC_COACH_COLUMNS)
+      .eq('id', coachId)
+      .maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) return null;
+      throwDataError(error, ctx.userId !== null);
+    }
+    return (data as PublicCoach | null) ?? null;
+  }
+
+  async updateMyCoachProfile(actor: Actor, input: UpdateMyCoachProfileInput): Promise<Profile> {
+    const headline = optionalText(input?.coach_headline, 'Headline', COACH_HEADLINE_MAX);
+    const bio = optionalText(input?.coach_bio, 'Bio', COACH_BIO_MAX);
+    const years = optionalYears(input?.coach_years_coaching);
+
+    const ctx = await openAuthedContext(actor);
+    const profile = await resolveProfile(ctx);
+    if (profile.coach_status !== 'approved') {
+      throw new DataError('forbidden', 'Only approved coaches have a public coach profile to edit.');
+    }
+
+    // Writes ONLY the three coach columns. `role`, `coach_status`, `id`, `email`
+    // and `full_name` are not in this object, and `guard_profile_privilege_columns`
+    // would reject them if they were. The subject is `ctx.userId` — the resolved
+    // actor — never a parameter, so this is not an admin edit path.
+    const { data, error } = await ctx.supabase
+      .from('profiles')
+      .update({ coach_headline: headline, coach_bio: bio, coach_years_coaching: years })
+      .eq('id', ctx.userId)
+      .select('*')
+      .maybeSingle();
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('not_found', 'Your profile could not be found.');
+    return data as Profile;
+  }
+
+  // -------------------------------------------------------------------------
+  // Listings
+  // -------------------------------------------------------------------------
+
+  async listListings(filter?: ListingFilter): Promise<ListingWithCoach[]> {
+    const q = typeof filter?.q === 'string' ? filter.q.trim() : '';
+    const rawCategory = typeof filter?.category === 'string' ? filter.category.trim() : '';
+    const category: ListingCategory | null = isListingCategory(rawCategory) ? rawCategory : null;
+
+    // An out-of-taxonomy category matches nothing. Returning early also avoids
+    // sending it to Postgres, where comparing it against the enum would be a
+    // cast error (22P02) rather than an empty result.
+    if (rawCategory !== '' && category === null) return [];
+
+    const ctx = await openContext();
+    let query = ctx.supabase.from('listings').select(LISTING_COLUMNS).is('deleted_at', null);
+
+    if (category) query = query.eq('category', category);
+    if (q !== '') {
+      // Title + description only, matching the trigram indexes in 0001 and the
+      // mock. Never the coach name: that would make the offer search an
+      // enumerator for people.
+      const escaped = likePattern(q);
+      // Unrepresentable term — see `escapeLike`. Narrow to nothing.
+      if (escaped === null) return [];
+      const pattern = quoteForOr(escaped);
+      query = query.or(`title.ilike.${pattern},description.ilike.${pattern}`);
+    }
+
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) throwDataError(error, ctx.userId !== null);
+    return withCoachNames(ctx, (data ?? []) as ListingRow[]);
+  }
+
+  async getListing(id: string): Promise<ListingWithCoach | null> {
+    if (typeof id !== 'string' || id === '') return null;
+    const ctx = await openContext();
+
+    const { data, error } = await ctx.supabase
+      .from('listings')
+      .select(LISTING_COLUMNS)
+      .eq('id', id)
+      .is('deleted_at', null)
+      .maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) return null;
+      throwDataError(error, ctx.userId !== null);
+    }
+    if (!data) return null;
+    return withCoachName(ctx, data as ListingRow);
+  }
+
+  /**
+   * The entitlement table in {@link ListingDetail} is enforced by RLS alone, and
+   * this method is deliberately thin because of it: `listings_select_public`
+   * returns the row to anyone while it is published, and
+   * `listings_select_own_coach` / `listings_select_purchaser` /
+   * `listings_select_admin` return it after withdrawal to exactly the coach, a
+   * holder of an order for it, and an admin. So a visible row with a non-null
+   * `deleted_at` IS the proof of entitlement, and no row means 404.
+   *
+   * A stranger gets `null`, never `forbidden` — a refusal would confirm that a
+   * withdrawn offer once existed at that id.
+   */
+  async getListingForViewer(actor: Actor, id: string): Promise<ListingDetail | null> {
+    if (typeof id !== 'string' || id === '') return null;
+
+    // Anonymous is not an error here, so the actor is unwrapped rather than
+    // required — and it is not otherwise used: `auth.uid()` in the policies is
+    // the actual subject.
+    void optionalActorId(actor);
+    const ctx = await openContext();
+
+    const { data, error } = await ctx.supabase
+      .from('listings')
+      .select(LISTING_COLUMNS)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) return null;
+      throwDataError(error, ctx.userId !== null);
+    }
+    if (!data) return null;
+
+    const row = data as ListingRow;
+    const listing = await withCoachName(ctx, row);
+    if (row.deleted_at === null) return { state: 'published', listing };
+    return { state: 'withdrawn', listing, withdrawn_at: row.deleted_at };
+  }
+
+  async listCategories(): Promise<ListingCategory[]> {
+    // Reads no rows. The taxonomy is the `public.listing_category` enum, whose
+    // declaration order in 0001 is the display order; `LISTING_CATEGORIES`
+    // restates it so the order does not depend on a round trip.
+    return [...LISTING_CATEGORIES];
+  }
+
+  async listListingsByCoach(actor: Actor, coachId: string): Promise<ListingWithCoach[]> {
+    if (typeof coachId !== 'string' || coachId === '') return [];
+
+    // A public read. The actor is never consulted, so this cannot be widened
+    // into an owner view — the explicit `deleted_at is null` below is what
+    // guarantees it, since a coach's own RLS policy would otherwise show them
+    // their withdrawn offers through this path too.
+    void actor;
+    const ctx = await openContext();
+
+    const { data, error } = await ctx.supabase
+      .from('listings')
+      .select(LISTING_COLUMNS)
+      .eq('coach_id', coachId)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false });
+    if (error) {
+      if (isMalformedId(error)) return [];
+      throwDataError(error, ctx.userId !== null);
+    }
+    return withCoachNames(ctx, (data ?? []) as ListingRow[]);
+  }
+
+  async listMyListings(actor: Actor): Promise<OwnedListing[]> {
+    const ctx = await openAuthedContext(actor);
+
+    // `public.owned_listings` (0003) is scoped to `auth.uid()` inside the view
+    // and carries the derived `withdrawn_by_admin`. WITHDRAWN OFFERS INCLUDED —
+    // this is the dashboard, and restoring one is the point.
+    const { data, error } = await ctx.supabase
+      .from('owned_listings')
+      .select(OWNED_LISTING_COLUMNS)
+      .order('created_at', { ascending: false });
+    if (error) throwDataError(error, true);
+
+    const rows = (data ?? []) as OwnedListingRow[];
+    const names = await coachNamesFor(ctx, rows.map((row) => row.coach_id));
+    return rows.map((row) => ({
+      ...toListingWithCoach(row, names),
+      withdrawn_by_admin: row.withdrawn_by_admin === true,
+    }));
+  }
+
+  async createListing(actor: Actor, input: CreateListingInput): Promise<ListingWithCoach> {
+    const title = requireText(input?.title, 'Title', 140, 3);
+    const description = requireText(input?.description, 'Description', 4000, 10);
+    const category = requireListingCategory(input?.category);
+    const priceCents = requirePriceCents(input?.price_cents);
+
+    const ctx = await openAuthedContext(actor);
+    const coach = await requireApprovedCoachProfile(ctx);
+
+    // `coach_id` comes from the resolved actor, never from input — and
+    // `listings_insert_approved_coach` pins it to `auth.uid()` regardless.
+    // `price_epoch` and `deleted_at` take their column defaults (1, null).
+    const { data, error } = await ctx.supabase
+      .from('listings')
+      .insert({
+        coach_id: coach.id,
+        title,
+        description,
+        price_cents: priceCents,
+        category,
+      })
+      .select(LISTING_COLUMNS)
+      .maybeSingle();
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('invalid', 'That offer could not be created.');
+    return withCoachName(ctx, data as ListingRow);
+  }
+
+  /**
+   * Edits an offer.
+   *
+   * Owner only, NEVER an admin — the same asymmetry as the mock, and the reason
+   * `guard_listing_update()` confines a non-owner to the `deleted_at` column.
+   * A withdrawn offer can still be edited: refusing would leave a coach unable
+   * to fix whatever got their offer taken down.
+   *
+   * The revision snapshot and the `price_epoch` bump are NOT written here.
+   * `record_listing_revision()` and `guard_listing_update()` do both inside the
+   * same statement, which is what makes them unskippable — in the mock they are
+   * in the same `mutateDb`, and for the same reason. Do not add them here: the
+   * trigger DERIVES `price_epoch`, so a value sent from the client is
+   * overwritten, and a revision written from here would be a duplicate.
+   */
+  async updateListing(actor: Actor, listingId: string, input: UpdateListingInput): Promise<ListingWithCoach> {
+    const id = requireText(listingId, 'Offer', 200);
+    const title = requireText(input?.title, 'Title', 140, 3);
+    const description = requireText(input?.description, 'Description', 4000, 10);
+    const category = requireListingCategory(input?.category);
+    const priceCents = requirePriceCents(input?.price_cents);
+
+    const ctx = await openAuthedContext(actor);
+    const profile = await resolveProfile(ctx);
+
+    const existing = await this.readListingRow(ctx, id);
+    if (!existing) throw new DataError('not_found', 'That offer could not be found.');
+    if (existing.coach_id !== profile.id) {
+      throw new DataError('forbidden', 'Only the coach who published an offer can edit it.');
+    }
+    if (profile.coach_status !== 'approved') {
+      throw new DataError('forbidden', 'Only approved coaches can edit an offer.');
+    }
+
+    const { data, error } = await ctx.supabase
+      .from('listings')
+      .update({ title, description, price_cents: priceCents, category })
+      .eq('id', id)
+      .select(LISTING_COLUMNS)
+      .maybeSingle();
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('not_found', 'That offer could not be found.');
+    return withCoachName(ctx, data as ListingRow);
+  }
+
+  async softDeleteListing(actor: Actor, listingId: string): Promise<ListingWithCoach> {
+    const id = requireText(listingId, 'Offer', 200);
+    const ctx = await openAuthedContext(actor);
+    const profile = await resolveProfile(ctx);
+
+    const existing = await this.readListingRow(ctx, id);
+    if (!existing) throw new DataError('not_found', 'That offer could not be found.');
+    if (existing.coach_id !== profile.id && profile.role !== 'admin') {
+      throw new DataError('forbidden', 'You can only withdraw your own offers.');
+    }
+    if (existing.deleted_at !== null) {
+      throw new DataError('conflict', 'That offer is already withdrawn.');
+    }
+
+    // `deleted_at` is the ONLY column sent. `deleted_by` is DERIVED by
+    // `guard_listing_update()` from `auth.uid()` and must not be supplied — it
+    // is what decides who may restore, so a client-supplied value would let a
+    // coach forge an admin takedown or erase one.
+    //
+    // There is no row DELETE anywhere in this file, and no DELETE policy on
+    // `listings` for any role. Withdrawal is a soft delete and it is the only
+    // kind — see `docs/DATA-LAYER.md`.
+    const { data, error } = await ctx.supabase
+      .from('listings')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', id)
+      .select(LISTING_COLUMNS)
+      .maybeSingle();
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('not_found', 'That offer could not be found.');
+    return withCoachName(ctx, data as ListingRow);
+  }
+
+  /**
+   * Restores a withdrawn offer.
+   *
+   * The "an admin took this down" refusal cannot be pre-checked from here:
+   * `deleted_by` is unreadable by every client role, which is exactly why
+   * `owned_listings` exists to publish the derived boolean. So this consults
+   * that view for the actor's own offers to produce the right sentence, and
+   * otherwise lets `guard_listing_update()` refuse — its own message is already
+   * end-user copy and reaches the caller through `errors.ts`.
+   */
+  async restoreListing(actor: Actor, listingId: string): Promise<ListingWithCoach> {
+    const id = requireText(listingId, 'Offer', 200);
+    const ctx = await openAuthedContext(actor);
+    const profile = await resolveProfile(ctx);
+
+    const existing = await this.readListingRow(ctx, id);
+    if (!existing) throw new DataError('not_found', 'That offer could not be found.');
+    if (existing.coach_id !== profile.id && profile.role !== 'admin') {
+      throw new DataError('forbidden', 'You can only restore your own offers.');
+    }
+    if (existing.deleted_at === null) {
+      throw new DataError('conflict', 'That offer is not withdrawn.');
+    }
+
+    if (existing.coach_id === profile.id && profile.role !== 'admin') {
+      const { data: owned, error: ownedError } = await ctx.supabase
+        .from('owned_listings')
+        .select('id, withdrawn_by_admin')
+        .eq('id', id)
+        .maybeSingle();
+      if (ownedError) throwDataError(ownedError, true);
+      if (owned && (owned as { withdrawn_by_admin: boolean }).withdrawn_by_admin) {
+        throw new DataError(
+          'forbidden',
+          'An administrator removed this offer. Only an administrator can restore it.',
+        );
+      }
+    }
+
+    const { data, error } = await ctx.supabase
+      .from('listings')
+      .update({ deleted_at: null })
+      .eq('id', id)
+      .select(LISTING_COLUMNS)
+      .maybeSingle();
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('not_found', 'That offer could not be found.');
+    return withCoachName(ctx, data as ListingRow);
+  }
+
+  async listListingRevisions(actor: Actor, listingId: string): Promise<ListingRevision[]> {
+    const id = requireText(listingId, 'Offer', 200);
+    const ctx = await openAuthedContext(actor);
+    const profile = await resolveProfile(ctx);
+
+    const existing = await this.readListingRow(ctx, id);
+    if (!existing) throw new DataError('not_found', 'That offer could not be found.');
+    if (existing.coach_id !== profile.id && profile.role !== 'admin') {
+      // Not public, and not merely tidiness: the revision list is a price
+      // history per offer.
+      throw new DataError('forbidden', 'You can only view the edit history of your own offers.');
+    }
+
+    const { data, error } = await ctx.supabase
+      .from('listing_revisions')
+      .select('id, listing_id, title, description, price_cents, category, created_at')
+      .eq('listing_id', id)
+      // `id desc` is NOT decoration — `supabase/README.md` lists it as a
+      // requirement. Two edits inside the same millisecond share a `created_at`,
+      // and Postgres has no insertion order to fall back on, so without a
+      // tie-break the "newest first" contract is simply not met for that pair.
+      // The mock gets the same effect from `.reverse()` before its sort.
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false });
+    if (error) throwDataError(error, true);
+    return (data ?? []) as ListingRevision[];
+  }
+
+  /** Shared by the four methods that need to see an offer before writing to it. */
+  private async readListingRow(ctx: AuthedCtx, id: string): Promise<ListingRow | null> {
+    const { data, error } = await ctx.supabase
+      .from('listings')
+      .select(LISTING_COLUMNS)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) {
+      // Absence, so the callers' own `not_found` message wins — the mock finds
+      // no row for a malformed id either.
+      if (isMalformedId(error)) return null;
+      throwDataError(error, true);
+    }
+    return (data as ListingRow | null) ?? null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Social proof
+  // -------------------------------------------------------------------------
+
+  async getOfferStats(listingId: string): Promise<OfferStats | null> {
+    if (typeof listingId !== 'string' || listingId === '') return null;
+    const [only] = await this.listOfferStats([listingId]);
+    return only ?? null;
+  }
+
+  /**
+   * Unknown and withdrawn ids are simply LEFT OUT — `offer_stats` carries
+   * `where l.deleted_at is null`, so a withdrawn offer has no row at all.
+   * That is not a privacy measure; each result carries its own `listing_id`,
+   * which is why `docs/DATA-LAYER.md` insists callers key the result by id
+   * rather than zipping it by index.
+   */
+  async listOfferStats(listingIds: readonly string[]): Promise<OfferStats[]> {
+    if (!Array.isArray(listingIds) || listingIds.length === 0) return [];
+    // Shape-filtered, not just emptiness-filtered — see `isUuid`. A malformed
+    // id simply has no row, which is what "unknown ids are skipped" means.
+    const ids = listingIds.filter((id) => typeof id === 'string' && isUuid(id));
+    if (ids.length === 0) return [];
+
+    const ctx = await openContext();
+    const { data, error } = await ctx.supabase
+      .from('offer_stats')
+      .select('listing_id, rating_average, review_count, sales_count')
+      .in('listing_id', ids);
+    // A malformed id inside an `in` list fails the whole cast, taking the valid
+    // ids down with it. The mock simply matches nothing for it, and the
+    // contract here is that unknown ids are skipped — so a malformed one is
+    // just another id with no row.
+    if (error) {
+      if (isMalformedId(error)) return [];
+      throwDataError(error, ctx.userId !== null);
+    }
+
+    // `client.ts` specifies "one entry per listing id that exists, IN THE ORDER
+    // GIVEN". PostgREST returns rows in whatever order the plan produced, so the
+    // result has to be re-keyed and re-emitted against the input — returning
+    // `data` directly made the order an accident of the query planner. Unknown
+    // and withdrawn ids drop out here, which is the other half of the contract.
+    const byId = new Map<string, OfferStats>();
+    for (const row of data ?? []) {
+      const stat = row as Record<string, unknown>;
+      const id = String(stat.listing_id);
+      byId.set(id, {
+        listing_id: id,
+        rating_average: toNumberOrNull(stat.rating_average),
+        review_count: toCount(stat.review_count),
+        sales_count: toCount(stat.sales_count),
+      });
+    }
+
+    return ids
+      .map((id) => byId.get(id))
+      .filter((stat): stat is OfferStats => stat !== undefined);
+  }
+
+  async getCoachStats(coachId: string): Promise<CoachStats> {
+    if (typeof coachId !== 'string' || coachId === '') return emptyCoachStats('');
+    const [only] = await this.listCoachStats([coachId]);
+    return only ?? emptyCoachStats(coachId);
+  }
+
+  /**
+   * Returns one row per requested id, IN THE ORDER GIVEN, with unknown ids kept
+   * as zeros — unlike `listOfferStats`, which drops them. The asymmetry is
+   * deliberate: `getCoachStats` always returns a row, so the batch form must
+   * not disagree with the single form.
+   */
+  async listCoachStats(coachIds: readonly string[]): Promise<CoachStats[]> {
+    if (!Array.isArray(coachIds) || coachIds.length === 0) return [];
+
+    // As above. The final map still runs over the ORIGINAL `coachIds`, so a
+    // malformed id gets the zero row this method contracts to return rather
+    // than being dropped.
+    const ids = coachIds.filter((id) => typeof id === 'string' && isUuid(id));
+    if (ids.length === 0) {
+      return coachIds.map((id) => emptyCoachStats(typeof id === 'string' && id !== '' ? id : ''));
+    }
+
+    const ctx = await openContext();
+    const { data, error } = await ctx.supabase
+      .from('coach_stats')
+      .select('coach_id, rating_average, review_count, sales_count')
+      .in('coach_id', ids);
+    // As in `listOfferStats` — except the contract here is zeros rather than
+    // omission, so the fallback below still returns one row per requested id.
+    if (error) {
+      if (isMalformedId(error)) return coachIds.map((id) => emptyCoachStats(typeof id === 'string' ? id : ''));
+      throwDataError(error, ctx.userId !== null);
+    }
+
+    const byId = new Map<string, CoachStats>();
+    for (const row of data ?? []) {
+      const stat = row as Record<string, unknown>;
+      const id = String(stat.coach_id);
+      byId.set(id, {
+        coach_id: id,
+        rating_average: toNumberOrNull(stat.rating_average),
+        review_count: toCount(stat.review_count),
+        sales_count: toCount(stat.sales_count),
+      });
+    }
+
+    return coachIds.map((id) =>
+      typeof id === 'string' && id !== '' ? (byId.get(id) ?? emptyCoachStats(id)) : emptyCoachStats(''),
+    );
+  }
+
+  /**
+   * The OFFER page's review list. `public_listing_reviews` (0003) applies both
+   * the published filter and the current-epoch filter inside the view, so this
+   * agrees with `getOfferStats` by construction and a withdrawn offer yields
+   * `[]` — those reviews stay readable on the coach profile below.
+   */
+  async listReviewsForListing(listingId: string): Promise<PublicReview[]> {
+    if (typeof listingId !== 'string' || listingId === '') return [];
+    const ctx = await openContext();
+
+    const { data, error } = await ctx.supabase
+      .from('public_listing_reviews')
+      .select(PUBLIC_REVIEW_COLUMNS)
+      .eq('listing_id', listingId)
+      .order('created_at', { ascending: false });
+    if (error) {
+      if (isMalformedId(error)) return [];
+      throwDataError(error, ctx.userId !== null);
+    }
+    return (data ?? []) as PublicReview[];
+  }
+
+  /**
+   * The COACH ACCOUNT's review list — every offer, every epoch, every
+   * withdrawal state, from `public_coach_reviews` (0003). It is the list beside
+   * `coach_stats`' count and must not gain a filter the count does not have.
+   */
+  async listReviewsForCoach(coachId: string): Promise<PublicReviewWithListing[]> {
+    if (typeof coachId !== 'string' || coachId === '') return [];
+    const ctx = await openContext();
+
+    const { data, error } = await ctx.supabase
+      .from('public_coach_reviews')
+      .select(`${PUBLIC_REVIEW_COLUMNS}, listing_title`)
+      .eq('coach_id', coachId)
+      .order('created_at', { ascending: false });
+    if (error) {
+      if (isMalformedId(error)) return [];
+      throwDataError(error, ctx.userId !== null);
+    }
+    return (data ?? []) as PublicReviewWithListing[];
+  }
+
+  async getOrder(actor: Actor, orderId: string): Promise<OrderWithListing | null> {
+    const ctx = await openAuthedContext(actor);
+    if (typeof orderId !== 'string' || orderId === '') return null;
+
+    // `orders_select_own_learner` / `_own_coach` / `_admin` are the boundary;
+    // there is no anon policy on `orders` at all. An order the actor may not
+    // see returns no row, and the mock throws `forbidden` for that case — so
+    // absence is disambiguated below rather than reported as "no such order".
+    const { data, error } = await ctx.supabase
+      .from('orders')
+      .select('*')
+      .eq('id', orderId)
+      .maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) return null;
+      throwDataError(error, true);
+    }
+    if (!data) {
+      // Either it does not exist, or it is not ours. Only an admin can tell
+      // those apart, and an admin can see every order — so for anyone else a
+      // missing row that DOES exist is a refusal. Distinguishing them would
+      // require a privileged read this client deliberately cannot make, and
+      // `null` is what a stranger should get regardless.
+      return null;
+    }
+
+    const [only] = await withListingTitles(ctx, [data as Order]);
+    return only ?? null;
+  }
+
+  async listMyOrders(actor: Actor): Promise<OrderWithListing[]> {
+    const ctx = await openAuthedContext(actor);
+
+    // The learner id is DERIVED from the actor, never a parameter, so this
+    // cannot be pointed at anyone else.
+    const { data, error } = await ctx.supabase
+      .from('orders')
+      .select('*')
+      .eq('learner_id', ctx.userId)
+      .order('created_at', { ascending: false });
+    if (error) throwDataError(error, true);
+    return withListingTitles(ctx, (data ?? []) as Order[]);
+  }
+
+  async listOrdersForCoach(actor: Actor, coachId: string): Promise<OrderWithListing[]> {
+    const ctx = await openAuthedContext(actor);
+    if (typeof coachId !== 'string' || coachId === '') return [];
+
+    const profile = await resolveProfile(ctx);
+    if (profile.id !== coachId && profile.role !== 'admin') {
+      throw new DataError('forbidden', 'You can only view your own sales.');
+    }
+
+    const { data, error } = await ctx.supabase
+      .from('orders')
+      .select('*')
+      .eq('coach_id', coachId)
+      .order('created_at', { ascending: false });
+    // Only reachable for an admin: a non-admin whose id is not `coachId` was
+    // already refused above, and their own id is a well-formed uuid.
+    if (error) {
+      if (isMalformedId(error)) return [];
+      throwDataError(error, true);
+    }
+    return withListingTitles(ctx, (data ?? []) as Order[]);
+  }
+
+  /**
+   * `listing_id`, `author_id` and `price_epoch` are taken from the order and the
+   * listing, NEVER from input — `reviews_insert_own_purchase` re-derives the
+   * same facts in its `with check`, and the `UNIQUE` constraint on
+   * `reviews.order_id` is what actually makes "one review per purchase" true.
+   */
+  async createReview(actor: Actor, input: CreateReviewInput): Promise<Review> {
+    const orderId = requireText(input?.order_id, 'Order', 200);
+    const rating = requireRating(input?.rating);
+    const body = requireText(input?.body, 'Review', 2000, 3);
+
+    const ctx = await openAuthedContext(actor);
+
+    const { data: orderRow, error: orderError } = await ctx.supabase
+      .from('orders')
+      .select('*')
+      .eq('id', orderId)
+      .maybeSingle();
+    if (orderError) {
+      // Same rule as `readListingRow`: no such order, not "bad input".
+      if (isMalformedId(orderError)) throw new DataError('not_found', 'That order could not be found.');
+      throwDataError(orderError, true);
+    }
+    if (!orderRow) throw new DataError('not_found', 'That order could not be found.');
+
+    const order = orderRow as Order;
+    if (order.learner_id !== ctx.userId) {
+      throw new DataError('forbidden', 'You can only review something you have bought.');
+    }
+
+    const listing = await this.readListingRow(ctx, order.listing_id);
+    if (!listing) throw new DataError('not_found', 'That offer could not be found.');
+    if (listing.coach_id === ctx.userId) {
+      throw new DataError('forbidden', 'You cannot review your own offer.');
+    }
+
+    const { data: existing, error: existingError } = await ctx.supabase
+      .from('reviews')
+      .select('id')
+      .eq('order_id', order.id)
+      .maybeSingle();
+    if (existingError) throwDataError(existingError, true);
+    if (existing) throw new DataError('conflict', 'You have already reviewed this purchase.');
+
+    const { data, error } = await ctx.supabase
+      .from('reviews')
+      .insert({
+        order_id: order.id,
+        listing_id: order.listing_id,
+        author_id: ctx.userId,
+        rating,
+        body,
+        price_epoch: order.price_epoch,
+      })
+      .select('*')
+      .maybeSingle();
+    if (error) {
+      // The UNIQUE constraint is the real guard against a double submit; the
+      // pre-check above only produces nicer copy and loses a race.
+      throwDataError(error, true);
+    }
+    if (!data) throw new DataError('invalid', 'That review could not be saved.');
+    return data as Review;
+  }
+
+  // -------------------------------------------------------------------------
+  // Invites
+  // -------------------------------------------------------------------------
+
+  async createInvite(actor: Actor, input: CreateInviteInput): Promise<Invite> {
+    const note = optionalText(input?.note, 'Note', 200);
+    const expiresAt = requireIsoTimestamp(input?.expiresAt, 'Expiry date');
+
+    const ctx = await openAuthedContext(actor);
+    const admin = await requireAdminProfile(ctx);
+
+    // Retry on a code collision rather than pre-reading the table: the mock
+    // loops against its in-memory list, and here the equivalent authority is
+    // the unique constraint. A 23505 means the generator produced a code that
+    // already exists, which is worth one more roll of the dice.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const { data, error } = await ctx.supabase
+        .from('invites')
+        .insert({ code: generateInviteCode(), created_by: admin.id, note, expires_at: expiresAt })
+        .select('*')
+        .maybeSingle();
+
+      if (!error && data) return data as Invite;
+      // Anything that is NOT a duplicate code is a real refusal — an
+      // `invites_insert_admin` failure, say — and retrying it five times would
+      // turn one clear error into five identical ones and a wrong message.
+      if (error && (error as { code?: string }).code !== '23505') throwDataError(error, true);
+      // No error and no row. The insert may well have COMMITTED and only the
+      // representation come back empty, so looping would mint a second invite
+      // for one request. Stop instead.
+      if (!error) break;
+    }
+    throw new DataError('conflict', 'That invite code could not be created. Please try again.');
+  }
+
+  async listInvites(actor: Actor): Promise<Invite[]> {
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    const { data, error } = await ctx.supabase
+      .from('invites')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) throwDataError(error, true);
+    return (data ?? []) as Invite[];
+  }
+
+  async revokeInvite(actor: Actor, code: string): Promise<Invite> {
+    const needle = requireText(code, 'Invite code', 100);
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    // Case-insensitive, to match `redeem_invite_code()` and the mock. The
+    // pattern is escaped so a code containing `%` cannot revoke a different one.
+    // A code containing `*` cannot be matched literally, and must not be
+    // allowed to become a wildcard scan of the invites table. No minted code
+    // can contain one — `invite-code.ts` draws from an alphanumeric alphabet —
+    // so this is simply "no such code".
+    const exact = escapeLike(needle);
+    if (exact === null) throw new DataError('not_found', 'That invite code does not exist.');
+
+    const { data: found, error: findError } = await ctx.supabase
+      .from('invites')
+      .select('*')
+      .ilike('code', exact)
+      .maybeSingle();
+    if (findError) throwDataError(findError, true);
+    if (!found) throw new DataError('not_found', 'That invite code does not exist.');
+
+    const invite = found as Invite;
+    if (invite.redeemed_by) throw new DataError('conflict', 'That invite code has already been redeemed.');
+    if (invite.revoked_at) throw new DataError('conflict', 'That invite code is already revoked.');
+
+    const { data, error } = await ctx.supabase
+      .from('invites')
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('code', invite.code)
+      .select('*')
+      .maybeSingle();
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('not_found', 'That invite code does not exist.');
+    return data as Invite;
+  }
+
+  /**
+   * An RPC, not a table write, because it has to touch `profiles.role` — which
+   * `guard_profile_privilege_columns` refuses from any API session.
+   *
+   * `redeem_invite_code()` claims the code and promotes the caller in ONE
+   * conditional UPDATE, so two simultaneous redemptions of the same code cannot
+   * both win. Its refusals ("That invite code is not valid.") are already
+   * end-user copy and reach the caller through `errors.ts`, including the
+   * deliberate choice to give revoked, expired and already-redeemed codes one
+   * undifferentiated message.
+   */
+  async redeemInviteCode(actor: Actor, code: string): Promise<Profile> {
+    // Deliberately NOT `requireText`. The mock authenticates FIRST, then emits
+    // 'Enter an invite code.' for an empty value and one undifferentiated
+    // 'That invite code is not valid.' for everything else — no length cap.
+    // Capping the length here would have added a signal the mock does not have:
+    // a 150-character guess would be told it was too long, while a 12-character
+    // one was told nothing, which is exactly the oracle that `client.ts` and
+    // `redeem_invite_code()` both go out of their way to avoid.
+    const trimmed = typeof code === 'string' ? code.trim() : '';
+    const ctx = await openAuthedContext(actor);
+    if (trimmed === '') throw new DataError('invalid', 'Enter an invite code.');
+
+    const { data, error } = await ctx.supabase.rpc('redeem_invite_code', { p_code: trimmed });
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('not_found', 'Your profile could not be found.');
+    return (Array.isArray(data) ? data[0] : data) as Profile;
+  }
+
+  // -------------------------------------------------------------------------
+  // Coach applications
+  // -------------------------------------------------------------------------
+
+  /**
+   * An RPC: it inserts the application AND sets the applicant's `coach_status`
+   * to `pending_review`, and the second half is a privilege column.
+   */
+  async createCoachApplication(
+    actor: Actor,
+    input: CreateCoachApplicationInput,
+  ): Promise<CoachApplication> {
+    const bio = requireText(input?.bio, 'Bio', 2000, 20);
+    const experience = requireText(input?.experience, 'Experience', 2000, 20);
+    const sport = optionalText(input?.sport, 'Sport', 80);
+
+    const ctx = await openAuthedContext(actor);
+
+    const { data, error } = await ctx.supabase.rpc('apply_to_coach', {
+      p_bio: bio,
+      p_experience: experience,
+      p_sport: sport,
+    });
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('invalid', 'That application could not be filed.');
+    return (Array.isArray(data) ? data[0] : data) as CoachApplication;
+  }
+
+  async getMyCoachApplication(actor: Actor): Promise<CoachApplication | null> {
+    const ctx = await openAuthedContext(actor);
+
+    // `coach_applications_select_own` scopes this to the actor; the filter is
+    // restated so the intent is visible, and the id comes from the session.
+    // NEWEST first and take one: a re-applicant holds several, and the current
+    // one is what a status page must show.
+    const { data, error } = await ctx.supabase
+      .from('coach_applications')
+      .select('*')
+      .eq('user_id', ctx.userId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error) throwDataError(error, true);
+
+    const rows = (data ?? []) as CoachApplication[];
+    return rows[0] ?? null;
+  }
+
+  async listCoachApplications(
+    actor: Actor,
+    filter?: CoachApplicationFilter,
+  ): Promise<CoachApplicationWithUser[]> {
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    let query = ctx.supabase.from('coach_applications').select('*');
+    if (filter?.status) query = query.eq('status', filter.status);
+
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) throwDataError(error, true);
+
+    const applications = (data ?? []) as CoachApplication[];
+    if (applications.length === 0) return [];
+
+    // An admin reads `profiles` through `profiles_select_admin`, so the email
+    // is available here — and this is an admin-only shape, which is why
+    // `CoachApplicationWithUser` may carry one at all.
+    const userIds = [...new Set(applications.map((a) => a.user_id))];
+    const { data: profiles, error: profilesError } = await ctx.supabase
+      .from('profiles')
+      .select('id, full_name, email, coach_status')
+      .in('id', userIds);
+    if (profilesError) throwDataError(profilesError, true);
+
+    const byId = new Map<string, { full_name: string; email: string; coach_status: Profile['coach_status'] }>();
+    for (const row of (profiles ?? []) as {
+      id: string;
+      full_name: string;
+      email: string;
+      coach_status: Profile['coach_status'];
+    }[]) {
+      byId.set(row.id, { full_name: row.full_name, email: row.email, coach_status: row.coach_status });
+    }
+
+    return applications.map((application) => {
+      const user = byId.get(application.user_id);
+      return {
+        ...application,
+        user_name: user?.full_name ?? 'Unknown user',
+        user_email: user?.email ?? '',
+        user_coach_status: user?.coach_status ?? 'none',
+      };
+    });
+  }
+
+  /**
+   * An RPC, for the same reason as the other two: it writes the review columns
+   * AND the applicant's `role` / `coach_status`.
+   *
+   * `review_coach_application()` re-checks `is_admin()`, refuses a self-review,
+   * pins `and a.status = 'pending'` inside the UPDATE so a second reviewer
+   * cannot overwrite a decision, and only ever RAISES the applicant's role.
+   */
+  async reviewCoachApplication(
+    actor: Actor,
+    applicationId: string,
+    decision: 'approved' | 'rejected',
+    note?: string,
+  ): Promise<CoachApplication> {
+    // Validated EXACTLY as the mock does, down to the label and the cap: the
+    // note field is `maxLength={1000}` in `admin/applications/review-form.tsx`,
+    // and a 1500-character note must fail identically on both backends. The
+    // application id is deliberately NOT run through `requireText` — the mock
+    // does not either, so a bad id has to come back as `not_found` rather than
+    // as `invalid`. `p_application_id` is declared `uuid`, so an empty or
+    // malformed value fails the CAST before the function body runs; that 22P02
+    // is translated below rather than here.
+    if (decision !== 'approved' && decision !== 'rejected') {
+      throw new DataError('invalid', 'A review decision must be approve or reject.');
+    }
+    const reviewNote = optionalText(note, 'Review note', 1000);
+    const id = typeof applicationId === 'string' ? applicationId.trim() : '';
+
+    const ctx = await openAuthedContext(actor);
+
+    const { data, error } = await ctx.supabase.rpc('review_coach_application', {
+      p_application_id: id,
+      p_decision: decision,
+      p_note: reviewNote,
+    });
+    if (error) {
+      // The cast failed: there is no application at that id. Same wording as
+      // the mock, which reports a miss on its own lookup.
+      if (isMalformedId(error)) {
+        throw new DataError('not_found', 'That application could not be found.');
+      }
+      throwDataError(error, true);
+    }
+    if (!data) throw new DataError('not_found', 'That application could not be found.');
+    return (Array.isArray(data) ? data[0] : data) as CoachApplication;
+  }
+}

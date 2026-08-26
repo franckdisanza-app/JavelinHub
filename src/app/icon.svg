@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="JavelinHub">
+  <!--
+    The square icon from brand guidelines section 02 — a separate drawing, not
+    the wide mark squashed into a square. At 34 degrees a javelin rises 0.559 of
+    its own length, so a full-length shaft cannot share a square frame with a
+    full-height athlete; this drawing crops the shaft instead. Coordinates are
+    the doc's, verbatim, and the shaft still measures exactly 34.00 degrees.
+
+    Ink ground with the mark in Chalk: section 03 names the app icon as one of
+    the three places Ink is an accent surface, and section 02 says the whole
+    mark flips to Chalk on Ink. It stays Sector Blue only on White or Sheet,
+    which is why the in-page lockup and this file differ.
+
+    The two hexes here are literals because an icon file has no stylesheet to
+    read tokens from. They are the palette's Ink and Chalk exactly; this file
+    and :root in globals.css are the only places in the repo that spell a colour.
+  -->
+  <rect width="48" height="48" fill="#0D1014"/>
+  <g fill="none" stroke="#E9ECE4" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 25.1 L37 8.91"/>
+    <circle cx="24" cy="11" r="5" fill="#E9ECE4" stroke="none"/>
+    <path d="M25 17 L26.5 29"/>
+    <path d="M25 17.5 L30 15 L34 10.32"/>
+    <path d="M25 18 L16 21"/>
+    <path d="M26.5 29 L18 34 L13 43"/>
+    <path d="M26.5 29 L33 35 L38 44"/>
+  </g>
+</svg>

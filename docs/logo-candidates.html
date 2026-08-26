@@ -1,0 +1,199 @@
+<title>JavelinHub Mark</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@100;200;300;400;500;600;700;800;900&family=Newsreader:ital,wght@0,200..700;1,200..500&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --ink:#0D1014; --chalk:#E9ECE4; --sheet:#F6F7F2; --white:#FFFFFF;
+    --sector:#1B3AE0; --turf:#1F4F33; --foul:#B3261E; --steel:#5A615A; --rule:#CFD4C8;
+    --grid: rgb(13 16 20 / 0.055);
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; color:var(--ink);
+    font-family:'Newsreader',Georgia,serif; font-size:17px; line-height:1.6;
+    background-color:var(--sheet);
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size:34px 34px;
+  }
+  .wrap{max-width:1000px;margin:0 auto;padding:64px 44px 110px;}
+  .mono{font-family:'IBM Plex Mono',monospace;}
+  .eyebrow{
+    font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.22em;
+    text-transform:uppercase;color:var(--sector);display:flex;align-items:center;gap:12px;margin-bottom:18px;
+  }
+  .eyebrow::before{content:'';width:24px;height:2px;background:var(--sector);transform:rotate(-34deg);flex:none;}
+  h1{
+    font-family:'Barlow Condensed',Arial Narrow,sans-serif;text-transform:uppercase;
+    font-weight:900;font-size:clamp(44px,8vw,84px);line-height:.88;margin:0 0 12px;
+  }
+  h1 em{font-style:normal;font-weight:100;display:block;}
+  .lead{font-size:19px;max-width:670px;color:#232821;margin:0 0 14px;}
+  h2{
+    font-family:'Barlow Condensed',Arial Narrow,sans-serif;text-transform:uppercase;
+    font-weight:900;font-size:38px;line-height:.9;margin:60px 0 6px;
+  }
+  .note{font-size:15.5px;max-width:670px;color:#39403A;margin:0 0 22px;}
+
+  .card{background:var(--white);border:1px solid var(--rule);margin-bottom:26px;}
+  .card-h{
+    display:flex;justify-content:space-between;align-items:baseline;gap:14px;
+    border-bottom:1px solid var(--rule);padding:14px 20px;flex-wrap:wrap;
+  }
+  .card-h .n{
+    font-family:'Barlow Condensed',Arial Narrow,sans-serif;text-transform:uppercase;
+    font-weight:800;font-size:27px;line-height:1;
+  }
+  .card-h .t{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--steel);}
+  .card-b{padding:26px 20px;}
+
+  .ladder{display:flex;align-items:flex-end;gap:28px;flex-wrap:wrap;}
+  .rung{display:flex;flex-direction:column;align-items:center;gap:9px;}
+  .rung .lbl{font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:var(--steel);}
+  .mk{color:var(--ink);display:block;}
+  .mk.blue{color:var(--sector);}
+
+  .grounds{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule);border-top:1px solid var(--rule);}
+  .g{padding:30px 20px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:18px;}
+  .g.sheet{background:var(--sheet);}
+  .g.ink{background:var(--ink);}
+  .g.ink .mk{color:var(--chalk);}
+  .g.ink .lock .txt{color:var(--chalk);}
+
+  .lock{display:flex;align-items:center;gap:12px;}
+  .lock .txt{
+    font-family:'Barlow Condensed',Arial Narrow,sans-serif;text-transform:uppercase;
+    line-height:.82;font-size:44px;color:var(--ink);
+  }
+  .lock .txt .l{font-weight:100;}
+  .lock .txt .h{font-weight:900;}
+  .lock.sm .txt{font-size:26px;}
+  .lock.stack{flex-direction:column;align-items:flex-start;gap:6px;}
+
+  table.m{border-collapse:collapse;width:100%;font-family:'IBM Plex Mono',monospace;font-size:11.5px;margin-top:10px;}
+  table.m th,table.m td{border-bottom:1px solid var(--rule);padding:9px 8px;text-align:left;}
+  table.m th{font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--steel);font-weight:500;}
+  table.m td.hi{color:var(--sector);}
+
+  .verdict{border-left:3px solid var(--sector);padding:4px 0 4px 20px;margin-top:44px;}
+  .verdict .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.16em;color:var(--sector);text-transform:uppercase;margin-bottom:9px;}
+  .verdict p{margin:0 0 10px;font-size:16px;max-width:670px;}
+  .flag{border-left:3px solid var(--foul);background:rgb(179 38 30 / 0.045);padding:14px 18px;margin:26px 0;font-size:15.5px;max-width:700px;}
+  .flag .lbl{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--foul);margin-bottom:7px;}
+  .flag p{margin:0 0 9px;}
+  @media (max-width:760px){
+    .wrap{padding:44px 20px 70px;}
+    .grounds{grid-template-columns:1fr;}
+  }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <!-- WIDE MARK, 72x48. Athlete 38 tall = 79% of frame. Javelin 62.7 at 34.00deg. -->
+  <g id="wide" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 40 L62 4.93"/>
+    <circle cx="44" cy="11" r="5" fill="currentColor" stroke="none"/>
+    <path d="M45 17 L46.5 29"/>
+    <path d="M45 17.5 L50 15 L54 10.32"/>
+    <path d="M45 18 L36 21"/>
+    <path d="M46.5 29 L38 34 L33 43"/>
+    <path d="M46.5 29 L53 35 L58 44"/>
+  </g>
+  <!-- SQUARE ICON, 48x48. Same athlete, javelin cropped to a 28.9 stub at 34.00deg. -->
+  <g id="sq" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 25.1 L37 8.91"/>
+    <circle cx="24" cy="11" r="5" fill="currentColor" stroke="none"/>
+    <path d="M25 17 L26.5 29"/>
+    <path d="M25 17.5 L30 15 L34 10.32"/>
+    <path d="M25 18 L16 21"/>
+    <path d="M26.5 29 L18 34 L13 43"/>
+    <path d="M26.5 29 L33 35 L38 44"/>
+  </g>
+  <!-- previous attempt, for comparison -->
+  <g id="prev" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="16.5" cy="13" r="4.2" fill="currentColor" stroke="none"/>
+    <path d="M17 18.2 L19 29"/><path d="M17 18.6 L21.5 17 L25 16"/><path d="M17 19 L10.5 23.5"/>
+    <path d="M19 29 L25.5 34 L28.5 40"/><path d="M19 29 L13 35 L8.5 40.5"/>
+    <path d="M21.5 18.36 L39.74 6.06"/>
+  </g>
+</defs></svg>
+
+<div class="wrap">
+
+<div class="eyebrow">Mark A — built to your sketch</div>
+<h1><em>Javelin</em>Hub</h1>
+<p class="lead">Rebuilt from your proportions: the athlete now fills <strong>79%</strong> of the frame height and the javelin runs long and low across it, passing just under the head rather than projecting from a raised hand.</p>
+
+<div class="flag">
+  <div class="lbl">One thing your sketch forced, and it is worth knowing</div>
+  <p>A long javelin at 34&deg; <strong>does not fit a square frame</strong> alongside a full-height athlete. The arithmetic is unforgiving: a shaft rises 0.559&times; its own length, so at 34&deg; a 62-unit javelin needs 35 units of vertical rise and 52 of width. In a 48&times;48 box with a 38-tall figure there is only about 10 units of headroom — which caps the javelin at <strong>17.9 units</strong>. That is precisely the stubby shaft I drew last time, and it is why it looked wrong.</p>
+  <p>The frame has to be at least <strong>1.36:1 landscape</strong>. Yours is 4:3, which is exactly why it works. So the mark is now <strong>two drawings</strong>: a wide one for the header and anywhere with room, and a square crop for the favicon and app icon, where the javelin is necessarily shortened.</p>
+</div>
+
+<h2>The mark</h2>
+<p class="note">72&times;48. Athlete 38 units tall, javelin 62.7 at a measured 34.00&deg;, gripped at the rear hand and crossing the shoulder line 1.07 units below the head.</p>
+
+<div class="card">
+  <div class="card-h"><span class="n">Wide · primary</span><span class="t">72&times;48 · athlete 79% · ratio 1.65</span></div>
+  <div class="card-b"><div class="ladder">
+    <div class="rung"><svg class="mk" width="288" height="192" viewBox="0 0 72 48"><use href="#wide"/></svg><span class="lbl">288</span></div>
+    <div class="rung"><svg class="mk" width="144" height="96" viewBox="0 0 72 48"><use href="#wide"/></svg><span class="lbl">144</span></div>
+    <div class="rung"><svg class="mk" width="72" height="48" viewBox="0 0 72 48"><use href="#wide"/></svg><span class="lbl">72</span></div>
+    <div class="rung"><svg class="mk blue" width="144" height="96" viewBox="0 0 72 48"><use href="#wide"/></svg><span class="lbl">sector</span></div>
+  </div></div>
+  <div class="grounds">
+    <div class="g sheet">
+      <div class="lock"><svg class="mk" width="84" height="56" viewBox="0 0 72 48"><use href="#wide"/></svg><span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span></div>
+      <div class="lock stack"><svg class="mk" width="150" height="100" viewBox="0 0 72 48"><use href="#wide"/></svg><span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span></div>
+    </div>
+    <div class="g ink">
+      <div class="lock"><svg class="mk" width="84" height="56" viewBox="0 0 72 48"><use href="#wide"/></svg><span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span></div>
+      <div class="lock stack"><svg class="mk" width="150" height="100" viewBox="0 0 72 48"><use href="#wide"/></svg><span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span></div>
+    </div>
+  </div>
+</div>
+
+<h2>The icon</h2>
+<p class="note">Same athlete, same 34&deg;, javelin cropped to a 28.9-unit stub so the figure can stay full height in a square. This is the favicon, the tab, the installed app icon — the places a wide mark cannot go.</p>
+
+<div class="card">
+  <div class="card-h"><span class="n">Square · icon</span><span class="t">48&times;48 · stub 28.9 · ratio 0.76</span></div>
+  <div class="card-b"><div class="ladder">
+    <div class="rung"><svg class="mk" width="96" height="96" viewBox="0 0 48 48"><use href="#sq"/></svg><span class="lbl">96</span></div>
+    <div class="rung"><svg class="mk" width="48" height="48" viewBox="0 0 48 48"><use href="#sq"/></svg><span class="lbl">48</span></div>
+    <div class="rung"><svg class="mk" width="32" height="32" viewBox="0 0 48 48"><use href="#sq"/></svg><span class="lbl">32</span></div>
+    <div class="rung"><svg class="mk" width="24" height="24" viewBox="0 0 48 48"><use href="#sq"/></svg><span class="lbl">24</span></div>
+    <div class="rung"><svg class="mk" width="16" height="16" viewBox="0 0 48 48"><use href="#sq"/></svg><span class="lbl">16 · tab</span></div>
+  </div></div>
+  <div class="grounds">
+    <div class="g sheet"><div class="lock sm"><svg class="mk" width="34" height="34" viewBox="0 0 48 48"><use href="#sq"/></svg><span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span></div></div>
+    <div class="g ink"><div class="lock sm"><svg class="mk" width="34" height="34" viewBox="0 0 48 48"><use href="#sq"/></svg><span class="txt"><span class="l">Javelin</span><span class="h">Hub</span></span></div></div>
+  </div>
+</div>
+
+<h2>Against the last one</h2>
+<p class="note">Left is what I sent before, right is your sketch's proportions. The change is not just the ratio — it is the pose. The javelin moved from projecting off a raised hand to lying long and low across the body.</p>
+<div class="card"><div class="card-b" style="display:flex;gap:44px;align-items:center;flex-wrap:wrap;justify-content:center;">
+  <div style="text-align:center;"><svg class="mk" width="130" height="130" viewBox="0 0 48 48" style="color:var(--steel)"><use href="#prev"/></svg><div class="lbl mono" style="font-size:9.5px;letter-spacing:.1em;color:var(--steel);margin-top:10px;">PREVIOUS · A2</div></div>
+  <div style="text-align:center;"><svg class="mk" width="195" height="130" viewBox="0 0 72 48"><use href="#wide"/></svg><div class="lbl mono" style="font-size:9.5px;letter-spacing:.1em;color:var(--steel);margin-top:10px;">NOW · TO YOUR SKETCH</div></div>
+</div></div>
+
+<table class="m">
+  <tr><th>&nbsp;</th><th>Athlete</th><th>% of frame</th><th>Javelin</th><th>Ratio</th><th>Angle</th></tr>
+  <tr><td>first attempt</td><td>19.3</td><td>40%</td><td>33.8</td><td>1.75</td><td>34.02&deg;</td></tr>
+  <tr><td>second (A2)</td><td>31.7</td><td>66%</td><td>22</td><td>0.69</td><td>34.00&deg;</td></tr>
+  <tr><td>your sketch</td><td>&mdash;</td><td>~64%</td><td>&mdash;</td><td>~1.49</td><td>&mdash;</td></tr>
+  <tr><td class="hi">now · wide</td><td class="hi">38</td><td class="hi">79%</td><td class="hi">62.7</td><td class="hi">1.65</td><td class="hi">34.00&deg;</td></tr>
+  <tr><td class="hi">now · icon</td><td class="hi">38</td><td class="hi">79%</td><td class="hi">28.9</td><td class="hi">0.76</td><td class="hi">34.00&deg;</td></tr>
+</table>
+
+<div class="verdict">
+  <div class="lbl">What I need from you</div>
+  <p>Is this the pose? Your sketch has the thrower facing <strong>left</strong> with the javelin's high end trailing behind on the right, which is a carry or withdrawal position rather than a release — so I drew it that way. Say if you would rather it face right, tip up and forward, which is the release the 34&deg; actually refers to.</p>
+  <p>Everything else I can adjust exactly: stride width, arm height, head size, stroke weight, javelin length. Name it and I will set the number.</p>
+  <p style="color:var(--steel);">Still drawn blind — the preview here does not composite, so every coordinate was solved rather than seen. The hand sits on the javelin line to 0.01 units and the head clears the shaft by 1.07.</p>
+</div>
+
+</div>
