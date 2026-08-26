@@ -9,7 +9,9 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "verify:authz": "node --import ./scripts/register-ts.mjs scripts/verify-authz.mts",
-    "verify:pages": "node --import ./scripts/register-ts.mjs scripts/verify-pages.mts"
+    "verify:pages": "node --import ./scripts/register-ts.mjs scripts/verify-pages.mts",
+    "db:link": "supabase link --project-ref trocsdetpwyqcgyfclir",
+    "db:push": "supabase db push"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",
@@ -25,6 +27,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.1",
+    "supabase": "^2.115.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

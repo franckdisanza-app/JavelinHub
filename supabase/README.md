@@ -44,10 +44,27 @@ credentials only the project owner has.
 
 1. **Apply the schema.** ⟵ OUTSTANDING
    ```bash
-   supabase login
-   supabase link --project-ref trocsdetpwyqcgyfclir
-   supabase db push          # applies 0001_init, 0002_rls, 0003_read_models in order
+   npx supabase login              # interactive: opens a browser
+   npm run db:link                 # prompts for the database password
+   npm run db:push                 # applies 0001, 0002, 0003 in order
    ```
+   The CLI is a **dev dependency**, not a global install — Supabase dropped
+   support for `npm i -g supabase`, so it is `npx supabase` (or the `db:*`
+   scripts in `package.json`). `supabase login` is the only interactive step
+   and cannot be scripted; it opens a browser and asks for a verification code.
+
+   The migration filenames are `0001_`/`0002_`/`0003_` rather than the CLI's
+   usual 14-digit timestamps. That is fine — it matches on `^([0-9]+)_(.+)$`
+   and orders by that numeric prefix — and renaming them would invalidate the
+   dozens of references to them in code comments and in this file.
+
+   `supabase init` has already been run: `config.toml` is committed, and its
+   `[auth.email] enable_confirmations` is `false`, which is what this app
+   needs. **That file configures a LOCAL `supabase start` stack, not the remote
+   project** — it changes nothing about `trocsdetpwyqcgyfclir` unless you run
+   `supabase config push`, which you should not do yet: `site_url` still points
+   at `http://127.0.0.1:3000` and pushing it would set that as the production
+   site URL. Turn confirmation off in the dashboard instead (below).
    `0002_rls.sql` installs an `after insert on auth.users` trigger, so profiles
    are created automatically from then on. Run `seed.sql` for the demo fixtures
    (see its header — the `auth.users` rows must exist first), then bootstrap an
