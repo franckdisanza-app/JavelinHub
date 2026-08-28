@@ -82,22 +82,24 @@ Cheapest high-impact item on this list.
 The data layer is well ahead of the app. These are written, authorization-
 checked, and exercised against Postgres — they need pages, not plumbing.
 
-| Method | Missing UI |
-|---|---|
-| `updateMyCoachProfile` | coach profile editor |
-| `listMyListings` | coach dashboard, incl. the `withdrawn_by_admin` flag |
-| `updateListing` | edit an offer |
-| `softDeleteListing` / `restoreListing` | withdraw / restore controls |
-| `listListingRevisions` | edit and price history |
-| `getListingForViewer` | the owner's view of a withdrawn offer |
-| `listMyOrders` | "my purchases" |
-| `listOrdersForCoach` | "my sales" |
-| `getOrder` | order detail |
-| `createReview` | write a review |
+| Method | UI | |
+|---|---|---|
+| `updateMyCoachProfile` | `/coach/profile` | **done** |
+| `listMyListings` | `/coach/offers`, incl. the `withdrawn_by_admin` flag | **done** |
+| `updateListing` | `/coach/offers/[id]/edit` | **done** |
+| `softDeleteListing` / `restoreListing` | withdraw / restore controls | **done** |
+| `listListingRevisions` | edit history on the editor | **done** |
+| `getListingForViewer` | the owner's view of a withdrawn offer | still none |
+| `listMyOrders` | "my purchases" | still none |
+| `listOrdersForCoach` | "my sales" | still none |
+| `getOrder` | order detail | still none |
+| `createReview` | write a review | still none |
 
-Read that table for what it implies about today's app: **a coach can publish an
-offer and then never edit or withdraw it.** `/offers/new` exists; nothing else
-in the offer lifecycle does.
+The coach's own loop is now closed: publish, edit, withdraw, restore, and a
+public profile to be found by. **The five that remain are all purchase-side**,
+and none can be finished without §1 — there is no way to buy anything, so there
+are no orders to list and nothing to review. They are not separate work from
+checkout; they are its UI.
 
 ---
 
@@ -187,13 +189,17 @@ decisions, not omissions:
 
 ## Suggested order
 
-1. **Coach profile editor.** Hours of work; fixes a visibly empty directory.
-2. **Coach dashboard + edit / withdraw / restore.** Pure UI over a finished,
-   RLS-verified data layer.
-3. **Storage and delivery.** This is the product.
-4. **Checkout, then payouts.**
-5. **Password reset and transactional email.**
-6. **Chat.**
+1. ~~**Coach profile editor.**~~ Done.
+2. ~~**Coach dashboard + edit / withdraw / restore.**~~ Done.
+3. **Deploy to Vercel.** Cheap, and it surfaces environment problems while the
+   surface is still small. Supabase's Site URL is also still
+   `http://127.0.0.1:3000`, which has to be the real domain before any email
+   flow is built on top of it.
+4. **Storage and delivery.** This is the product.
+5. **Checkout, then payouts.**
+6. **Password reset and transactional email.**
+7. **Chat.**
 
-Items 1 and 2 are the only ones that need no new schema, no new integration and
-no new money — which is why they come first despite being the least exciting.
+Everything from 4 onwards needs new schema, a new integration, or money moving.
+That is why 1 and 2 came first despite being the least exciting — they were the
+only items needing none of the three.

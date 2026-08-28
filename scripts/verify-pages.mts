@@ -153,6 +153,7 @@ async function plantFixtures(): Promise<{
   deapprovedOfferId: string;
   soldUnreviewedCoachId: string;
   soldUnreviewedOfferId: string;
+  adminTakenDownOfferId: string;
 }> {
   const db = getDataClient();
 
@@ -250,11 +251,45 @@ async function plantFixtures(): Promise<{
   // being a link, because the offer is now a 404 for the public.
   await db.softDeleteListing(CORY, OFFER.video);
 
+  // An ADMIN TAKEDOWN, which the seed has no example of and which
+  // /coach/offers renders differently from a coach's own withdrawal: no Restore
+  // control, because guard_listing_update() would refuse it.
+  //
+  // Created fresh and withdrawn immediately, rather than taking down one of the
+  // seeded offers, so that it is invisible to every public read from the moment
+  // it exists — the browse grid, the coach page and their card counts are all
+  // unchanged by it. It also carries no orders or reviews, so neither rollup
+  // moves.
+  const takenDown = await db.createListing(CORY, {
+    title: 'Taken Down By An Administrator',
+    description:
+      'A fixture offer that an administrator removed, so the dashboard has a takedown to render.',
+    price_cents: 1500,
+    category: 'other',
+  });
+
+  // Edited ONCE before the takedown, which is the only way to get a real
+  // `listing_revisions` row: the seed creates none at all — it writes
+  // `price_epoch: 2` on the re-priced offer directly — so without this the edit
+  // history could only ever be asserted empty. Going 1500 -> 2000 is an
+  // INCREASE, so the trigger both archives the superseded row and advances the
+  // epoch, and the assertions can tell those two apart.
+  await db.updateListing(CORY, takenDown.id, {
+    title: 'Taken Down By An Administrator',
+    description:
+      'A fixture offer that an administrator removed, so the dashboard has a takedown to render.',
+    price_cents: 2000,
+    category: 'other',
+  });
+
+  await db.softDeleteListing(ADMIN, takenDown.id);
+
   return {
     deapprovedCoachId: dana.id,
     deapprovedOfferId: danaOffer.id,
     soldUnreviewedCoachId: rune.id,
     soldUnreviewedOfferId: runeOffer.id,
+    adminTakenDownOfferId: takenDown.id,
   };
 }
 
@@ -1151,6 +1186,109 @@ try {
     inputValue(nilsProfilePage.html, 'years'), '');
   check('a coach with no headline is told so rather than shown a blank',
     nilsProfilePage.text.includes('No headline yet'), true);
+
+
+  // -------------------------------------------------------------------------
+  section('/coach/offers — the coach dashboard');
+
+  /** The chunk of the dashboard belonging to one offer, by its Edit link. */
+  function offerRow(html: string, id: string): string | null {
+    for (const chunk of liChunks(html)) {
+      if (chunk.includes(`/coach/offers/${id}/edit`)) return chunk;
+    }
+    return null;
+  }
+
+  check(
+    'anonymous is sent to log in and back again',
+    await redirectTarget('/coach/offers'),
+    '/login?next=%2Fcoach%2Foffers',
+  );
+
+  const learnerDash = await getAs('/coach/offers', LEARNER);
+  check('a learner is told there is nothing to manage',
+    learnerDash.text.includes('You are not an approved coach yet'), true);
+  check('...and sees no offer rows', offerRow(learnerDash.html, OFFER.fundamentals), null);
+
+  const coachDash = await getAs('/coach/offers', COACH);
+  check('a coach sees a published offer', offerRow(coachDash.html, OFFER.fundamentals) !== null, true);
+
+  /*
+   * THE POINT OF THE PAGE: withdrawn offers are visible HERE and nowhere else.
+   * Every public listing read filters `deleted_at`, so if this list filtered it
+   * too there would be no route back for a coach who withdrew something.
+   */
+  check('...AND the one they withdrew themselves, which no public read shows',
+    offerRow(coachDash.html, OFFER.video) !== null, true);
+  check('...and the one an administrator took down',
+    offerRow(coachDash.html, fixtures.adminTakenDownOfferId) !== null, true);
+
+  const liveRow = offerRow(coachDash.html, OFFER.fundamentals) ?? '';
+  const selfWithdrawnRow = offerRow(coachDash.html, OFFER.video) ?? '';
+  const takenDownRow = offerRow(coachDash.html, fixtures.adminTakenDownOfferId) ?? '';
+
+  check('a live offer offers Withdraw, not Restore',
+    [liveRow.includes('Withdraw'), liveRow.includes('Put back on sale')], [true, false]);
+  check('...and links to its public page', liveRow.includes(`href="/offers/${OFFER.fundamentals}"`), true);
+
+  check('an offer the coach withdrew offers Restore',
+    selfWithdrawnRow.includes('Put back on sale'), true);
+  check('...and does NOT link to a public page it no longer has',
+    selfWithdrawnRow.includes(`href="/offers/${OFFER.video}"`), false);
+
+  /*
+   * THE ASYMMETRY THAT `owned_listings.withdrawn_by_admin` EXISTS FOR.
+   * `guard_listing_update()` refuses to let a coach clear a `deleted_at` an
+   * administrator set, so offering the control would be offering a button that
+   * is guaranteed to fail. The refusal still stands if the form is posted
+   * directly — this only removes the invitation.
+   */
+  check('an ADMIN takedown offers no Restore control at all',
+    takenDownRow.includes('Put back on sale'), false);
+  check('...and says who can undo it',
+    takenDownRow.includes('An administrator removed this offer'), true);
+  check('...while a self-withdrawal says no such thing',
+    selfWithdrawnRow.includes('An administrator removed this offer'), false);
+  check('...and every withdrawn offer is still editable',
+    [selfWithdrawnRow.includes(`/coach/offers/${OFFER.video}/edit`),
+     takenDownRow.includes(`/coach/offers/${fixtures.adminTakenDownOfferId}/edit`)], [true, true]);
+
+  // -------------------------------------------------------------------------
+  section('/coach/offers/[id]/edit — the editor and its history');
+
+  check('anonymous is sent to log in and back again',
+    await redirectTarget(`/coach/offers/${OFFER.fundamentals}/edit`),
+    `/login?next=%2Fcoach%2Foffers%2F${OFFER.fundamentals}%2Fedit`);
+
+  // Not "forbidden": an id that is not ours is simply not in listMyListings, so
+  // the page 404s and says nothing about whether the offer exists.
+  check('a coach editing SOMEBODY ELSE’S offer gets a 404',
+    (await getAs(`/coach/offers/${fixtures.soldUnreviewedOfferId}/edit`, COACH)).status, 404);
+  check('a learner gets a 404 too, not a form',
+    (await getAs(`/coach/offers/${OFFER.fundamentals}/edit`, LEARNER)).status, 404);
+
+  const editPage = await getAs(`/coach/offers/${OFFER.fundamentals}/edit`, COACH);
+  check('the owner gets the editor', editPage.status, 200);
+  check('...prefilled with the current price in pounds',
+    inputValue(editPage.html, 'price'), '45.00');
+  check('...and carries the id the action needs', inputValue(editPage.html, 'id'), OFFER.fundamentals);
+
+  /*
+   * The re-priced seeded offer has a revision, and the CURRENT values are not
+   * in `listing_revisions` — a revision is a snapshot of the SUPERSEDED row.
+   * So the history must show the old price and the page must show the new one.
+   */
+  const editedOffer = await getAs(`/coach/offers/${fixtures.adminTakenDownOfferId}/edit`, COACH);
+  check('a withdrawn offer is still editable by its owner', editedOffer.status, 200);
+  check('the history shows the SUPERSEDED price, not the current one',
+    editedOffer.text.includes('£15.00'), true);
+  check('...and the form shows the current one', inputValue(editedOffer.html, 'price'), '20.00');
+
+  // The seed writes no listing_revisions rows at all, so every seeded offer is
+  // genuinely unedited — including the one carrying price_epoch 2.
+  const neverEdited = await getAs(`/coach/offers/${OFFER.fundamentals}/edit`, COACH);
+  check('an offer that was never edited says so rather than showing an empty list',
+    neverEdited.text.includes('Never edited'), true);
 
 } finally {
   stopServer(server);
