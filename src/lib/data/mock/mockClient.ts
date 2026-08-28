@@ -80,6 +80,7 @@ import {
   requireListingCategory,
   requirePriceCents,
   requireRating,
+  optionalAvatarPath,
   requireText,
 } from '../validation';
 import { generateInviteCode } from '../invite-code';
@@ -159,6 +160,7 @@ function toPublicProfile(profile: Profile): PublicProfile {
     id: profile.id,
     full_name: profile.full_name,
     is_approved_coach: profile.coach_status === 'approved',
+    avatar_path: profile.avatar_path,
   };
 }
 
@@ -217,6 +219,7 @@ function toPublicCoach(profile: Profile): PublicCoach {
     coach_headline: profile.coach_headline,
     coach_bio: profile.coach_bio,
     coach_years_coaching: profile.coach_years_coaching,
+    avatar_path: profile.avatar_path,
   };
 }
 
@@ -468,6 +471,7 @@ export class MockDataClient implements DataClient {
         coach_headline: null,
         coach_bio: null,
         coach_years_coaching: null,
+        avatar_path: null,
         created_at: timestamp,
         updated_at: timestamp,
       };
@@ -618,6 +622,26 @@ export class MockDataClient implements DataClient {
   // =========================================================================
   // Listings
   // =========================================================================
+
+  async setMyAvatar(actor: Actor, path: string | null): Promise<Profile> {
+    const next = optionalAvatarPath(path);
+
+    return mutateDb((db) => {
+      const profile = resolveProfile(db, actor);
+
+      // Mirrors: the `profiles_avatar_path_shape` CHECK constraint, and the
+      // `(storage.foldername(name))[1] = auth.uid()` rule on every avatars
+      // storage policy. The first path segment IS the ownership claim, so a
+      // path under somebody else's id is refused rather than stored.
+      if (next !== null && !next.startsWith(`${profile.id}/`)) {
+        throw new DataError('forbidden', 'An avatar has to be stored under your own account.');
+      }
+
+      profile.avatar_path = next;
+      profile.updated_at = nowIso();
+      return copy(profile);
+    });
+  }
 
   async listListings(filter?: ListingFilter): Promise<ListingWithCoach[]> {
     const q = typeof filter?.q === 'string' ? filter.q.trim().toLowerCase() : '';

@@ -1140,6 +1140,28 @@ try {
     '/login?next=%2Fcoach%2Fprofile',
   );
 
+  /*
+   * THE AVATAR CARD, on the MOCK backend.
+   *
+   * These suites run with DATA_BACKEND=mock, which has no file storage at all —
+   * so this is the degraded path, and asserting it is the point. The page must
+   * still render, still edit the three text columns, and say plainly why the
+   * uploader is missing rather than showing a control that cannot work.
+   * `avatarStorageAvailable()` is what decides, and it is false here.
+   */
+  const coachAvatarPage = await getAs('/coach/profile', COACH);
+  check('the picture card renders', coachAvatarPage.text.includes('Your picture'), true);
+  check('...with no uploader, because the mock has no storage',
+    coachAvatarPage.html.includes('type="file"'), false);
+  check('...and says so instead of failing silently',
+    coachAvatarPage.text.includes('Picture uploads are not available here'), true);
+  check('...while still describing initials as the normal state, not a fallback',
+    coachAvatarPage.text.includes('No picture yet'), true);
+  check('no avatar image is rendered anywhere without a stored path',
+    /<img[^>]*avatars/.test(coachAvatarPage.html), false);
+  check('the text editor is unaffected by any of that',
+    inputValue(coachAvatarPage.html, 'headline'), 'Javelin technique and throws programming');
+
   const learnerProfilePage = await getAs('/coach/profile', LEARNER);
   check('a learner is told why there is nothing to edit',
     learnerProfilePage.text.includes('You are not an approved coach yet'), true);

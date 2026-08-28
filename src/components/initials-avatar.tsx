@@ -2,13 +2,21 @@ import { cn } from '@/components/ui/cn';
 import { initialsOf } from '@/lib/initials';
 
 /**
- * A square initials tile, derived entirely from the name.
+ * A square avatar tile: an uploaded picture when there is one, initials
+ * otherwise.
  *
- * NO UPLOADS AND NO STORAGE, deliberately. An avatar upload is a file store, a
- * MIME sniffer, a size limit, an image proxy and a moderation problem, and it
- * would be the only user-supplied binary anywhere in this product. A tile
- * computed from a string is none of those things and cannot serve anything a
- * user did not already publish as their display name.
+ * THIS USED TO SAY "NO UPLOADS AND NO STORAGE, DELIBERATELY", and that comment
+ * was right for as long as it lasted — an avatar upload is a file store, a MIME
+ * sniffer, a size limit and a moderation problem, and it was the only
+ * user-supplied binary the product would have had. `0008_avatars.sql` took
+ * those on knowingly (2 MB, three image types, both enforced by the bucket
+ * rather than by a form) because delivery needs the same machinery and this is
+ * the cheapest place to prove it.
+ *
+ * INITIALS REMAIN THE DEFAULT AND ARE NOT A DEGRADED STATE. Most accounts will
+ * never set a picture, `avatar_path` is null for all of them, and the tile is
+ * complete without one. `src` is optional for that reason, and a broken or
+ * unconfigured URL falls back rather than rendering a torn image.
  *
  * Square corners: section 06 lists avatars by name among the things that have
  * no radius — buttons, cards, inputs, chips, avatars, video frames and the
@@ -37,11 +45,17 @@ export type InitialsAvatarSize = keyof typeof SIZES;
 
 export function InitialsAvatar({
   name,
+  src,
   size = 'sm',
   className,
 }: {
   /** The display name. A `PublicProfile` / `PublicCoach` `full_name` — never an email. */
   name: string;
+  /**
+   * A ready-to-render URL, from `avatarPublicUrl()`. `null` or absent renders
+   * initials, which is the normal case rather than a fallback.
+   */
+  src?: string | null;
   size?: InitialsAvatarSize;
   className?: string;
 }) {
@@ -57,7 +71,25 @@ export function InitialsAvatar({
         className,
       )}
     >
-      {initialsOf(name)}
+      {src ? (
+        /*
+         * A plain `<img>`, not `next/image`, and on purpose. The optimizer
+         * needs `images.remotePatterns` naming the storage host — which is an
+         * ENVIRONMENT value here, so it would bake a per-deployment origin into
+         * build config. For a 44px tile served from a public bucket behind a
+         * CDN there is nothing left for the optimizer to win.
+         *
+         * `object-cover` because an avatar is a square crop of whatever the
+         * user uploaded; without it a portrait photo renders stretched.
+         *
+         * No `alt` text: the whole tile is `aria-hidden` (see above) because
+         * every call site prints the name in text right beside it.
+         */
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={src} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" />
+      ) : (
+        initialsOf(name)
+      )}
     </span>
   );
 }

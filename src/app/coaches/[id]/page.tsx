@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation';
 
 import { ListingCard } from '@/components/listing-card';
 import { InitialsAvatar } from '@/components/initials-avatar';
+import { avatarPublicUrl } from '@/lib/storage/avatars';
 import { ReviewItem } from '@/components/review-item';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -110,7 +111,7 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
       </p>
 
       <header className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-start">
-        <InitialsAvatar name={coach.full_name} size="lg" />
+        <InitialsAvatar name={coach.full_name} src={avatarPublicUrl(coach.avatar_path)} size="lg" />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
             <h1 className="min-w-0 text-2xl font-bold tracking-tight break-words text-ink sm:text-3xl">

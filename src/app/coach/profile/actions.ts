@@ -6,7 +6,8 @@ import { redirect } from 'next/navigation';
 import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { COACH_BIO_MAX, COACH_HEADLINE_MAX, COACH_YEARS_COACHING_MAX, isDataError } from '@/lib/data/types';
-import { fieldError, toFormState, type FormState } from '@/lib/forms';
+import { fieldError, formError, toFormState, type FormState } from '@/lib/forms';
+import { checkAvatarFile, deleteAvatar, uploadAvatar } from '@/lib/storage/avatars';
 
 const PROFILE_PATH = '/coach/profile';
 
@@ -114,4 +115,62 @@ function guessCoachProfileField(message: string, code: string): string | null {
   if (text.startsWith('bio')) return 'bio';
   if (text.startsWith('years')) return 'years';
   return null;
+}
+
+/**
+ * Sets or clears the signed-in user's avatar.
+ *
+ * A separate action from the profile save, because it is a separate kind of
+ * write: the picture is bytes going to object storage, the rest of the form is
+ * three text columns. Keeping them apart means a failed upload cannot discard
+ * a headline the user just typed, and clearing a picture does not require
+ * re-submitting the bio.
+ *
+ * ORDER MATTERS IN BOTH DIRECTIONS, and it is chosen so a failure never leaves
+ * a profile pointing at nothing:
+ *
+ *   setting   upload FIRST, then write the column. If the upload fails the
+ *             column is untouched and the old picture still renders.
+ *   clearing  write the column FIRST, then delete the object. If the delete
+ *             fails the avatar is already gone from the product and the orphan
+ *             is invisible — which is why `deleteAvatar` does not throw.
+ */
+export async function updateAvatarAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const intent = String(formData.get('intent') ?? 'set');
+  const actor = await getActor();
+
+  let needsLogin = false;
+  try {
+    if (intent === 'clear') {
+      const cleared = await getDataClient().setMyAvatar(actor, null);
+      void cleared;
+      const previous = String(formData.get('current') ?? '').trim();
+      if (previous !== '') await deleteAvatar(previous);
+    } else {
+      const file = formData.get('avatar');
+      if (!(file instanceof File) || file.size === 0) {
+        return formError('Choose a picture to upload.');
+      }
+      const check = checkAvatarFile(file);
+      if (!check.ok) return formError(check.message ?? 'That picture could not be used.');
+
+      // `getActor()` is a claim; the id the file is stored under must be the
+      // resolved one, so it is read back from the data layer rather than
+      // trusted from the session shape.
+      const me = await getDataClient().getProfile(actor, actor?.userId ?? '');
+      if (!me) return formError('Your profile could not be found.');
+
+      const path = await uploadAvatar(me.id, file);
+      await getDataClient().setMyAvatar(actor, path);
+    }
+  } catch (error) {
+    if (!isDataError(error)) throw error;
+    if (error.code === 'unauthorized') needsLogin = true;
+    else return toFormState(error);
+  }
+
+  if (needsLogin) redirect(loginPath(PROFILE_PATH));
+
+  revalidatePath('/', 'layout');
+  redirect(`${PROFILE_PATH}?saved=1`);
 }

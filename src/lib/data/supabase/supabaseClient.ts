@@ -98,6 +98,7 @@ import {
 } from '../types';
 import {
   optionalActorId,
+  optionalAvatarPath,
   optionalText,
   optionalYears,
   requireActorId,
@@ -125,7 +126,7 @@ const LISTING_COLUMNS = 'id, coach_id, title, description, price_cents, category
 const OWNED_LISTING_COLUMNS = `${LISTING_COLUMNS}, withdrawn_by_admin`;
 
 /** `public.public_coaches` also carries `created_at`, which is for ordering only. */
-const PUBLIC_COACH_COLUMNS = 'id, full_name, coach_headline, coach_bio, coach_years_coaching';
+const PUBLIC_COACH_COLUMNS = 'id, full_name, coach_headline, coach_bio, coach_years_coaching, avatar_path';
 
 /** `public.public_reviews`-shaped projections. */
 const PUBLIC_REVIEW_COLUMNS = 'id, listing_id, rating, body, created_at, author_name';
@@ -634,7 +635,7 @@ export class SupabaseDataClient implements DataClient {
 
     const { data, error } = await ctx.supabase
       .from('public_profiles')
-      .select('id, full_name, is_approved_coach')
+      .select('id, full_name, is_approved_coach, avatar_path')
       .eq('id', userId)
       .maybeSingle();
     if (error) {
@@ -718,6 +719,29 @@ export class SupabaseDataClient implements DataClient {
   // -------------------------------------------------------------------------
   // Listings
   // -------------------------------------------------------------------------
+
+  async setMyAvatar(actor: Actor, path: string | null): Promise<Profile> {
+    const next = optionalAvatarPath(path);
+
+    const ctx = await openAuthedContext(actor);
+
+    // Checked here for the message, pinned in SQL for the guarantee: the
+    // `profiles_avatar_path_shape` CHECK would refuse this too, as 23514, which
+    // `errors.ts` has to render as something generic.
+    if (next !== null && !next.startsWith(`${ctx.userId}/`)) {
+      throw new DataError('forbidden', 'An avatar has to be stored under your own account.');
+    }
+
+    const { data, error } = await ctx.supabase
+      .from('profiles')
+      .update({ avatar_path: next })
+      .eq('id', ctx.userId)
+      .select('*')
+      .maybeSingle();
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('not_found', 'Your profile could not be found.');
+    return data as Profile;
+  }
 
   async listListings(filter?: ListingFilter): Promise<ListingWithCoach[]> {
     const q = typeof filter?.q === 'string' ? filter.q.trim() : '';

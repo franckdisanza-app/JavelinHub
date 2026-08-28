@@ -250,6 +250,7 @@ const PROFILE_COLUMNS = [
   'coach_headline',
   'coach_bio',
   'coach_years_coaching',
+  'avatar_path',
   'created_at',
   'updated_at',
 ] as const;
@@ -262,6 +263,12 @@ const PROFILE_COLUMNS = [
  * `public_profiles` exists to prevent; the fourth would be a constant-`true`
  * column, because `listCoaches` / `getPublicCoach` return approved coaches and
  * nothing else. Nothing from `coach_applications` belongs here either.
+ *
+ * `avatar_path` IS here, and it is the only column ever added to this list. It
+ * names an object in a PUBLIC bucket — anyone who can see the card can already
+ * fetch the file — and it discloses nothing but the owner id, which this shape
+ * carries as `id` regardless. That reasoning is what makes it admissible; a
+ * column without it does not become admissible by being useful.
  */
 const PUBLIC_COACH_COLUMNS = [
   'id',
@@ -269,6 +276,7 @@ const PUBLIC_COACH_COLUMNS = [
   'coach_headline',
   'coach_bio',
   'coach_years_coaching',
+  'avatar_path',
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -863,9 +871,9 @@ const publicCoach = await allows(
 // enumerate administrators; `coach_status` would publish every user's
 // pending_review / rejected state.
 expectEqual(
-  'getPublicProfile exposes exactly id, full_name, is_approved_coach',
+  'getPublicProfile exposes exactly id, full_name, is_approved_coach, avatar_path',
   publicCoach === null ? 'null' : Object.keys(publicCoach).sort().join(','),
-  'full_name,id,is_approved_coach',
+  'avatar_path,full_name,id,is_approved_coach',
 );
 expectEqual('getPublicProfile omits email', publicCoach !== null && !('email' in publicCoach), true);
 expectEqual('getPublicProfile omits role', publicCoach !== null && !('role' in publicCoach), true);

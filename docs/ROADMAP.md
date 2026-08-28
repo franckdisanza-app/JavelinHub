@@ -28,13 +28,22 @@ video. The transaction has no product at the end of it.
 In dependency order:
 
 ### 1.1 File storage and delivery
-Nothing exists. `src/components/initials-avatar.tsx` states the position
-plainly — *"NO UPLOADS AND NO STORAGE, deliberately"* — which was right for a
-POC and is now the thing standing between the app and a working product.
+**Partly done.** Avatars ship (`0008_avatars.sql`, `src/lib/storage/avatars.ts`),
+which was the point: they depend on nothing, so they were the cheapest way to
+prove buckets, storage RLS, upload and public URLs before betting delivery on
+them. Verified end to end against the live project — upload, render, replace,
+remove, and refusal of a write outside the owner's own folder.
 
-Needs: buckets with their own RLS, an upload surface for coaches, signed URLs
-for delivery, and a `deliverables` table joining an order to what was delivered
-so the buyer's "my purchases" page has something to link to.
+**Delivery itself is still missing**, and it needs the piece avatars did not:
+an ORDER to attach to. Remaining: a PRIVATE bucket with signed URLs (avatars are
+public; a plan somebody paid for must not be), an upload surface per fulfilment
+mode, and a `deliverables` table joining an order to what was delivered so
+"my purchases" has something to link to.
+
+Storage is deliberately NOT part of `DataClient`: that interface abstracts rows
+and has a mock twin for the authorization suite, while bytes have one
+implementation and no mock analogue. The PATH is data — `setMyAvatar()`, both
+backends — and the FILE is storage, Supabase only.
 
 Storage split, decided earlier: Supabase Storage for avatars, PDFs and chat
 images; **Cloudflare R2 for video**, because egress is what makes video

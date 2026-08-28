@@ -184,6 +184,16 @@ export interface Profile {
   coach_years_coaching: number | null;
   created_at: string;
   updated_at: string;
+  /**
+   * Object path inside the PUBLIC `avatars` bucket, e.g. `<uuid>/avatar.webp`.
+   * NOT a URL — the storage host belongs to the caller, so the backing store
+   * stays swappable. `null` is the normal state and renders as initials.
+   *
+   * Published on {@link PublicProfile} and {@link PublicCoach}, unlike every
+   * other column on this type: the file it names is world-readable by design,
+   * and the path discloses only the owner id those shapes already carry.
+   */
+  avatar_path: string | null;
 }
 
 /**
@@ -208,6 +218,8 @@ export interface PublicProfile {
   id: string;
   full_name: string;
   is_approved_coach: boolean;
+  /** See {@link Profile.avatar_path}. Public because the bucket it names is. */
+  avatar_path: string | null;
 }
 
 /**
@@ -262,6 +274,8 @@ export interface PublicCoach {
   coach_bio: string | null;
   /** Whole years, or `null` for "not stated" — which is NOT `0`. @see Profile.coach_years_coaching */
   coach_years_coaching: number | null;
+  /** See {@link Profile.avatar_path}. Public because the bucket it names is. */
+  avatar_path: string | null;
 }
 
 /** `public.listings` */

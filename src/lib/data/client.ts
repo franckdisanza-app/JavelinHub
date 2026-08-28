@@ -405,6 +405,27 @@ export interface DataClient {
    */
   updateMyCoachProfile(actor: Actor, input: UpdateMyCoachProfileInput): Promise<Profile>;
 
+  /**
+   * Points the actor's profile at an avatar, or clears it with `null`.
+   *
+   * **A PATH CROSSES THIS BOUNDARY, NEVER A FILE.** Storing bytes is a
+   * different subsystem with a different backing store — see
+   * `src/lib/storage/avatars.ts` — and only Supabase implements it. This method
+   * is an ordinary column write that both backends do identically, which is
+   * what keeps the split honest: the mock has no file storage, and it does not
+   * pretend to.
+   *
+   * The path is pinned to `<the actor's own id>/…` here, again in the
+   * `profiles_avatar_path_shape` CHECK constraint, and a third time by the
+   * storage policies that govern the object itself. A Server Action is a public
+   * endpoint and this column is written through `profiles_update_own` like any
+   * other self-service field, so none of those three is redundant.
+   *
+   * Available to ANY signed-in user, not only approved coaches: `profiles` is
+   * everyone's row, and the SQL agrees. Only the UI is coach-facing today.
+   */
+  setMyAvatar(actor: Actor, path: string | null): Promise<Profile>;
+
   // ---------------------------------------------------------------------------
   // Listings
   // ---------------------------------------------------------------------------

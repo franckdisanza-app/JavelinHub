@@ -171,3 +171,30 @@ export function optionalActorId(actor: Actor): string | null {
   if (typeof userId !== 'string' || userId.trim() === '') return null;
   return userId;
 }
+
+/**
+ * Normalises an avatar object path, or `null` for "no avatar".
+ *
+ * This does NOT check ownership — that needs the resolved actor and belongs to
+ * each client, which pins the path to `<own id>/…` exactly as the
+ * `profiles_avatar_path_shape` CHECK constraint and the storage policies do.
+ * What it does is settle the three ways "no avatar" can arrive (absent, null,
+ * empty string) on a single `null`, so clearing one is expressible and cannot
+ * be mistaken for "leave it alone".
+ *
+ * The length cap is not arbitrary: the path is a uuid, a slash and a filename,
+ * so anything approaching this is not a path this app produced.
+ */
+export function optionalAvatarPath(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw new DataError('invalid', 'That avatar is not valid.');
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  if (trimmed.length > 300) throw new DataError('invalid', 'That avatar is not valid.');
+  // No traversal, no absolute paths, no backslashes: the path is used as a
+  // storage object key and is written into a column the public views publish.
+  if (trimmed.includes('..') || trimmed.startsWith('/') || trimmed.includes('\\')) {
+    throw new DataError('invalid', 'That avatar is not valid.');
+  }
+  return trimmed;
+}

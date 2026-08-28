@@ -3,12 +3,14 @@ import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
+import { AvatarForm } from '@/app/coach/profile/avatar-form';
 import { CoachProfileForm } from '@/app/coach/profile/profile-form';
 import { InitialsAvatar } from '@/components/initials-avatar';
 import { Alert } from '@/components/ui/alert';
 import { linkButtonClass } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { requireUser } from '@/lib/auth/session';
+import { avatarCacheBuster, avatarPublicUrl, avatarStorageAvailable } from '@/lib/storage/avatars';
 
 export const metadata: Metadata = { title: 'Your coach profile' };
 
@@ -61,6 +63,21 @@ export default async function CoachProfilePage({
 
       <Card tone="raised">
         <CardHeader
+          title="Your picture"
+          description="Shown beside your name in the directory and on your own page."
+        />
+        <CardBody>
+          <AvatarForm
+            name={profile.full_name}
+            currentUrl={avatarCacheBuster(avatarPublicUrl(profile.avatar_path), profile.updated_at)}
+            currentPath={profile.avatar_path}
+            available={avatarStorageAvailable()}
+          />
+        </CardBody>
+      </Card>
+
+      <Card tone="raised">
+        <CardHeader
           title="Your public profile"
           description="Everything here is visible to anyone browsing the directory, signed in or not."
         />
@@ -86,6 +103,7 @@ export default async function CoachProfilePage({
         name={profile.full_name}
         headline={profile.coach_headline}
         years={profile.coach_years_coaching}
+        avatarUrl={avatarCacheBuster(avatarPublicUrl(profile.avatar_path), profile.updated_at)}
       />
     </Shell>
   );
@@ -158,17 +176,19 @@ function DirectoryPreview({
   name,
   headline,
   years,
+  avatarUrl,
 }: {
   name: string;
   headline: string | null;
   years: number | null;
+  avatarUrl: string | null;
 }) {
   return (
     <Card>
       <CardHeader title="How your card reads" description="Your entry in the coach directory." />
       <CardBody>
         <div className="flex items-start gap-3">
-          <InitialsAvatar name={name} />
+          <InitialsAvatar name={name} src={avatarUrl} />
           <div className="min-w-0">
             <p className="font-semibold break-words text-ink">{name}</p>
             {headline ? (

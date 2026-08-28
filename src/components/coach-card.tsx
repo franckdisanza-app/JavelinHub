@@ -1,6 +1,7 @@
 import Link from 'next/link';
 
 import { InitialsAvatar } from '@/components/initials-avatar';
+import { avatarPublicUrl } from '@/lib/storage/avatars';
 import { Card } from '@/components/ui/card';
 import { Rating } from '@/components/ui/stat';
 import type { CoachStats, PublicCoach } from '@/lib/data/types';
@@ -51,7 +52,7 @@ export function CoachCard({
     >
       <div className="flex min-w-0 flex-1 flex-col gap-4 p-5">
         <div className="flex min-w-0 items-start gap-3">
-          <InitialsAvatar name={coach.full_name} />
+          <InitialsAvatar name={coach.full_name} src={avatarPublicUrl(coach.avatar_path)} />
           <div className="min-w-0 flex-1">
             {/*
               Card titles are display type — section 04 assigns Barlow Condensed

@@ -440,6 +440,9 @@ function upsertUser(
     coach_headline: spec.profile.coach_headline ?? null,
     coach_bio: spec.profile.coach_bio ?? null,
     coach_years_coaching: spec.profile.coach_years_coaching ?? null,
+    // No seeded avatar: the mock backend has no file storage at all, so a path
+    // here would name an object that cannot exist. Renders as initials.
+    avatar_path: null,
     created_at,
     updated_at: created_at,
   });
@@ -635,6 +638,14 @@ export function seedDatabase(db: MockDb): void {
     }
     if (!Number.isInteger(profile.coach_years_coaching)) {
       profile.coach_years_coaching = null;
+    }
+    // Added after stores already existed on disk, so a file written before the
+    // column has `undefined` here — which is NOT the same as `null` once it
+    // reaches a `Profile`, and would make the field silently absent from every
+    // shape derived from it. Normalised on `typeof`, so an empty string
+    // (a cleared avatar saved badly) also lands on null.
+    if (typeof profile.avatar_path !== 'string' || profile.avatar_path === '') {
+      profile.avatar_path = null;
     }
   }
 
