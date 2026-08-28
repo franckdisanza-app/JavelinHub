@@ -107,6 +107,8 @@ and `src/proxy.ts` deploys as the project's proxy (Vercel still labels it
   actor rule, error handling. Read this before writing any page or server action.
 * [`supabase/README.md`](supabase/README.md) — schema, RLS design notes, the
   mock-check ↔ RLS-policy mapping table, and the mock → Supabase swap path.
+* [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is missing and in what order, with
+  the file that documents each absence. Read before planning a phase.
 * [`PROGRESS.md`](PROGRESS.md) — build log and quality bar.
 
 ## Scripts

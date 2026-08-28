@@ -51,6 +51,9 @@ function navLinksFor(profile: Profile | null): NavLink[] {
 
   if (profile.coach_status === 'approved') {
     links.push({ href: '/offers/new', label: 'New offer' });
+    // One word, like every other item, for the 1024px row this comment
+    // describes. "Profile" rather than "My profile" for the same reason.
+    links.push({ href: '/coach/profile', label: 'Profile' });
   } else {
     links.push({ href: '/coach/apply', label: 'Become a coach' });
     links.push({ href: '/redeem', label: 'Redeem invite' });

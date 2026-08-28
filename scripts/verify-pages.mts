@@ -75,6 +75,7 @@
  * Exits 0 when every assertion passes, 1 otherwise.
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { createHmac } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -115,6 +116,7 @@ const OFFER = {
 };
 const COACH = '00000000-0000-4000-8000-000000000002'; // Cory Vaughn
 const EMPTY_COACH = '00000000-0000-4000-8000-000000000004'; // Nils Berg
+const LEARNER = '00000000-0000-4000-8000-000000000003'; // Lena Park, never applied
 /** `MORE_OFFERS_SHOWN` in `offers/[id]/page.tsx` — the cap on the cross-link grid. */
 const MORE_OFFERS_SHOWN = 4;
 
@@ -220,6 +222,15 @@ async function plantFixtures(): Promise<{
   // no write path anywhere in the product (see `Order` in types.ts), so this is
   // planted the same way `store.ts` plants the seeded ones. `coach_id` is
   // denormalised off the listing exactly as `seedOrdersAndReviews` does it.
+  // ZERO YEARS, which the seed has no example of: Cory is 12 and Nils is null,
+  // so without this the "0 is not the same as null" rule on /coach/profile
+  // could only be asserted in one direction. Rune is the first-season coach.
+  await db.updateMyCoachProfile(RUNE, {
+    coach_headline: 'Standing throw specialist',
+    coach_bio: null,
+    coach_years_coaching: 0,
+  });
+
   await mutateDb((store) => {
     store.orders.push({
       id: '00000000-0000-4000-8000-00000000f001',
@@ -538,6 +549,54 @@ try {
     // Drain, or Node keeps the socket open and the process will not exit.
     await res.text();
     return res.status;
+  }
+
+  /**
+   * A valid session cookie for a given user id.
+   *
+   * Mints it with the SAME scheme `src/lib/auth/session.ts` verifies —
+   * `base64url(payload).base64url(HMAC-SHA256(payload))` — using the throwaway
+   * `SESSION_SECRET` this suite sets at the top of the file. That is why this
+   * is possible at all, and why it is not a hole: the secret is per-run and the
+   * signature is what stops a *user* editing the id inside it. The suite is not
+   * a user; it is the thing that issued the secret.
+   *
+   * Without this, every signed-in page in the app is unreachable from here, and
+   * `/coach/profile` in particular renders four materially different states
+   * depending on `coach_status` — none of which an anonymous fetch can see.
+   */
+  function sessionCookie(userId: string): string {
+    const body = Buffer.from(
+      JSON.stringify({ uid: userId, iat: Math.floor(Date.now() / 1000) }),
+      'utf8',
+    ).toString('base64url');
+    const signature = createHmac('sha256', process.env.SESSION_SECRET as string)
+      .update(body)
+      .digest('base64url');
+    return `javelin_session=${body}.${signature}`;
+  }
+
+  /** Fetches a page AS a given user. Not cached — the same path differs per viewer. */
+  async function getAs(path: string, userId: string): Promise<Page> {
+    const res = await fetch(`${BASE}${path}`, { headers: { cookie: sessionCookie(userId) } });
+    const html = await res.text();
+    return {
+      status: res.status,
+      html,
+      text: toText(html),
+      pairs: statPairs(html),
+      empty: emptyStats(html),
+      cards: cardsByOffer(html),
+      coachCards: cardsByCoach(html),
+      reviews: reviewItems(html),
+    };
+  }
+
+  /** Where an unauthenticated request to `path` is sent. `null` when it is not a redirect. */
+  async function redirectTarget(path: string): Promise<string | null> {
+    const res = await fetch(`${BASE}${path}`, { redirect: 'manual' });
+    await res.text();
+    return res.headers.get('location');
   }
 
   const offers = await get('/offers');
@@ -1027,6 +1086,72 @@ try {
   check('empty coach: says he has published nothing',
     emptyCoachPage.text.includes('Nils Berg hasn’t published any offers yet'), true);
   check('empty coach: no rating numeral anywhere', emptyCoachPage.pairs, []);
+
+  // -------------------------------------------------------------------------
+  section('/coach/profile — the coach’s own editor');
+
+  /** The `value="..."` of a named input, or `null` when the input is absent. */
+  function inputValue(html: string, name: string): string | null {
+    const tag = new RegExp(`<input[^>]*name="${name}"[^>]*>`).exec(html);
+    if (!tag) return null;
+    const value = /value="([^"]*)"/.exec(tag[0]);
+    return value ? value[1] : '';
+  }
+  const hasEditor = (page: Page) => inputValue(page.html, 'headline') !== null;
+
+  check(
+    'anonymous is sent to log in and back again',
+    await redirectTarget('/coach/profile'),
+    '/login?next=%2Fcoach%2Fprofile',
+  );
+
+  const learnerProfilePage = await getAs('/coach/profile', LEARNER);
+  check('a learner is told why there is nothing to edit',
+    learnerProfilePage.text.includes('You are not an approved coach yet'), true);
+  check('...and is NOT handed the editor', hasEditor(learnerProfilePage), false);
+  check('...and gets BOTH routes to approval, not just the slow one',
+    learnerProfilePage.html.includes('href="/coach/apply"') &&
+      learnerProfilePage.html.includes('href="/redeem"'), true);
+
+  // A rejected applicant is not a coach, but telling them to "apply" as though
+  // they never had would be wrong — they have a decision to react to.
+  const rejectedProfilePage = await getAs('/coach/profile', fixtures.deapprovedCoachId);
+  check('a rejected applicant is told their application failed, not that they never applied',
+    rejectedProfilePage.text.includes('was not approved'), true);
+  check('...and still gets no editor', hasEditor(rejectedProfilePage), false);
+
+  const coryProfilePage = await getAs('/coach/profile', COACH);
+  check('an approved coach gets the editor', hasEditor(coryProfilePage), true);
+  check('...prefilled with the stored headline',
+    inputValue(coryProfilePage.html, 'headline'), 'Javelin technique and throws programming');
+  check('...and the stored years', inputValue(coryProfilePage.html, 'years'), '12');
+  check('...and the preview reads them back', coryProfilePage.text.includes('12 years coaching'), true);
+  check('the editor never offers the privilege columns',
+    /name="(role|coach_status|email|full_name|id)"/.test(coryProfilePage.html), false);
+
+  /*
+   * THE ONE THAT IS EASY TO GET WRONG, in both directions.
+   *
+   * `coach_years_coaching` is `number | null` and 0 is a legal value meaning "my
+   * first season". Any falsy test — `years ? … : …`, `Number(raw) || null`,
+   * `String(years ?? '')` around a `||` — collapses the two into one answer, and
+   * the page then tells a first-season coach that they declined to say. The
+   * three checks below pin both directions and the prefill between them.
+   */
+  const runeProfilePage = await getAs('/coach/profile', fixtures.soldUnreviewedCoachId);
+  check('ZERO years reads as a first season, not as nothing',
+    runeProfilePage.text.includes('First season coaching'), true);
+  check('...and 0 survives the round trip into the input',
+    inputValue(runeProfilePage.html, 'years'), '0');
+
+  const nilsProfilePage = await getAs('/coach/profile', EMPTY_COACH);
+  check('NULL years renders no years line at all',
+    /first season coaching|\d+ years? coaching/i.test(nilsProfilePage.text), false);
+  check('...and leaves the input empty rather than showing a 0',
+    inputValue(nilsProfilePage.html, 'years'), '');
+  check('a coach with no headline is told so rather than shown a blank',
+    nilsProfilePage.text.includes('No headline yet'), true);
+
 } finally {
   stopServer(server);
   rmSync(scratch, { recursive: true, force: true });
