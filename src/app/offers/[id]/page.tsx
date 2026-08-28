@@ -7,8 +7,9 @@ import { ReviewItem } from '@/components/review-item';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardFooter } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
 import { Rating, Stat, StatEmpty } from '@/components/ui/stat';
+import { ClaimForm } from '@/app/offers/[id]/claim-form';
+import { getActor } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { isListingCategory, listingCategoryLabel } from '@/lib/data/types';
 import { firstValue } from '@/lib/search-params';
@@ -93,6 +94,14 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
   // one offer's rating under another offer's title.
   const shownOfferStats = await db.listOfferStats(shownOffers.map((offer) => offer.id));
   const shownStatsById = new Map(shownOfferStats.map((row) => [row.listing_id, row]));
+
+  // Who is looking, and have they already claimed this? Both decide the claim
+  // control, and neither widens what the page shows: `listMyOrders` is scoped
+  // to the actor by the data layer and returns [] for an anonymous viewer.
+  const viewer = await getActor();
+  const myOrders = viewer ? await db.listMyOrders(viewer) : [];
+  const alreadyClaimed = myOrders.some((order) => order.listing_id === listing.id);
+  const isOwnOffer = viewer?.userId === listing.coach_id;
 
   const search = await searchParams;
   const backHref = buildBackHref(search);
@@ -189,21 +198,37 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
             <p className="text-2xl font-bold tabular-nums text-ink">{formatPrice(listing.price_cents)}</p>
             <div className="mt-3">
               {/*
-                Deliberately inert. Payments are out of scope for this proof of
-                concept, and a button that looked live would be worse than no
-                button — so it is disabled, and says why immediately below.
+                No longer inert. Claiming is FREE for the pilot, so the control
+                creates a real order and nothing is charged — which the footer
+                says plainly rather than leaving the reader to infer it from a
+                price they were never asked to pay.
+
+                Disabled for the two cases the data layer would refuse anyway,
+                so the reason is visible before the click rather than after it:
+                a coach cannot claim their own offer, and nobody can claim the
+                same one twice.
               */}
-              <Button type="button" disabled className="w-full" aria-describedby="buy-stub-note">
-                Buy
-              </Button>
+              <ClaimForm
+                listingId={listing.id}
+                title={listing.title}
+                disabled={isOwnOffer || alreadyClaimed}
+                disabledReason={
+                  isOwnOffer
+                    ? 'This is your own offer.'
+                    : alreadyClaimed
+                      ? 'You have already claimed this. It is in your purchases.'
+                      : undefined
+                }
+              />
             </div>
           </div>
         </CardBody>
 
         <CardFooter>
-          <p id="buy-stub-note">
-            <strong className="font-semibold text-ink">Payments are not part of this proof of concept.</strong>{' '}
-            The Buy button is a placeholder — no checkout, no card details, nothing is charged.
+          <p>
+            <strong className="font-semibold text-ink">Claiming is free while JavelinHub is in pilot.</strong>{' '}
+            No checkout, no card details, nothing is charged — the price above is what this will cost once
+            payments are switched on. Claiming puts the offer in your purchases and tells the coach.
           </p>
         </CardFooter>
       </Card>

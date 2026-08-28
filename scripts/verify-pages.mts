@@ -1312,6 +1312,44 @@ try {
   check('an offer that was never edited says so rather than showing an empty list',
     neverEdited.text.includes('Never edited'), true);
 
+
+  // -------------------------------------------------------------------------
+  section('/purchases and /coach/sales — the claim path');
+
+  check('anonymous purchases -> log in and back',
+    await redirectTarget('/purchases'), '/login?next=%2Fpurchases');
+  check('anonymous sales -> log in and back',
+    await redirectTarget('/coach/sales'), '/login?next=%2Fcoach%2Fsales');
+
+  // Lena bought the seeded fundamentals offer; the fixtures give her one order.
+  const learnerPurchases = await getAs('/purchases', LEARNER);
+  check('a buyer sees what they claimed',
+    learnerPurchases.text.includes('Javelin Throw Fundamentals'), true);
+  check('...and whether they have reviewed it',
+    /Reviewed|Not reviewed/.test(learnerPurchases.text), true);
+  check('...and is told delivery is not built yet, rather than left waiting for a file',
+    learnerPurchases.text.includes('not built yet'), true);
+
+  // Rune has exactly one sale and no review on it — the "sold but unreviewed"
+  // fixture the rest of the suite already leans on.
+  const runeSales = await getAs('/coach/sales', fixtures.soldUnreviewedCoachId);
+  check('a coach sees a claim on their offer',
+    runeSales.text.includes('Standing Throw Rebuild'), true);
+  check('...marked as not reviewed', runeSales.text.includes('Not reviewed'), true);
+
+  /*
+   * THE BUYER IS NOT NAMED. `OrderWithListing` carries `learner_id` and nothing
+   * else about them, because `docs/DATA-LAYER.md` keeps `Profile` off every
+   * surface but its owner's and an admin's. Rune's buyer is Dana; her name
+   * appearing on this page would mean a coach can enumerate their customers.
+   */
+  check('a sale does NOT name the buyer', runeSales.text.includes('Dana Okoro'), false);
+  check('...nor leak an email', /@verify-pages\.test|@javelin\.test/.test(runeSales.text), false);
+
+  const learnerSales = await getAs('/coach/sales', LEARNER);
+  check('a learner has no sales page to speak of',
+    learnerSales.text.includes('You are not an approved coach yet'), true);
+
 } finally {
   stopServer(server);
   rmSync(scratch, { recursive: true, force: true });

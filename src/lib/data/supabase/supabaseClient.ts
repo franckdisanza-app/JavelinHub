@@ -1307,6 +1307,27 @@ export class SupabaseDataClient implements DataClient {
    * same facts in its `with check`, and the `UNIQUE` constraint on
    * `reviews.order_id` is what actually makes "one review per purchase" true.
    */
+  /**
+   * An RPC, not an insert, because no client role holds INSERT on `orders` and
+   * none ever should: the price and the epoch have to be read off the listing
+   * inside the database, where the caller cannot reach them.
+   */
+  async createOrder(actor: Actor, listingId: string): Promise<Order> {
+    const id = requireText(listingId, 'Offer', 200);
+    const ctx = await openAuthedContext(actor);
+
+    const { data, error } = await ctx.supabase.rpc('claim_offer', { p_listing_id: id });
+    if (error) {
+      // A malformed id fails the uuid cast before the function body runs, and
+      // "no such offer" is the honest reading of that — same rule as
+      // `reviewCoachApplication`.
+      if (isMalformedId(error)) throw new DataError('not_found', 'That offer could not be found.');
+      throwDataError(error, true);
+    }
+    if (!data) throw new DataError('invalid', 'That offer could not be claimed.');
+    return (Array.isArray(data) ? data[0] : data) as Order;
+  }
+
   async createReview(actor: Actor, input: CreateReviewInput): Promise<Review> {
     const orderId = requireText(input?.order_id, 'Order', 200);
     const rating = requireRating(input?.rating);

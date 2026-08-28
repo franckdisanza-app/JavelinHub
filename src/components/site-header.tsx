@@ -49,11 +49,17 @@ function navLinksFor(profile: Profile | null): NavLink[] {
   ];
   if (!profile) return links;
 
+  // Everyone who is signed in can claim, so everyone gets their purchases —
+  // before the coach items, because a coach is a learner too and this is the
+  // one entry both roles use.
+  links.push({ href: '/purchases', label: 'Purchases' });
+
   if (profile.coach_status === 'approved') {
     // "Your offers" is the coach's home: it is where a published offer is
     // edited, withdrawn and restored, and `/offers/new` is reachable from it.
     // It goes FIRST of the three so the row reads as a place before an action.
     links.push({ href: '/coach/offers', label: 'Yours' });
+    links.push({ href: '/coach/sales', label: 'Sales' });
     links.push({ href: '/offers/new', label: 'New offer' });
     // One word, like every other item, for the 1024px row this comment
     // describes. "Profile" rather than "My profile" for the same reason.

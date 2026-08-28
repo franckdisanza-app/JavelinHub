@@ -51,12 +51,21 @@ expensive and R2 charges none. Keep the metadata rows in Postgres either way so
 the backing store stays swappable per asset type.
 
 ### 1.2 Checkout
-`createOrder` does not exist on `DataClient`, no client role holds `INSERT` on
-`orders`, and the Buy button is inert and says so
-(`src/app/offers/[id]/page.tsx`). `docs/DATA-LAYER.md` records the reason: a
-client-supplied `price_cents_at_purchase` is not something that should ever be
-insertable. A real checkout gets its own `SECURITY DEFINER` RPC that derives the
-price server-side, the same shape as `redeem_invite_code`.
+**Done, minus the money.** `claim_offer(uuid)` (0009/0010) is the RPC
+`docs/DATA-LAYER.md` always said a checkout would need: it derives learner from
+the JWT and coach, price and epoch from the listing, so nothing about an order
+is caller-supplied except which offer. There is still no client `INSERT` policy
+on `orders` and there should never be one.
+
+Claiming is FREE, which is a decision and not a stub — the pilot is proving that
+an offer can be claimed, delivered and reviewed, not that a card can be charged.
+When payment lands it goes IN FRONT of this call: the order is still created by
+the same RPC, on the far side of a confirmed charge, and the row already carries
+`price_cents_at_purchase` for the receipt.
+
+Still missing: Stripe, and the confirmation step a paid claim needs (the free
+one deliberately has none — the worst case is an unwanted free claim on an offer
+that cannot be claimed twice).
 
 ### 1.3 Payments *and payouts*
 No Stripe anywhere in `src/`. A marketplace needs both directions — charging
@@ -99,9 +108,9 @@ checked, and exercised against Postgres — they need pages, not plumbing.
 | `softDeleteListing` / `restoreListing` | withdraw / restore controls | **done** |
 | `listListingRevisions` | edit history on the editor | **done** |
 | `getListingForViewer` | the owner's view of a withdrawn offer | still none |
-| `listMyOrders` | "my purchases" | still none |
-| `listOrdersForCoach` | "my sales" | still none |
-| `getOrder` | order detail | still none |
+| `listMyOrders` | `/purchases` | **done** |
+| `listOrdersForCoach` | `/coach/sales` | **done** |
+| `getOrder` | order detail | still none — nothing needs a per-order page yet |
 | `createReview` | write a review | still none |
 
 The coach's own loop is now closed: publish, edit, withdraw, restore, and a

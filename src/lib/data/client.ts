@@ -161,6 +161,7 @@ import type {
   ListingWithCoach,
   OfferStats,
   OwnedListing,
+  Order,
   OrderWithListing,
   Profile,
   PublicCoach,
@@ -762,6 +763,25 @@ export interface DataClient {
    * offer); `conflict` when that order has already been reviewed; `invalid`
    * when the rating is not an integer 1-5 or the body is empty/too long.
    */
+  /**
+   * Claims an offer, creating the order that everything downstream hangs off.
+   *
+   * **The only argument is which offer.** `learner_id` comes from the actor,
+   * and `coach_id`, `price_cents_at_purchase` and `price_epoch` all come from
+   * the listing — a caller-supplied price is the thing `docs/DATA-LAYER.md`
+   * refused to make insertable, and the epoch decides which of an offer's
+   * price generations the resulting review counts towards.
+   *
+   * FREE, for now. The pilot is proving that an offer can be claimed,
+   * delivered and reviewed; when payment lands it gates this call rather than
+   * replacing it, and the row already carries the price column a receipt needs.
+   *
+   * Throws `unauthorized` when anonymous, `not_found` for an unknown offer,
+   * `invalid` for a withdrawn one, `forbidden` for the coach's own offer, and
+   * `conflict` for a second claim of the same offer by the same learner.
+   */
+  createOrder(actor: Actor, listingId: string): Promise<Order>;
+
   createReview(actor: Actor, input: CreateReviewInput): Promise<Review>;
 
   // ---------------------------------------------------------------------------

@@ -1255,6 +1255,40 @@ export class MockDataClient implements DataClient {
     });
   }
 
+  async createOrder(actor: Actor, listingId: string): Promise<Order> {
+    const id = requireText(listingId, 'Offer', 200);
+
+    return mutateDb((db) => {
+      // Mirrors: public.claim_offer(uuid) in 0009_claim_offer.sql, rule for
+      // rule and message for message.
+      const profile = resolveProfile(db, actor);
+
+      const listing = db.listings.find((l) => l.id === id);
+      if (!listing) throw new DataError('not_found', 'That offer could not be found.');
+      if (isWithdrawn(listing)) throw new DataError('invalid', 'That offer is no longer available.');
+      if (listing.coach_id === profile.id) {
+        throw new DataError('forbidden', 'You cannot claim your own offer.');
+      }
+      if (db.orders.some((o) => o.learner_id === profile.id && o.listing_id === listing.id)) {
+        throw new DataError('conflict', 'You have already claimed this offer.');
+      }
+
+      // Every field below is DERIVED. Nothing about the money or the epoch is
+      // reachable from the caller — see the RPC for why that is the whole point.
+      const order: Order = {
+        id: newId(),
+        learner_id: profile.id,
+        listing_id: listing.id,
+        coach_id: listing.coach_id,
+        price_cents_at_purchase: listing.price_cents,
+        price_epoch: listing.price_epoch,
+        created_at: nowIso(),
+      };
+      db.orders.push(order);
+      return copy(order);
+    });
+  }
+
   async createReview(actor: Actor, input: CreateReviewInput): Promise<Review> {
     const orderId = requireText(input?.order_id, 'Order', 200);
     const rating = requireRating(input?.rating);
