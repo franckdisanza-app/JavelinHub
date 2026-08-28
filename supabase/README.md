@@ -89,20 +89,38 @@ code twin all accept.** Three were privilege errors that only a real cluster
 raises, and the fourth did not raise anything at all. Migration success is not
 evidence that the functions work — call them.
 
-## Before trusting this
+## End-to-end verification against the live database
 
-`supabase db push` and the smoke tests above do not cover signup, which is the
-single most load-bearing untested path: it exercises the `on_auth_user_created`
-trigger, `handle_new_user()` writing the profile row, and — the part no static
-review can settle — whether Next.js reflects the auth cookies written by
-`auth.signUp()` back to a read within the SAME server action, which
-`SupabaseDataClient.signUp` depends on when it reads the new profile back.
+Run once, on a Route Handler standing in for the forms (the browser automation
+in that environment could not navigate). Every row below is an observed result,
+not an inference. **All test data was deleted afterwards — every table is back
+to zero rows.**
 
-Sign up through the running app with a real address, then check that
-`public.profiles` gained the row. Confirm **Authentication → Providers → Email →
-"Confirm email" is OFF** first: nothing in this app implements a confirmation
-callback, so with it on, `signUp` creates the account and returns the visitor
-anonymous.
+| Path | Result |
+|---|---|
+| `signUp` | `on_auth_user_created` wrote the profile, pinned `learner`/`none`, `full_name` carried through `raw_user_meta_data` |
+| **cookie read-back inside the same request** | `getActor()` and `getCurrentProfile()` both resolved the new user immediately after `auth.signUp()` — the assumption `SupabaseDataClient.signUp` rests on |
+| session across requests | cookie jar alone re-resolved the user on a later request |
+| learner → `createInvite` | `forbidden` — "Only an administrator can do that." |
+| learner → `createListing` | `forbidden` — "Only approved coaches can publish offers…" |
+| `grant_admin()` from SQL | `role: admin`; **the new role took effect on the very next request**, no re-login — the reason the cookie carries no role |
+| admin → `createInvite` | `R4N8-WZ7E-3Y7D`, the shared generator's format |
+| `redeemInviteCode` | learner → `coach`/`approved` |
+| redeeming the same code twice | `invalid` — "That invite code is not valid.", the single undifferentiated message |
+| create @5000 | `price_epoch: 1` |
+| raise 5000 → 9000 | `price_epoch: 2` |
+| lower 9000 → 7000 | `price_epoch: 2` — unchanged, as specified |
+| `listListingRevisions` | `[9000, 5000]` — the SUPERSEDED values, newest first |
+| coach withdraws own offer | `withdrawn_by_admin: false`; `getOfferStats` → `null` |
+| coach restores own | allowed |
+| **admin** takes it down | coach's dashboard shows `withdrawn_by_admin: true` — what `0003` exists for |
+| coach restores an admin takedown | `forbidden` — "An administrator removed this offer…" |
+| admin restores it | allowed |
+| `listCoaches` (anon) | exactly the five `PublicCoach` fields; **the admin, `coach_status = 'none'`, is absent** |
+
+What this does NOT cover: orders and reviews, because there is no checkout —
+`createReview` requires an order and no client role may insert one. Those stay
+unexercised on Postgres until a purchase path exists.
 
 ## Swap path: mock → Supabase
 
