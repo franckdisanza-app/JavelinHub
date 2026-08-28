@@ -210,4 +210,33 @@ values
    1, now() - interval '12 days', now() - interval '12 days')
 on conflict (id) do nothing;
 
+-- ---------------------------------------------------------------------------
+-- LABEL EVERYTHING THIS FILE JUST INSERTED AS FABRICATED.
+--
+-- Inside the same transaction as the inserts, so there is no window in which
+-- these rows exist unlabelled, and it is impossible to load the fixtures
+-- without the flag.
+--
+-- Matched on the id prefix rather than restated as a column on each INSERT
+-- above, and that is the point: every id in this file is a hand-written
+-- `00000000-0000-4000-8000-…` (32 of them, no exceptions), so this cannot drift
+-- out of step with the inserts the way a repeated literal would. A real signup
+-- gets a random v4 uuid from GoTrue and can never collide with the prefix —
+-- v4 pins the version nibble to 4 and the variant bits to 8-b, which the
+-- prefix satisfies, but the remaining 120 bits being all-but-zero is not
+-- something a generator produces.
+--
+-- `invites` is keyed by `code`, not by a uuid, so it is matched on
+-- `created_by` — the seeded admin — instead.
+--
+-- See supabase/migrations/0006_demo_flag.sql for why the flag exists, and
+-- `select * from public.demo_data_summary where rows > 0;` to find the result.
+-- ---------------------------------------------------------------------------
+update public.profiles           set is_demo = true where id::text         like '00000000-0000-4000-8000-%';
+update public.listings           set is_demo = true where id::text         like '00000000-0000-4000-8000-%';
+update public.orders             set is_demo = true where id::text         like '00000000-0000-4000-8000-%';
+update public.reviews            set is_demo = true where id::text         like '00000000-0000-4000-8000-%';
+update public.coach_applications set is_demo = true where id::text         like '00000000-0000-4000-8000-%';
+update public.invites            set is_demo = true where created_by::text like '00000000-0000-4000-8000-%';
+
 commit;

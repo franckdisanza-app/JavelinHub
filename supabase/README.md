@@ -32,7 +32,35 @@ therefore an account on somebody's domain — see "Before trusting this" below.
 | `migrations/0003_read_models.sql` | four read surfaces the `DataClient` contract needs and 0001/0002 could not serve — see below |
 | `migrations/0004_privileged_auth_grant.sql` | an attempted `grant usage on schema auth` — **a no-op, kept only as the record of a dead end**; see 0005 |
 | `migrations/0005_privileged_uid.sql` | `public.jwt_uid()`, and the three privileged functions rewired onto it |
-| `seed.sql` | demo fixtures — the SQL mirror of `seedDatabase()` in `src/lib/data/mock/store.ts`. **Fabricated purchases and reviews; do not load into a project real users will see.** |
+| `migrations/0006_demo_flag.sql` | `is_demo` on every table that can hold a fixture, plus `demo_data_summary` |
+| `migrations/0007_demo_summary_revoke.sql` | makes that summary private — 0006's claim that it was not granted was wrong |
+| `seed.sql` | demo fixtures — the SQL mirror of `seedDatabase()` in `src/lib/data/mock/store.ts`. **Fabricated purchases and reviews; do not load into a project real users will see.** Flags everything it inserts as `is_demo` |
+
+### Finding fabricated data
+
+`seed.sql` invents purchases and reviews — nobody bought anything and nobody
+wrote a word of it — and once inserted those rows are indistinguishable from
+real ones: same shape, same constraints, and they feed `offer_stats` and
+`coach_stats` exactly as real rows would. So they are labelled at the point of
+insertion rather than from memory afterwards:
+
+```sql
+select * from public.demo_data_summary where rows > 0;
+```
+
+An empty result means the database holds no fabricated rows. **That is its
+state today** — `seed.sql` has never been run against the live project.
+
+The flag does nothing except answer that question. Nothing filters on it,
+nothing hides a demo row, no aggregate excludes one; a flag that quietly changed
+what users see would be a second, invisible visibility rule alongside
+`deleted_at`. It is also operator-facing only: `listings.is_demo` sits outside
+the column grant in 0002, so no browser can select it, and the summary view is
+revoked from `anon` and `authenticated` in 0007.
+
+**Check this before any public launch**, along with the seeded invite codes —
+`JAVELIN-COACH-2026` and `THROWERS-WELCOME` are published in `README.md` and
+promote whoever redeems one straight to approved coach.
 
 ### Why 0003 exists
 
