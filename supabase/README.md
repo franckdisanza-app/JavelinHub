@@ -150,6 +150,36 @@ What this does NOT cover: orders and reviews, because there is no checkout —
 `createReview` requires an order and no client role may insert one. Those stay
 unexercised on Postgres until a purchase path exists.
 
+## Storage objects are not cleaned up by cascades
+
+Learned by cleaning up after a delivery test, and it will bite in production if
+it is not handled in the application.
+
+Deleting a row does NOT delete the file it points at. Worse, the file can become
+undeletable: every delete policy on `storage.objects` is keyed to the person who
+uploaded it —
+
+    (storage.foldername(name))[2] = auth.uid()::text
+
+— so once that account is gone, nobody satisfies the policy. And Supabase blocks
+the obvious fallback: `storage.protect_delete()` raises
+
+    42501  Direct deletion from storage tables is not allowed.
+           Use the Storage API instead.
+
+on any `delete from storage.objects`, whatever privileges you hold. The only
+routes left are the Storage API as a user who still passes the policy, the
+dashboard, or the service-role key.
+
+**What this means for the app:** delete the OBJECT first, then the row — the
+order `updateAvatarAction` already uses when clearing an avatar, and the order
+every future delete path must use. A cascade that removes an order or a profile
+silently strands whatever it pointed at.
+
+**What it means for an operator:** an orphan in a private bucket is inert — the
+read policies key off rows that no longer exist, so nothing can fetch it — but
+it still occupies quota. Clear them from the dashboard's Storage browser.
+
 ## Swap path: mock → Supabase
 
 The whole point of `DataClient` (`src/lib/data/client.ts`) is that **no calling
