@@ -1,26 +1,38 @@
 # `supabase/` — schema, RLS, and the mock → Postgres swap path
 
-**The Supabase project exists; the schema has NOT been applied to it yet.**
-Project ref `trocsdetpwyqcgyfclir`. Its `public` schema is empty as of this
-writing — every table answers PostgREST `PGRST205 Could not find the table` —
-so `supabase db push` below is a real, outstanding step and not a formality.
+**Applied.** Project ref `trocsdetpwyqcgyfclir`, PostgreSQL 17, migrations
+0001-0005 pushed, `DATA_BACKEND=supabase`, and the app verified serving real
+pages off it.
 
-`SupabaseDataClient` is implemented (`src/lib/data/supabase/`), so flipping
-`DATA_BACKEND=supabase` is now a config change. Doing it BEFORE the push gives a
-site where every page 500s.
+Verified against the live database rather than by inspection:
 
-Until the push happens, the rules below are still verified the way they always
-were: by *static review* plus a code twin — the mock data layer at
-`src/lib/data/mock/mockClient.ts` re-implements every rule in TypeScript and is
-exercised by `npm run verify:authz` (758 assertions) and `npm run verify:pages`
-(134).
+| Check | Result |
+|---|---|
+| `listings?select=*` | `42501` — the column revoke on `deleted_by` holds |
+| `listings?select=deleted_by` | `42501` |
+| `listings?select=<the ten granted columns>` | 200 — matches `LISTING_COLUMNS` |
+| anon `INSERT` into `profiles` / `listings` / `orders` | `42501 new row violates row-level security policy` |
+| the four privileged RPCs, anonymously | each returns its OWN authored sentence |
+| `/offers/junk`, `/coaches/junk` | 404, not the error boundary |
+| `/`, `/offers`, `/coaches`, `/login`, `/signup` | 200, empty states rendering |
+
+The mock remains the code twin and is still what `npm run verify:authz` (758
+assertions) and `npm run verify:pages` (134) exercise — both hard-set
+`DATA_BACKEND=mock`, so **neither suite covers `SupabaseDataClient`**. The table
+above is the only evidence for the Postgres path, and it is a smoke test, not a
+suite.
+
+**Still not exercised end to end: signup.** That needs a real email address, and
+therefore an account on somebody's domain — see "Before trusting this" below.
 
 | File | Contents |
 |---|---|
 | `migrations/0001_init.sql` | extensions (`pgcrypto`, `pg_trgm`), enums, tables, indexes, `updated_at` triggers |
 | `migrations/0002_rls.sql` | the `javelin_privileged` role, `enable row level security`, all policies, the `SECURITY DEFINER` helpers, the `public_profiles` / `public_coaches` / `public_reviews` / `offer_stats` / `coach_stats` views, and the four privileged RPCs |
 | `migrations/0003_read_models.sql` | four read surfaces the `DataClient` contract needs and 0001/0002 could not serve — see below |
-| `seed.sql` | demo fixtures — the SQL mirror of `seedDatabase()` in `src/lib/data/mock/store.ts` |
+| `migrations/0004_privileged_auth_grant.sql` | an attempted `grant usage on schema auth` — **a no-op, kept only as the record of a dead end**; see 0005 |
+| `migrations/0005_privileged_uid.sql` | `public.jwt_uid()`, and the three privileged functions rewired onto it |
+| `seed.sql` | demo fixtures — the SQL mirror of `seedDatabase()` in `src/lib/data/mock/store.ts`. **Fabricated purchases and reviews; do not load into a project real users will see.** |
 
 ### Why 0003 exists
 
@@ -35,6 +47,62 @@ between the interface and the schema.
 | `listReviewsForListing` | reviews at the offer's CURRENT epoch only | `public_reviews` deliberately omits `price_epoch`, so a client has nothing to filter on | `public.public_listing_reviews` — epoch + published filters inside the view, epoch still never projected |
 | `listReviewsForCoach` | every review, including those on WITHDRAWN offers | reaching `coach_id`/`listing_title` means joining `listings`, where `listings_select_public` hides withdrawn rows from anon — the list would silently disagree with `coach_stats` | `public.public_coach_reviews` — carries `coach_id` and the title, with no `deleted_at` and no epoch predicate |
 | `listCoaches` | newest-first ordering | `public_coaches` never projected `created_at`, and PostgREST cannot order by a column a view does not expose — despite `profiles_approved_coach_created_at_idx` existing in 0001 for exactly this query | `created_at` appended to `public_coaches` (`PublicCoach` is unchanged: the client orders by it without selecting it) |
+
+## What broke on the way in, and why none of it was visible beforehand
+
+Four failures, in order, none of which static review or the mock suites could
+have caught. Recorded because each one is a trap for the next environment this
+schema is applied to.
+
+1. **`0LP01 ADMIN option cannot be granted back to your own grantor`** — 0002
+   aborted on its FIRST statement. PostgreSQL 16+ already grants a new role back
+   to its creator with ADMIN OPTION, so re-granting it is illegal rather than a
+   no-op. The `exception when insufficient_privilege or duplicate_object`
+   handler did not list this code.
+
+2. **`42501 must be able to SET ROLE "javelin_privileged"`** — 150 statements
+   later, at the first `alter function ... owner to`. The PG16 implicit grant is
+   `ADMIN TRUE, SET FALSE`: you may administer the role, not become it. Fixed by
+   asking for `with set true` specifically, guarded by a catalog probe because
+   `pg_auth_members.set_option` only exists on 16+.
+
+3. **`42501 permission denied for schema public`** — same statement. Giving an
+   object away requires the INCOMING owner to hold CREATE on the schema. The
+   role had only USAGE. Granted for the six transfers and revoked immediately
+   after, so a SECURITY DEFINER function running as this role does not stand
+   with permission to create objects.
+
+4. **`42501 permission denied for schema auth`** — this one applied cleanly and
+   failed at RUN TIME, on the first call to any privileged RPC. A SECURITY
+   DEFINER function resolves names as its OWNER, and `javelin_privileged` has
+   nothing in `auth`. The obvious fix in 0004 **silently did nothing**:
+   PostgreSQL answers a GRANT you have no right to make with a WARNING, so
+   `db push` reported success while
+   `has_schema_privilege('javelin_privileged','auth','USAGE')` stayed false. The
+   `auth` schema is owned by `supabase_admin` and `postgres` holds USAGE on it
+   *without grant option*, so no migration can ever hand it to a custom role.
+   0005 removes the dependency instead — `public.jwt_uid()` reads the same JWT
+   claim through `current_setting()`, a built-in needing no schema privilege.
+
+The shape shared by all four: **valid DDL that a linter, a type-checker and a
+code twin all accept.** Three were privilege errors that only a real cluster
+raises, and the fourth did not raise anything at all. Migration success is not
+evidence that the functions work — call them.
+
+## Before trusting this
+
+`supabase db push` and the smoke tests above do not cover signup, which is the
+single most load-bearing untested path: it exercises the `on_auth_user_created`
+trigger, `handle_new_user()` writing the profile row, and — the part no static
+review can settle — whether Next.js reflects the auth cookies written by
+`auth.signUp()` back to a read within the SAME server action, which
+`SupabaseDataClient.signUp` depends on when it reads the new profile back.
+
+Sign up through the running app with a real address, then check that
+`public.profiles` gained the row. Confirm **Authentication → Providers → Email →
+"Confirm email" is OFF** first: nothing in this app implements a confirmation
+callback, so with it on, `signUp` creates the account and returns the visitor
+anonymous.
 
 ## Swap path: mock → Supabase
 

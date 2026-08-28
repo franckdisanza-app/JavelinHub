@@ -58,15 +58,73 @@ begin
 end
 $$;
 
+-- WHAT THIS BLOCK HAS TO ACHIEVE, stated precisely, because two plausible-
+-- looking versions of it both failed against a real PostgreSQL 17:
+--
+-- The migration runner must be able to **SET ROLE** to javelin_privileged. The
+-- `alter function ... owner to javelin_privileged` statements at the bottom of
+-- this file require it — you may only give an object away to a role you could
+-- become. ADMIN OPTION is NOT sufficient and is a different privilege.
+--
+-- On PostgreSQL 16+ `create role` automatically grants the new role back to its
+-- creator, but with `ADMIN TRUE, SET FALSE`: administer it, never become it. On
+-- Supabase, where migrations run as the non-superuser `postgres`, that is
+-- exactly the state this block starts in — and the two failures it produced,
+-- in order, were:
+--
+--   0LP01  ADMIN option cannot be granted back to your own grantor
+--          -- from `grant ... with admin option` when ADMIN is already held.
+--          Aborted 0002 on its FIRST statement.
+--   42501  must be able to SET ROLE "javelin_privileged"
+--          -- 150 statements later, at the first `alter function ... owner to`,
+--          once the ADMIN re-grant was made conditional. The real gap.
+--
+-- So: ask for the SET option specifically, and only when it is actually absent.
+-- `set_option` is a PG16 addition to pg_auth_members, hence the catalog probe
+-- rather than a bare column reference — on an older server that column does not
+-- exist and merely naming it would abort the migration with `undefined_column`,
+-- swapping one spurious failure for another.
 do $$
+declare
+  v_has_set boolean := false;
+  v_modern  boolean := false;
 begin
-  -- The migration runner must hold ADMIN OPTION on the role to hand function
-  -- ownership over to it. PG16+ grants this to the creator automatically; on
-  -- older versions, and when re-running against a role created by someone else,
-  -- this makes it explicit. Superusers do not need it, hence the swallow.
-  execute format('grant javelin_privileged to %I with admin option', current_user);
+  select exists (
+    select 1
+      from pg_attribute
+     where attrelid = 'pg_catalog.pg_auth_members'::regclass
+       and attname  = 'set_option'
+       and not attisdropped
+  ) into v_modern;
+
+  if v_modern then
+    execute $probe$
+      select coalesce(bool_or(m.set_option), false)
+        from pg_auth_members m
+        join pg_roles granted on granted.oid = m.roleid
+        join pg_roles member  on member.oid  = m.member
+       where granted.rolname = 'javelin_privileged'
+         and member.rolname  = current_user
+    $probe$ into v_has_set;
+
+    if not v_has_set then
+      -- Deliberately WITHOUT `admin option`: re-requesting ADMIN is what raised
+      -- 0LP01, and it is already held here anyway.
+      execute format('grant javelin_privileged to %I with set true', current_user);
+    end if;
+  else
+    -- Pre-16, membership implies the right to SET ROLE, so the classic form is
+    -- both necessary and sufficient.
+    execute format('grant javelin_privileged to %I with admin option', current_user);
+  end if;
 exception
-  when insufficient_privilege or duplicate_object then null;
+  -- A superuser needs none of this, and a re-run against a role somebody else
+  -- created may legitimately refuse. What must NOT happen is this block killing
+  -- the migration: if the runner already has what it needs by another route,
+  -- there is nothing here to fail about, and if it genuinely cannot SET ROLE
+  -- the `alter function` statements below say so far more clearly than a
+  -- re-raise from here would.
+  when insufficient_privilege or duplicate_object or invalid_grant_operation then null;
 end
 $$;
 
@@ -1633,7 +1691,22 @@ create trigger on_auth_user_created
 -- This block is what makes `current_user = 'javelin_privileged'` true inside
 -- them, and therefore what makes the guard trigger let their profile writes
 -- through. It must run AFTER the functions exist.
+--
+-- CREATE ON SCHEMA IS REQUIRED TO GIVE AN OBJECT AWAY. PostgreSQL checks that
+-- the INCOMING owner may create objects in the containing schema, so
+-- `alter function ... owner to javelin_privileged` fails with
+--
+--     42501  permission denied for schema public
+--
+-- while the role holds only USAGE (granted further up). The privilege is needed
+-- for the six statements below and for nothing else, so it is granted here and
+-- revoked immediately afterwards rather than left on the role: these functions
+-- are SECURITY DEFINER and run AS javelin_privileged, and leaving them standing
+-- permission to create objects in `public` widens what any future flaw in one
+-- of them could reach. Ownership, once transferred, does not depend on it.
 -- ---------------------------------------------------------------------------
+
+grant create on schema public to javelin_privileged;
 
 alter function public.redeem_invite_code(text)                                       owner to javelin_privileged;
 alter function public.apply_to_coach(text, text, text)                               owner to javelin_privileged;
@@ -1643,6 +1716,10 @@ alter function public.handle_new_user()                                         
 -- The revision recorder, for the same reason: no client role holds INSERT on
 -- listing_revisions, so the trigger has to write as somebody who does.
 alter function public.record_listing_revision()                                      owner to javelin_privileged;
+
+-- Handed back. USAGE (granted earlier) is all the role needs from here on: it
+-- must be able to REACH objects in `public`, never to add to it.
+revoke create on schema public from javelin_privileged;
 
 revoke all on function public.redeem_invite_code(text) from public;
 revoke all on function public.apply_to_coach(text, text, text) from public;
