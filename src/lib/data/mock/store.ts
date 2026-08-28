@@ -709,10 +709,39 @@ async function loadFromDisk(): Promise<MockDb> {
 /** Writes to a sibling temp file then renames, so a crash mid-write cannot leave a truncated store. */
 async function persist(db: MockDb): Promise<void> {
   const file = dbFilePath();
-  await mkdir(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  await writeFile(tmp, `${JSON.stringify(db, null, 2)}\n`, 'utf8');
-  await rename(tmp, file);
+  try {
+    await mkdir(dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(db, null, 2)}\n`, 'utf8');
+    await rename(tmp, file);
+  } catch (error) {
+    // A READ-ONLY FILESYSTEM MEANS "THIS IS A DEPLOYMENT", and saying so is the
+    // whole point of catching here.
+    //
+    // The mock store seeds itself on first read, so the first request to any
+    // page that touches data reaches this function. On a serverless host that
+    // fails with EROFS/EACCES from deep inside `writeFile`, and what the user
+    // sees is a 500 on /offers and /coaches while / and /login work — because
+    // an anonymous visitor never touches the data layer on those. That symptom
+    // points at nothing; the cause is one unset environment variable.
+    //
+    // Deliberately NOT a blanket `isProduction()` guard in `getDataClient()`:
+    // `next build` + `next start` against the mock is a legitimate local
+    // workflow and writes here perfectly well. It is the WRITE FAILING that
+    // identifies a deployment, not the NODE_ENV.
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'EROFS' || code === 'EACCES' || code === 'EPERM') {
+      throw new Error(
+        `The mock data store could not be written to ${file} (${code}). A read-only filesystem ` +
+          'almost always means this is a deployment, where the mock backend cannot work: the store ' +
+          'is a local JSON file, it is gitignored so it is never deployed, and serverless instances ' +
+          'do not share one anyway. Set DATA_BACKEND=supabase with NEXT_PUBLIC_SUPABASE_URL and ' +
+          'NEXT_PUBLIC_SUPABASE_ANON_KEY. See README.md, "Deploying to Vercel".',
+        { cause: error },
+      );
+    }
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------

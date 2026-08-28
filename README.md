@@ -84,6 +84,12 @@ invocations — so it cannot work there even as a stopgap. Push the schema first
 (see [`supabase/README.md`](supabase/README.md)); a deploy that points at an
 empty database returns `PGRST205` from every page.
 
+**The symptom when `DATA_BACKEND` is unset**, because it is not an obvious one:
+`/` and `/login` return 200 while `/offers` and `/coaches` return 500. An
+anonymous visitor never touches the data layer on the first two, so only the
+pages that read data fail. The store now detects the read-only write and says
+this in the error rather than surfacing a bare `EROFS`.
+
 Project Settings → Environment Variables:
 
 | Variable | Value |
