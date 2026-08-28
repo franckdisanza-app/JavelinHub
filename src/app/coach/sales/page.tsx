@@ -29,7 +29,8 @@ const SALES_PATH = '/coach/sales';
  * `docs/DATA-LAYER.md` keeps `Profile` off every surface but its owner's and an
  * admin's. A coach needs to know that something sold and what it was; putting a
  * learner's identity here would publish it to every coach who ever sold
- * anything. Contacting a buyer is what the chat build is for.
+ * anything. Sending them their files happens on `/orders/[id]`, which needs no
+ * name — the order is the introduction.
  */
 export default async function CoachSalesPage() {
   const profile = await requireUser(SALES_PATH);
@@ -80,8 +81,8 @@ function Shell({ children }: { children: ReactNode }) {
     <div className="mx-auto w-full max-w-3xl px-4 py-10 sm:py-14">
       <h1 className="text-2xl font-bold tracking-tight text-ink">Your sales</h1>
       <p className="mt-1.5 text-sm leading-relaxed text-muted">
-        Every claim on your offers, newest first. Claiming is free during the pilot, so nothing has been paid
-        out.
+        Every claim on your offers, newest first. Open one to send the buyer their files. Claiming is free
+        during the pilot, so nothing has been paid out.
       </p>
       <div className="mt-6 flex flex-col gap-6">{children}</div>
     </div>
@@ -100,10 +101,9 @@ function SaleRow({ order }: { order: OrderWithListing }) {
           }
         />
         <CardBody>
-          <p className="text-sm leading-relaxed text-muted">
-            Someone claimed this. Getting your work to them inside JavelinHub is not built yet — until it is,
-            reach them however you normally would.
-          </p>
+          <Link href={`/orders/${order.id}`} className={linkButtonClass({ size: 'sm' })}>
+            Open<span className="sr-only"> {order.listing_title}</span>
+          </Link>
         </CardBody>
       </Card>
     </li>

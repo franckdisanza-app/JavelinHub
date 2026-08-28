@@ -547,6 +547,40 @@ export interface OrderWithListing extends Order {
  * UNIQUE), and "Verified purchase" is free — every review that exists has a
  * purchase behind it by construction.
  */
+/** How an offer is handed over. Mirrors `public.fulfilment_mode`. */
+export type FulfilmentMode = 'instant' | 'personalised';
+
+export const FULFILMENT_MODES: readonly FulfilmentMode[] = ['personalised', 'instant'];
+
+export const FULFILMENT_LABELS: Record<FulfilmentMode, string> = {
+  personalised: 'Made for each buyer',
+  instant: 'Instant download',
+};
+
+/**
+ * One file attached to ONE order — the personalised delivery path.
+ *
+ * WHO UPLOADED IT IS THE DIRECTION. Compared against the order's `learner_id`
+ * this is the buyer's input (their throw, for a video review); against
+ * `coach_id` it is the coach's delivery. Two ids already on the order answer
+ * the question, so there is deliberately no third column that could disagree
+ * with them.
+ *
+ * `storage_path` points into the PRIVATE `deliverables` bucket and is useless
+ * on its own — reading needs a signed URL, which is only issued to the two
+ * people the order names. See `supabase/migrations/0011_delivery.sql`.
+ */
+export interface Deliverable {
+  id: string;
+  order_id: string;
+  uploaded_by: string;
+  storage_path: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: number;
+  created_at: string;
+}
+
 export interface Review {
   id: string;
   /** The purchase being reviewed. Unique across the table: one review per order. */

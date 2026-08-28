@@ -161,6 +161,7 @@ import type {
   ListingWithCoach,
   OfferStats,
   OwnedListing,
+  Deliverable,
   Order,
   OrderWithListing,
   Profile,
@@ -286,6 +287,15 @@ export interface UpdateMyCoachProfileInput {
  * to a different offer than the one they bought, which is the same class of bug
  * as accepting a `coach_id` on `createListing`.
  */
+export interface AddDeliverableInput {
+  order_id: string;
+  /** Object path in the private `deliverables` bucket. */
+  storage_path: string;
+  file_name: string;
+  content_type: string;
+  size_bytes: number;
+}
+
 export interface CreateReviewInput {
   /** The purchase being reviewed. The actor must own it, and it must be unreviewed. */
   order_id: string;
@@ -781,6 +791,43 @@ export interface DataClient {
    * `conflict` for a second claim of the same offer by the same learner.
    */
   createOrder(actor: Actor, listingId: string): Promise<Order>;
+
+  /**
+   * The files attached to one order, newest first.
+   *
+   * Both parties to the order see the SAME list — the buyer's uploads and the
+   * coach's — because a delivery is a conversation about one thing and hiding
+   * half of it from either side would make it unusable. What is scoped is WHICH
+   * order: `deliverables_select_party` admits the order's learner and coach and
+   * nobody else, so two learners who claimed the same offer never see each
+   * other's files.
+   *
+   * Throws `forbidden` for anyone who is not on the order.
+   */
+  listDeliverables(actor: Actor, orderId: string): Promise<Deliverable[]>;
+
+  /**
+   * Records a file against an order.
+   *
+   * **The bytes are not this method's business.** They go to object storage
+   * through `src/lib/storage/deliverables.ts`, and only the resulting path
+   * arrives here — the same split as `setMyAvatar`, and for the same reason:
+   * rows have two backends, files have one.
+   *
+   * `uploaded_by` is the resolved actor and is never taken from input, so a
+   * party to an order cannot attribute a file to the other one.
+   */
+  addDeliverable(actor: Actor, input: AddDeliverableInput): Promise<Deliverable>;
+
+  /**
+   * Removes one of the actor's OWN uploads.
+   *
+   * A learner who attached the wrong video needs a way back. Deleting somebody
+   * else's is refused even for the other party to the order — and there is no
+   * edit path at all, because a deliverable is a record of what was handed over
+   * at a moment, the same reasoning that makes `listing_revisions` append-only.
+   */
+  removeDeliverable(actor: Actor, deliverableId: string): Promise<void>;
 
   createReview(actor: Actor, input: CreateReviewInput): Promise<Review>;
 

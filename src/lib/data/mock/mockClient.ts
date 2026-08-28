@@ -22,6 +22,7 @@ import type {
   CreateCoachApplicationInput,
   CreateInviteInput,
   CreateListingInput,
+  AddDeliverableInput,
   CreateReviewInput,
   DataClient,
   ListingFilter,
@@ -32,6 +33,7 @@ import type {
 } from '../client';
 import type {
   Actor,
+  Deliverable,
   CoachApplication,
   CoachApplicationWithUser,
   CoachStats,
@@ -1286,6 +1288,77 @@ export class MockDataClient implements DataClient {
       };
       db.orders.push(order);
       return copy(order);
+    });
+  }
+
+  /** Mirrors: `deliverables_select_party` in 0011_delivery.sql. */
+  async listDeliverables(actor: Actor, orderId: string): Promise<Deliverable[]> {
+    const id = requireText(orderId, 'Order', 200);
+    return readDb((db) => {
+      const profile = resolveProfile(db, actor);
+      const order = db.orders.find((o) => o.id === id);
+      if (!order) throw new DataError('not_found', 'That order could not be found.');
+      if (order.learner_id !== profile.id && order.coach_id !== profile.id) {
+        throw new DataError('forbidden', 'You can only see files on your own orders.');
+      }
+      return db.deliverables
+        .filter((d) => d.order_id === order.id)
+        .sort(byCreatedAtDesc)
+        .map(copy);
+    });
+  }
+
+  /** Mirrors: `deliverables_insert_party`, including the `uploaded_by = auth.uid()` pin. */
+  async addDeliverable(actor: Actor, input: AddDeliverableInput): Promise<Deliverable> {
+    const orderId = requireText(input?.order_id, 'Order', 200);
+    const storagePath = requireText(input?.storage_path, 'File', 400);
+    const fileName = requireText(input?.file_name, 'File name', 260);
+    const contentType = requireText(input?.content_type, 'File type', 200);
+    const sizeBytes = input?.size_bytes;
+    if (typeof sizeBytes !== 'number' || !Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
+      throw new DataError('invalid', 'That file could not be read.');
+    }
+    if (sizeBytes > 52_428_800) throw new DataError('invalid', 'Files have to be 50 MB or smaller.');
+
+    return mutateDb((db) => {
+      const profile = resolveProfile(db, actor);
+      const order = db.orders.find((o) => o.id === orderId);
+      if (!order) throw new DataError('not_found', 'That order could not be found.');
+      if (order.learner_id !== profile.id && order.coach_id !== profile.id) {
+        throw new DataError('forbidden', 'You can only add files to your own orders.');
+      }
+      if (db.deliverables.some((d) => d.storage_path === storagePath)) {
+        throw new DataError('conflict', 'That file has already been added.');
+      }
+
+      const deliverable: Deliverable = {
+        id: newId(),
+        order_id: order.id,
+        // Never from input: attributing a file to the other party would let a
+        // coach fabricate a buyer's submission, or the reverse.
+        uploaded_by: profile.id,
+        storage_path: storagePath,
+        file_name: fileName,
+        content_type: contentType,
+        size_bytes: sizeBytes,
+        created_at: nowIso(),
+      };
+      db.deliverables.push(deliverable);
+      return copy(deliverable);
+    });
+  }
+
+  /** Mirrors: `deliverables_delete_own` — own uploads only, never the other party's. */
+  async removeDeliverable(actor: Actor, deliverableId: string): Promise<void> {
+    const id = requireText(deliverableId, 'File', 200);
+    return mutateDb((db) => {
+      const profile = resolveProfile(db, actor);
+      const index = db.deliverables.findIndex((d) => d.id === id);
+      if (index === -1) throw new DataError('not_found', 'That file could not be found.');
+      if (db.deliverables[index].uploaded_by !== profile.id) {
+        throw new DataError('forbidden', 'You can only remove files you uploaded yourself.');
+      }
+      db.deliverables.splice(index, 1);
     });
   }
 

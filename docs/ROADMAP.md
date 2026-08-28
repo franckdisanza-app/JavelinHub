@@ -34,11 +34,20 @@ prove buckets, storage RLS, upload and public URLs before betting delivery on
 them. Verified end to end against the live project — upload, render, replace,
 remove, and refusal of a write outside the owner's own folder.
 
-**Delivery itself is still missing**, and it needs the piece avatars did not:
-an ORDER to attach to. Remaining: a PRIVATE bucket with signed URLs (avatars are
-public; a plan somebody paid for must not be), an upload surface per fulfilment
-mode, and a `deliverables` table joining an order to what was delivered so
-"my purchases" has something to link to.
+**Personalised delivery ships too** (0011, `src/lib/storage/deliverables.ts`,
+`/orders/[id]`): private buckets, short-lived signed URLs, and a `deliverables`
+table joining an order to what was handed over. Both parties upload against the
+same order and the direction is derived from who is signed in. Verified end to
+end — claim, buyer sends a video, coach returns a PDF, buyer reviews — and the
+isolation that matters holds: a buyer who claimed the SAME OFFER cannot read the
+other buyer's file.
+
+**Instant delivery is the remaining half.** The schema is there — `fulfilment`,
+`listings.asset_path`, the `offer-assets` bucket and its policies — and
+`claim_offer` already refuses an instant offer with no file attached. What is
+missing is the UI: a mode picker on publish and an attach-a-file control on the
+editor. Until that exists every offer is `personalised`, which is the column
+default and the only honest value for anything published so far.
 
 Storage is deliberately NOT part of `DataClient`: that interface abstracts rows
 and has a mock twin for the authorization suite, while bytes have one
@@ -110,14 +119,12 @@ checked, and exercised against Postgres — they need pages, not plumbing.
 | `getListingForViewer` | the owner's view of a withdrawn offer | still none |
 | `listMyOrders` | `/purchases` | **done** |
 | `listOrdersForCoach` | `/coach/sales` | **done** |
-| `getOrder` | order detail | still none — nothing needs a per-order page yet |
-| `createReview` | write a review | still none |
+| `getOrder` | `/orders/[id]` | **done** |
+| `createReview` | the review form on `/orders/[id]` | **done** |
 
-The coach's own loop is now closed: publish, edit, withdraw, restore, and a
-public profile to be found by. **The five that remain are all purchase-side**,
-and none can be finished without §1 — there is no way to buy anything, so there
-are no orders to list and nothing to review. They are not separate work from
-checkout; they are its UI.
+**All ten now have a UI.** The loop closes: a coach publishes and manages
+offers, a learner claims one, both sides exchange files against that order, and
+the buyer reviews it. What is left in §1 is instant delivery's UI and the money.
 
 ---
 

@@ -1327,8 +1327,7 @@ try {
     learnerPurchases.text.includes('Javelin Throw Fundamentals'), true);
   check('...and whether they have reviewed it',
     /Reviewed|Not reviewed/.test(learnerPurchases.text), true);
-  check('...and is told delivery is not built yet, rather than left waiting for a file',
-    learnerPurchases.text.includes('not built yet'), true);
+  check('...and can open it', /href="\/orders\/[0-9a-f-]+"/.test(learnerPurchases.html), true);
 
   // Rune has exactly one sale and no review on it — the "sold but unreviewed"
   // fixture the rest of the suite already leans on.
@@ -1345,6 +1344,58 @@ try {
    */
   check('a sale does NOT name the buyer', runeSales.text.includes('Dana Okoro'), false);
   check('...nor leak an email', /@verify-pages\.test|@javelin\.test/.test(runeSales.text), false);
+
+  // -------------------------------------------------------------------------
+  section('/orders/[id] — the shared order page');
+
+  // Scraped rather than planted: the link on /purchases is the route a buyer
+  // actually takes, so following it also proves the two pages agree.
+  const orderHref = /href="(\/orders\/[0-9a-f-]+)"/.exec(learnerPurchases.html)?.[1] ?? '';
+  check('the purchases page links to a real order', orderHref !== '', true);
+
+  check('anonymous -> log in and back',
+    (await redirectTarget(orderHref))?.startsWith('/login?next=%2Forders%2F'), true);
+
+  const buyerOrder = await getAs(orderHref, LEARNER);
+  check('the buyer can open their own order', buyerOrder.status, 200);
+  // Newest first, so Lena's most recent claim is the re-priced strength offer.
+  check('...and sees the offer it was for',
+    buyerOrder.text.includes('Strength Programming for Throwers'), true);
+  check('...and the files section', buyerOrder.text.includes('Nothing has been sent yet'), true);
+  check('...with the mock backend saying why uploads are unavailable',
+    buyerOrder.text.includes('File delivery is not available here'), true);
+  check('...and no upload control it cannot honour',
+    buyerOrder.html.includes('type="file"'), false);
+
+  /*
+   * THE BOUNDARY. `getOrder` admits the buyer, the selling coach and an admin,
+   * and returns null to everyone else — so a stranger gets a 404 rather than a
+   * refusal, which would confirm the order exists.
+   */
+  check('a STRANGER gets 404, not a refusal',
+    (await getAs(orderHref, fixtures.soldUnreviewedCoachId)).status, 404);
+
+  // Lena has already reviewed the fundamentals offer in the seed, so the form
+  // is gone and the acknowledgement is there instead.
+  check('a buyer who already reviewed is not offered the form again',
+    buyerOrder.html.includes('name="rating"'), false);
+
+  // Rune's sale is unreviewed; his buyer Dana still gets the form.
+  const danaOrderHref =
+    /href="(\/orders\/[0-9a-f-]+)"/.exec((await getAs('/purchases', fixtures.deapprovedCoachId)).html)?.[1] ?? '';
+  const danaOrder = await getAs(danaOrderHref, fixtures.deapprovedCoachId);
+  check('an unreviewed buyer IS offered the review form',
+    danaOrder.html.includes('name="rating"'), true);
+  check('...and the rating select offers no zero',
+    danaOrder.html.includes('value="0"'), false);
+
+  // The coach on that order sees the same page and no review form: reviewing
+  // your own sale is not a thing.
+  const coachOrder = await getAs(danaOrderHref, fixtures.soldUnreviewedCoachId);
+  check('the selling coach can open the same order', coachOrder.status, 200);
+  check('...and is NOT offered a review form', coachOrder.html.includes('name="rating"'), false);
+  check('...and is prompted to send their work',
+    coachOrder.text.includes('Send them what you promised'), true);
 
   const learnerSales = await getAs('/coach/sales', LEARNER);
   check('a learner has no sales page to speak of',

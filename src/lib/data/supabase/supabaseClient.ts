@@ -61,6 +61,7 @@ import type {
   CreateCoachApplicationInput,
   CreateInviteInput,
   CreateListingInput,
+  AddDeliverableInput,
   CreateReviewInput,
   DataClient,
   ListingFilter,
@@ -80,6 +81,7 @@ import {
   type CoachApplication,
   type CoachApplicationWithUser,
   type CoachStats,
+  type Deliverable,
   type Invite,
   type ListingCategory,
   type ListingDetail,
@@ -1326,6 +1328,95 @@ export class SupabaseDataClient implements DataClient {
     }
     if (!data) throw new DataError('invalid', 'That offer could not be claimed.');
     return (Array.isArray(data) ? data[0] : data) as Order;
+  }
+
+  /**
+   * `deliverables_select_party` is the boundary. An order the actor is not on
+   * simply yields no rows — so absence is disambiguated by reading the order
+   * first, exactly as `getOrder` does, rather than reported as "no files".
+   */
+  async listDeliverables(actor: Actor, orderId: string): Promise<Deliverable[]> {
+    const id = requireText(orderId, 'Order', 200);
+    const ctx = await openAuthedContext(actor);
+
+    const { data: order, error: orderError } = await ctx.supabase
+      .from('orders')
+      .select('id')
+      .eq('id', id)
+      .maybeSingle();
+    if (orderError) {
+      if (isMalformedId(orderError)) throw new DataError('not_found', 'That order could not be found.');
+      throwDataError(orderError, true);
+    }
+    if (!order) throw new DataError('not_found', 'That order could not be found.');
+
+    const { data, error } = await ctx.supabase
+      .from('deliverables')
+      .select('*')
+      .eq('order_id', id)
+      .order('created_at', { ascending: false });
+    if (error) throwDataError(error, true);
+    return (data ?? []) as Deliverable[];
+  }
+
+  async addDeliverable(actor: Actor, input: AddDeliverableInput): Promise<Deliverable> {
+    const orderId = requireText(input?.order_id, 'Order', 200);
+    const storagePath = requireText(input?.storage_path, 'File', 400);
+    const fileName = requireText(input?.file_name, 'File name', 260);
+    const contentType = requireText(input?.content_type, 'File type', 200);
+    const sizeBytes = input?.size_bytes;
+    if (typeof sizeBytes !== 'number' || !Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
+      throw new DataError('invalid', 'That file could not be read.');
+    }
+    if (sizeBytes > 52_428_800) throw new DataError('invalid', 'Files have to be 50 MB or smaller.');
+
+    const ctx = await openAuthedContext(actor);
+
+    const { data, error } = await ctx.supabase
+      .from('deliverables')
+      .insert({
+        order_id: orderId,
+        // Pinned to the actor here and again by the policy's
+        // `uploaded_by = auth.uid()` with-check.
+        uploaded_by: ctx.userId,
+        storage_path: storagePath,
+        file_name: fileName,
+        content_type: contentType,
+        size_bytes: sizeBytes,
+      })
+      .select('*')
+      .maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) throw new DataError('not_found', 'That order could not be found.');
+      throwDataError(error, true);
+    }
+    if (!data) throw new DataError('invalid', 'That file could not be attached.');
+    return data as Deliverable;
+  }
+
+  async removeDeliverable(actor: Actor, deliverableId: string): Promise<void> {
+    const id = requireText(deliverableId, 'File', 200);
+    const ctx = await openAuthedContext(actor);
+
+    // `deliverables_delete_own` admits only the uploader, so somebody else's
+    // file matches no row and deletes nothing. Read it back first to tell that
+    // apart from a file that never existed.
+    const { data: existing, error: findError } = await ctx.supabase
+      .from('deliverables')
+      .select('id, uploaded_by')
+      .eq('id', id)
+      .maybeSingle();
+    if (findError) {
+      if (isMalformedId(findError)) throw new DataError('not_found', 'That file could not be found.');
+      throwDataError(findError, true);
+    }
+    if (!existing) throw new DataError('not_found', 'That file could not be found.');
+    if ((existing as { uploaded_by: string }).uploaded_by !== ctx.userId) {
+      throw new DataError('forbidden', 'You can only remove files you uploaded yourself.');
+    }
+
+    const { error } = await ctx.supabase.from('deliverables').delete().eq('id', id);
+    if (error) throwDataError(error, true);
   }
 
   async createReview(actor: Actor, input: CreateReviewInput): Promise<Review> {

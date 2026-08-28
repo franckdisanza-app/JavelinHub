@@ -24,10 +24,10 @@ const PURCHASES_PATH = '/purchases';
  * so this page cannot be pointed at anyone else — there is no id in the URL to
  * change. That is why it is `/purchases` and not `/purchases/[userId]`.
  *
- * NO DELIVERY YET, and the page says so rather than implying a file is coming.
- * Claiming creates the order; handing over a training plan or a video review is
- * the next build (`docs/ROADMAP.md` §1.1). Pretending otherwise here would be
- * the one dishonest thing on the page.
+ * This is a LIST, not the order itself. Everything that happens to a purchase —
+ * sending your coach a video, downloading what comes back, reviewing it —
+ * happens on `/orders/[id]`, which both parties share. Duplicating any of it
+ * here would be two screens to keep in step.
  */
 export default async function PurchasesPage({
   searchParams,
@@ -78,7 +78,8 @@ function Shell({ children }: { children: ReactNode }) {
     <div className="mx-auto w-full max-w-3xl px-4 py-10 sm:py-14">
       <h1 className="text-2xl font-bold tracking-tight text-ink">Your purchases</h1>
       <p className="mt-1.5 text-sm leading-relaxed text-muted">
-        Everything you have claimed. Claiming is free while JavelinHub is in pilot.
+        Everything you have claimed. Open one to send your coach a file, download what they send back, or
+        leave a review.
       </p>
       <div className="mt-6 flex flex-col gap-6">{children}</div>
     </div>
@@ -97,18 +98,10 @@ function PurchaseRow({ order }: { order: OrderWithListing }) {
           }
         />
         <CardBody className="flex flex-col gap-3">
-          {/*
-            The honest state of the product, written where somebody is looking
-            for their thing rather than buried in a FAQ. Delivery is the next
-            build; until it exists, an order is a claim and a coach gets in
-            touch some other way.
-          */}
-          <p className="text-sm leading-relaxed text-muted">
-            Your coach can see this. Handing files over inside JavelinHub is not built yet — until it is, they
-            will be in touch directly.
-          </p>
-
           <div className="flex flex-wrap gap-2">
+            <Link href={`/orders/${order.id}`} className={linkButtonClass({ size: 'sm' })}>
+              Open<span className="sr-only"> {order.listing_title}</span>
+            </Link>
             {/*
               The offer page, not the coach page: the buyer is most likely
               looking for what they claimed. A withdrawn offer has no public

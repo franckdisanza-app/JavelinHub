@@ -24,6 +24,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { mockDbPath, seedAdminEmail, seedAdminPassword } from '@/lib/env';
 import type {
   CoachApplication,
+  Deliverable,
   Invite,
   Listing,
   ListingCategory,
@@ -73,6 +74,8 @@ export interface MockDb {
   listing_revisions: ListingRevision[];
   orders: Order[];
   reviews: Review[];
+  /** Personalised delivery files. Paths only — the mock has no file storage. */
+  deliverables: Deliverable[];
 }
 
 const DB_VERSION = 1;
@@ -88,6 +91,7 @@ function emptyDb(): MockDb {
     listing_revisions: [],
     orders: [],
     reviews: [],
+    deliverables: [],
   };
 }
 
@@ -613,6 +617,12 @@ export function seedDatabase(db: MockDb): void {
     // "unattributed, the owner may restore".
     if (typeof listing.deleted_by !== 'string' || listing.deleted_by === '') listing.deleted_by = null;
   }
+
+  // `deliverables` arrived after the first stores were written, so a real
+  // `data/db.json` has no such key at all. Backfilled to an empty array rather
+  // than bumping DB_VERSION, exactly as the columns above are — an absent
+  // collection is not a corrupt store, it is an older one.
+  if (!Array.isArray(db.deliverables)) db.deliverables = [];
 
   // The three coach columns arrived after the first stores were written, so a
   // real `data/db.json` is holding profile rows with no such keys at all.
