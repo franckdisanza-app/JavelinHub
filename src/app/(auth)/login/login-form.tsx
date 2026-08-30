@@ -1,6 +1,7 @@
 'use client';
 
 import { useActionState } from 'react';
+import Link from 'next/link';
 
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -51,6 +52,18 @@ export function LoginForm({ next }: { next: string | null }) {
       <Button type="submit" fullWidth disabled={pending}>
         {pending ? 'Signing in…' : 'Log in'}
       </Button>
+
+      {/*
+        Under the button rather than beside the password label. A user who is
+        typing a password they believe they know should not be offered the exit
+        first; a user who has just been told the password is wrong finds it
+        immediately below where they were looking.
+      */}
+      <p className="text-center text-body-15">
+        <Link href="/forgot-password" className="text-muted underline underline-offset-2 hover:text-ink">
+          Forgot your password?
+        </Link>
+      </p>
     </form>
   );
 }

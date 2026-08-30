@@ -9,9 +9,11 @@ Ordered by what blocks a launch, not by effort.
 
 ---
 
-## 1. The product cannot be delivered
+## 1. ~~The product cannot be delivered~~ — now: the money
 
-**This is the gap that matters.** The eight offer categories in
+**This was the gap that mattered, and delivery has closed it.** The section is
+kept rather than deleted, because what it says about the categories is still the
+reason the design is shaped the way it is. The eight offer categories in
 `src/lib/data/types.ts` are:
 
 | | |
@@ -21,9 +23,11 @@ Ordered by what blocks a launch, not by effort.
 | `nutrition_plan` | `video_review` |
 | `mental_training` | `other` |
 
-**Seven of the eight are a file or a document**, and there is no file anywhere
-in the system. A coach sells a video review and then has no way to return the
-video. The transaction has no product at the end of it.
+**Seven of the eight are a file or a document.** There is now a file: both
+delivery modes ship, in both directions, and a coach who sells a video review
+can return the video. What remains unbuilt in this section is everything to do
+with money — §1.3 and §1.4 — and a lifecycle beyond "claimed, delivered,
+reviewed".
 
 In dependency order:
 
@@ -42,12 +46,26 @@ end — claim, buyer sends a video, coach returns a PDF, buyer reviews — and t
 isolation that matters holds: a buyer who claimed the SAME OFFER cannot read the
 other buyer's file.
 
-**Instant delivery is the remaining half.** The schema is there — `fulfilment`,
-`listings.asset_path`, the `offer-assets` bucket and its policies — and
-`claim_offer` already refuses an instant offer with no file attached. What is
-missing is the UI: a mode picker on publish and an attach-a-file control on the
-editor. Until that exists every offer is `personalised`, which is the column
-default and the only honest value for anything published so far.
+**Instant delivery ships too.** The 0011 schema — `fulfilment`,
+`listings.asset_path`, the `offer-assets` bucket and its five policies — is now
+reachable end to end: a mode picker on publish, an attach/replace/remove control
+on the editor, the download on `/orders/[id]`, and the mode on the public offer
+page so a buyer knows how a thing arrives before claiming it.
+
+The part that needed a decision was READING the path. `asset_path` is withheld
+from the client column grant on purpose, and a grant is the wrong instrument to
+relax it with — role-level, so granting it to `authenticated` publishes every
+coach's paths through PostgREST. 0012 adds the two row-level reads instead:
+`owned_listings` gains the column for the coach who owns the offer, and
+`entitled_offer_assets` restates the `offer_assets_read_entitled` storage policy
+for a learner holding an order. Both scope by `auth.uid()` inside the view. An
+admin can read somebody else's order and is deliberately not handed its file.
+
+Two states the product now has to render honestly, and does: an instant offer
+published before its file attached is legal, visible and **unclaimable**
+(`claim_offer` refuses it, the dashboard says *Needs a file*); and the delivery
+mode is frozen at the first claim, so the editor locks the control rather than
+offering one the database will refuse.
 
 Storage is deliberately NOT part of `DataClient`: that interface abstracts rows
 and has a mock twin for the authorization suite, while bytes have one
@@ -122,16 +140,47 @@ checked, and exercised against Postgres — they need pages, not plumbing.
 | `getOrder` | `/orders/[id]` | **done** |
 | `createReview` | the review form on `/orders/[id]` | **done** |
 
-**All ten now have a UI.** The loop closes: a coach publishes and manages
-offers, a learner claims one, both sides exchange files against that order, and
-the buyer reviews it. What is left in §1 is instant delivery's UI and the money.
+**Nine of the ten have a UI**, and `setListingAsset` — added with instant
+delivery — shipped with its own controls on the editor and the composer. The
+tenth, `getListingForViewer`, is still the only method in the whole interface
+that nothing in `src/app` calls. Its `ListingDetail` union exists so that a
+withdrawn offer renders as a TOMBSTONE for the owner, an admin and anyone
+holding an order for it, instead of a 404 — and today `/offers/[id]` uses
+`getListing`, which 404s for everybody. Nothing currently LINKS a buyer to a
+withdrawn offer's page, so the gap is invisible rather than broken; it becomes
+visible the moment anything does. The loop closes: a
+coach publishes and manages offers in either delivery mode, a learner claims one
+and either downloads it immediately or exchanges files against that order, and
+the buyer reviews it. What is left in §1 is the money.
 
 ---
 
 ## 4. Auth is half-built
 
-* **No password reset.** No route, no callback handler. Users will lock
-  themselves out in week one and the only recovery is the SQL editor.
+* ~~**No password reset.**~~ **Done.** `/forgot-password`, `/reset-password`
+  and the `/auth/callback` Route Handler that redeems the link, in both
+  backends: GoTrue's recovery flow on Supabase, and an equivalent token
+  mechanism in `src/lib/auth/reset-tokens.ts` on the mock, which prints the
+  link to the server console because it has no mail transport and should not
+  have one. The link is treated as a credential throughout — 32 random bytes,
+  SHA-256 at rest, one hour, single use, superseded by any newer request — and
+  the request form gives the same answer for every address, so it is not an
+  account-enumeration oracle.
+
+  **Two things it is NOT.** It does not sign out the user's other sessions:
+  the mock cookie has no revocation list, and neither does the Supabase side
+  without `signOut({ scope: 'others' })` — recorded as a known divergence
+  rather than faked on one side. And it is **not rate limited**, which §6
+  already flags for signup and login and which matters more here: this is the
+  app's only public form that sends mail.
+
+  **Deployment still needs three dashboard settings** that are not in this
+  repo: `NEXT_PUBLIC_SITE_URL` on Vercel, the same origin added to Supabase's
+  Redirect URLs, and Site URL moved off `http://127.0.0.1:3000`. Until then
+  GoTrue refuses the redirect, which is the correct failure — the app builds
+  the link from configuration and never from the request's `Host` header,
+  precisely so that a crafted request cannot make us email a valid reset link
+  pointing somewhere else.
 * **No email change and no account deletion.** Deletion is not optional under
   GDPR, and `invites.created_by` is `ON DELETE RESTRICT`, so deleting an admin
   who has ever minted an invite fails until those rows are dealt with —
@@ -140,9 +189,16 @@ the buyer reviews it. What is left in §1 is instant delivery's UI and the money
 * **Email confirmation is off.** Correct for now — nothing implements a
   confirmation callback — but it means addresses are unverified, which stops
   being acceptable once receipts are being emailed.
-* **No transactional email at all.** No provider, no templates. Needed for:
-  password reset, receipt, "you have a new order", "your review is ready".
-  Supabase's built-in SMTP is not production-grade; Resend fits this stack.
+* **Still no transactional email of our own.** The reset flow rides on
+  Supabase's built-in SMTP, which works and is heavily rate-limited — a handful
+  of messages an hour, project-wide. That is enough for a pilot and not enough
+  for launch, and it covers only the mails GoTrue itself sends. Nothing sends a
+  receipt, "you have a new order", or "your review is ready".
+
+  Note where the work actually is: wiring Resend is **configuration, not code**
+  for the reset mail — custom SMTP in the Supabase dashboard, and the flow is
+  unchanged. It is a code change only for the app's own mails, which is where
+  the templates and a provider integration have to live.
 
 ---
 
@@ -167,9 +223,20 @@ them twice is how the two diverge.
   trigram GIN indexes serve instead. Either implement `textSearch` against the
   tsvector or drop the index — right now it costs write throughput and buys
   nothing.
-* **No rate limiting** on signup, login, or invite redemption. An invite code
-  is a bearer credential that promotes its holder to approved coach; brute
-  forcing one is currently free.
+* **No rate limiting** on signup, login, password reset, or invite redemption —
+  none of it in our own code. Partially covered in production by accident:
+  GoTrue rate-limits the auth endpoints and, harder, the email ones, so the
+  reset form's practical exposure is that somebody can **exhaust the shared
+  mail quota and deny password resets to everybody**. That is the shape to fix
+  first, and it is a consequence of the reset flow rather than a pre-existing
+  gap.
+
+  **The invite-code half of this was overstated and is corrected here.** An
+  earlier revision said brute-forcing a code is "currently free". Free, yes —
+  nothing throttles the attempt. But `generateInviteCode()` draws 12 characters
+  from a 30-character alphabet, which is 30¹² ≈ 2⁵⁹. That is not a guessing
+  target, and leaving the claim in place dilutes the two limits above, which
+  are real.
 * **No caching.** Every route renders dynamically (`ƒ` in the build output).
   `/offers` and `/coaches` are public reads and should not be.
 
@@ -220,10 +287,21 @@ decisions, not omissions:
    surface is still small. Supabase's Site URL is also still
    `http://127.0.0.1:3000`, which has to be the real domain before any email
    flow is built on top of it.
-4. **Storage and delivery.** This is the product.
-5. **Checkout, then payouts.**
-6. **Password reset and transactional email.**
-7. **Chat.**
+4. ~~**Storage and delivery.**~~ Done — both modes, both buckets.
+5. ~~**Password reset.**~~ Done — see §4. Transactional email of our own is
+   still open, and so is rate limiting in front of it.
+6. **Bootstrap the live project.** It has the schema and nothing else: no
+   profiles, no administrator, and therefore no way to approve a coach. Cheap,
+   and it blocks every hands-on check of everything above. See
+   `supabase/README.md`, "Swap path" step 1.
+
+   It also gates the second half of `npm run verify:supabase`. That suite's
+   read-only tier runs today and covers the column revokes, the self-scoped
+   views, the anon INSERT refusals and the enum parity — 43 assertions the mock
+   suites structurally cannot make. Its write tiers need an unredeemed invite
+   code, which needs an administrator, which needs this.
+7. **Checkout, then payouts.**
+8. **Chat.**
 
 Everything from 4 onwards needs new schema, a new integration, or money moving.
 That is why 1 and 2 came first despite being the least exciting — they were the

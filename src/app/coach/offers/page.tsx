@@ -184,6 +184,18 @@ function OfferRow({ offer }: { offer: OwnedListing }) {
             </Alert>
           ) : null}
 
+          {/*
+            Only while the offer is on sale. A withdrawn one is off sale for a
+            reason the row above already gives, and "nobody can claim this" is
+            not news about an offer nobody can see.
+          */}
+          {!withdrawn && needsFile(offer) ? (
+            <Alert tone="warn" title="Nobody can claim this until you attach a file.">
+              It is an instant download and there is nothing to download. The offer stays visible and every
+              attempt to claim it is refused until you upload the file on the edit page.
+            </Alert>
+          ) : null}
+
           <div className="flex flex-wrap items-start gap-2">
             <Link
               href={`${DASHBOARD_PATH}/${offer.id}/edit`}
@@ -255,9 +267,28 @@ function NotACoachPanel() {
 }
 
 function statusOf(offer: OwnedListing): { label: string; tone: BadgeTone } {
-  if (offer.deleted_at === null) return { label: 'On sale', tone: 'success' };
+  if (offer.deleted_at === null) {
+    // "On sale" would be a lie for an instant offer with nothing attached:
+    // `claim_offer` refuses it, so it is visible and unbuyable. The state is
+    // reachable in one step — publishing an instant offer whose upload failed —
+    // and the coach is the only person who can see it, so it says so here.
+    if (needsFile(offer)) return { label: 'Needs a file', tone: 'warn' };
+    return { label: 'On sale', tone: 'success' };
+  }
   if (offer.withdrawn_by_admin) return { label: 'Removed', tone: 'warn' };
   return { label: 'Withdrawn', tone: 'neutral' };
+}
+
+/**
+ * True for a published instant offer with no file attached — the one state in
+ * which an offer looks live and cannot be claimed.
+ *
+ * `asset_path` is readable here and nowhere public: `OwnedListing` carries it
+ * from `public.owned_listings`, which is scoped to the owner. This is exactly
+ * the kind of thing that view exists for.
+ */
+function needsFile(offer: OwnedListing): boolean {
+  return offer.fulfilment === 'instant' && offer.asset_path === null;
 }
 
 /**

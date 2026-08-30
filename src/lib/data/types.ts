@@ -278,6 +278,49 @@ export interface PublicCoach {
   avatar_path: string | null;
 }
 
+/**
+ * How an offer is handed over. Mirrors `public.fulfilment_mode`.
+ *
+ * The two modes attach a file at different POINTS, which is why they are two
+ * mechanisms rather than one column with a flag:
+ *
+ *   `instant`       the file belongs to the LISTING. Same bytes for every
+ *                   buyer, attached when the offer is published, downloadable
+ *                   the moment it is claimed. A ready-made training plan.
+ *   `personalised`  the file belongs to the ORDER. Uploaded after the claim,
+ *                   readable only by the two people that order names — and for
+ *                   a video review the LEARNER uploads first. See
+ *                   {@link Deliverable}.
+ *
+ * `personalised` is the column default and the only honest value for an offer
+ * with nothing attached, which is why it leads {@link FULFILMENT_MODES}.
+ */
+export type FulfilmentMode = 'instant' | 'personalised';
+
+/**
+ * The write vocabulary, in the order a picker should offer it. Exported so the
+ * authorization suite derives its enum expectations from here rather than
+ * hardcoding a list that can drift — the same treatment `ROLES` and
+ * `COACH_STATUSES` get.
+ */
+export const FULFILMENT_MODES: readonly FulfilmentMode[] = ['personalised', 'instant'];
+
+export const FULFILMENT_LABELS: Record<FulfilmentMode, string> = {
+  personalised: 'Made for each buyer',
+  instant: 'Instant download',
+};
+
+/**
+ * Narrows unknown input to a {@link FulfilmentMode}.
+ *
+ * Same job, and the same reason, as {@link isListingCategory}: a Server Action
+ * is a public HTTP endpoint, so the radio group's two values are not a
+ * constraint on what arrives.
+ */
+export function isFulfilmentMode(value: unknown): value is FulfilmentMode {
+  return value === 'instant' || value === 'personalised';
+}
+
 /** `public.listings` */
 export interface Listing {
   id: string;
@@ -372,6 +415,54 @@ export interface Listing {
    * `is_approved_coach`.
    */
   deleted_by: string | null;
+  /**
+   * How this offer is handed over. @see FulfilmentMode
+   *
+   * PUBLIC, and the one new column of the pair that is: a buyer should know
+   * whether a thing downloads immediately or is made for them before they claim
+   * it, so `0011_delivery.sql` grants `select (fulfilment)` to `anon` and
+   * `authenticated` alongside the other public listing columns.
+   *
+   * IMMUTABLE ONCE THE OFFER HAS BEEN CLAIMED, by anybody, including an
+   * administrator. `guard_listing_update()` refuses the change, and the mock's
+   * `updateListing` refuses it in the same terms: a buyer claimed a thing that
+   * was going to arrive in a particular way, and flipping the mode afterwards
+   * retroactively rewrites what they were promised. Before the first claim the
+   * coach may change their mind freely.
+   */
+  fulfilment: FulfilmentMode;
+  /**
+   * The instant download's object path in the PRIVATE `offer-assets` bucket, or
+   * `null`. Never a URL — the URL is signed, expires, and is minted per reader.
+   *
+   * `null` for every personalised offer, which is a CHECK constraint
+   * (`listings_asset_path_shape`) and not merely a convention; and `null` is
+   * also legal for an instant offer that has been published but not yet had its
+   * file attached. That second state is real and the product has to render it:
+   * `claim_offer` refuses such an offer with "This offer is not ready to be
+   * claimed yet", so the coach's dashboard flags it rather than letting a buyer
+   * discover it.
+   *
+   * ============================================================================
+   * THIS COLUMN NEVER REACHES A PUBLIC CALLER, on the same terms as
+   * {@link deleted_by} — but for a different reason and with a narrow exception.
+   * ============================================================================
+   * `0011_delivery.sql` withholds it from the client column grant, so it is
+   * unreadable through PostgREST exactly as `deleted_by` is. {@link
+   * ListingWithCoach} therefore projects it away, and every public listing read
+   * returns that shape.
+   *
+   * The exception is the two parties who need to mint a download link, and it is
+   * granted ROW-wise through a view rather than column-wise through a grant —
+   * `owned_listings` for the coach who owns the offer, `entitled_offer_assets`
+   * for a learner holding an order for it (0012). Both carry their `auth.uid()`
+   * predicate inside the view, so neither can be pointed at anyone else.
+   *
+   * A path is not a capability in either case: the bucket is private, and
+   * reading the bytes still goes through `offer_assets_read_entitled` evaluated
+   * against the reader's own session when the URL is signed.
+   */
+  asset_path: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -414,16 +505,20 @@ export interface ListingRevision {
  * A listing joined to its coach's display name — **and the shape EVERY method
  * that returns a listing actually returns**, reads and writes alike.
  *
- * It is `Omit<Listing, 'deleted_by'>`, not `extends Listing`, and that omission
- * is a safety property rather than tidiness: see {@link Listing.deleted_by}.
- * Because the audit column is absent from the TYPE, `withCoach()` cannot
- * accidentally spread it back in — the projection is checked by the compiler at
- * every one of its call sites, rather than resting on each of them remembering.
+ * It is `Omit<Listing, 'deleted_by' | 'asset_path'>`, not `extends Listing`, and
+ * both omissions are safety properties rather than tidiness: see
+ * {@link Listing.deleted_by} and {@link Listing.asset_path}. Because neither
+ * column is on the TYPE, `withCoach()` cannot accidentally spread one back in —
+ * the projection is checked by the compiler at every one of its call sites,
+ * rather than resting on each of them remembering.
+ *
+ * `fulfilment` IS here, and the asymmetry is the whole point of the pair: how an
+ * offer arrives is public, what file it arrives as is not.
  *
  * Same construction, and the same reasoning, as {@link PublicReview} dropping
  * `order_id`.
  */
-export interface ListingWithCoach extends Omit<Listing, 'deleted_by'> {
+export interface ListingWithCoach extends Omit<Listing, 'deleted_by' | 'asset_path'> {
   coach_name: string;
 }
 
@@ -448,6 +543,23 @@ export interface ListingWithCoach extends Omit<Listing, 'deleted_by'> {
  */
 export interface OwnedListing extends ListingWithCoach {
   withdrawn_by_admin: boolean;
+  /**
+   * The owner's own view of {@link Listing.asset_path}, added back onto the
+   * projection that drops it — this is the ONE listing shape that carries it,
+   * exactly as it is the one that carries `withdrawn_by_admin`.
+   *
+   * Both come from `public.owned_listings`, whose `where l.coach_id =
+   * auth.uid()` is what makes handing them over safe. Note the two are opposite
+   * treatments of the same problem and both are deliberate: `deleted_by` holds
+   * somebody ELSE's id so only a derived boolean is published, while
+   * `asset_path` is the owner's own file and the string itself is what the
+   * editor needs to replace or remove it.
+   *
+   * `null` unless {@link Listing.fulfilment} is `'instant'` and a file has
+   * actually been attached — an instant offer with `null` here is published but
+   * NOT claimable, which is the state the dashboard exists to flag.
+   */
+  asset_path: string | null;
 }
 
 /**
@@ -537,25 +649,35 @@ export interface OrderWithListing extends Order {
    * "Write a review" control keys off — it is not an authorization check.
    */
   has_review: boolean;
+  /**
+   * How the offer this order bought is delivered, joined from the listing the
+   * same way `listing_title` is. It decides which of two different screens the
+   * order page renders — a download, or a file exchange — so it is on the shape
+   * rather than fetched separately by the one caller that needs it.
+   *
+   * Read from the LIVE listing, not snapshotted onto the order, and that is
+   * safe precisely because the mode is immutable once anything has been claimed:
+   * see {@link Listing.fulfilment}. There is no version of this column that can
+   * disagree with what the buyer was promised.
+   */
+  listing_fulfilment: FulfilmentMode;
+  /**
+   * The instant download's path, or `null` — which is what a personalised order
+   * always gets, and what an instant one gets if the coach has not attached the
+   * file yet or the caller is not entitled to it.
+   *
+   * Comes from `public.entitled_offer_assets` (0012), whose predicate is the
+   * `offer_assets_read_entitled` storage policy restated: the coach who owns the
+   * offer, or a learner holding an order for it. Since `getOrder` already admits
+   * only those two and an admin, the practical effect is that an ADMIN reading
+   * somebody else's order sees `null` here — they can see that an order exists,
+   * they cannot help themselves to the file. That is the intended asymmetry.
+   *
+   * Still not a capability: {@link Listing.asset_path} explains why a path on
+   * its own buys nothing.
+   */
+  asset_path: string | null;
 }
-
-/**
- * `public.reviews` — a rating and a body, anchored to an order.
- *
- * `order_id` is what makes this non-spammable: you cannot review an offer you
- * did not buy, you cannot review the same purchase twice (the column is
- * UNIQUE), and "Verified purchase" is free — every review that exists has a
- * purchase behind it by construction.
- */
-/** How an offer is handed over. Mirrors `public.fulfilment_mode`. */
-export type FulfilmentMode = 'instant' | 'personalised';
-
-export const FULFILMENT_MODES: readonly FulfilmentMode[] = ['personalised', 'instant'];
-
-export const FULFILMENT_LABELS: Record<FulfilmentMode, string> = {
-  personalised: 'Made for each buyer',
-  instant: 'Instant download',
-};
 
 /**
  * One file attached to ONE order — the personalised delivery path.
@@ -581,6 +703,14 @@ export interface Deliverable {
   created_at: string;
 }
 
+/**
+ * `public.reviews` — a rating and a body, anchored to an order.
+ *
+ * `order_id` is what makes this non-spammable: you cannot review an offer you
+ * did not buy, you cannot review the same purchase twice (the column is
+ * UNIQUE), and "Verified purchase" is free — every review that exists has a
+ * purchase behind it by construction.
+ */
 export interface Review {
   id: string;
   /** The purchase being reviewed. Unique across the table: one review per order. */

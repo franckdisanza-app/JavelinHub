@@ -20,7 +20,8 @@
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 
-import { createSession, destroySession, safeNextPath } from '@/lib/auth/session';
+import { requestPasswordReset } from '@/lib/auth/password-reset';
+import { createSession, destroySession, getActor, safeNextPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { guessAuthField, toFormState, type FormState } from '@/lib/forms';
 
@@ -93,6 +94,99 @@ export async function logInAction(_prev: FormState, formData: FormData): Promise
   await createSession(userId);
   revalidatePath('/', 'layout');
   redirect(next ?? DEFAULT_LANDING);
+}
+
+/**
+ * Starts a password reset.
+ *
+ * **THE SAME ANSWER FOR EVERY ADDRESS**, and the whole point of the action is
+ * to keep it that way. A known address, an unknown one, one belonging to
+ * somebody else — all three return the identical success state, because any
+ * difference makes this form an account-enumeration oracle. It is the same rule
+ * `logInAction` follows with "Invalid email or password", applied to a form that
+ * would otherwise be a much easier oracle: no password guess is even needed.
+ *
+ * `requestPasswordReset` returns `void` for the same reason. There is nothing
+ * here to branch on and nothing to accidentally render.
+ *
+ * The only thing that IS rejected is an unusable input, and only for the
+ * obvious reason: an empty box is a mistake, not a lookup.
+ */
+export async function requestPasswordResetAction(
+  _prev: FormState,
+  formData: FormData,
+): Promise<FormState> {
+  const email = String(formData.get('email') ?? '').trim();
+  const values = { email };
+
+  if (email === '') {
+    return { status: 'error', message: 'Enter your email address.', fieldErrors: { email: 'Enter your email address.' }, values };
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    // A shape check, not an existence check. It says nothing about whether the
+    // address is registered — only that what was typed cannot be an address.
+    return { status: 'error', message: 'Enter a valid email address.', fieldErrors: { email: 'Enter a valid email address.' }, values };
+  }
+
+  try {
+    await requestPasswordReset(email);
+  } catch {
+    /*
+     * SWALLOWED, DELIBERATELY, and this is the one place in the app where that
+     * is right. A mail transport that is down, rate-limited or misconfigured
+     * fails differently for an address that exists than for one that does not —
+     * so reporting the failure re-opens the oracle the rest of this function
+     * closes. The user is told to check their inbox and to try again if nothing
+     * arrives, which is the correct advice in both cases.
+     */
+  }
+
+  return { status: 'success' };
+}
+
+/**
+ * Sets a new password for whoever the current session names.
+ *
+ * THE SESSION IS THE AUTHORIZATION, and it is why the link that created it is
+ * treated as a credential — single-use, one hour, hashed at rest. See
+ * `src/lib/auth/password-reset.ts`.
+ *
+ * No current password is asked for, because the user reached this page by
+ * proving control of their inbox precisely to say that they do not have one.
+ * A change-password form for a user who DOES know it should ask, and should
+ * still call `updateMyPassword` underneath.
+ *
+ * No redirect on success: the form renders its own confirmation and a way
+ * onward. A redirect would land the user on a page with no acknowledgement that
+ * the thing they came to do actually happened.
+ */
+export async function resetPasswordAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const password = String(formData.get('password') ?? '');
+  const confirm = String(formData.get('confirm') ?? '');
+  // Never echo a password back into the rendered HTML — the same rule
+  // `signUpAction` follows. There are no `values` here at all for that reason.
+
+  const fieldErrors: Record<string, string> = {};
+  if (password === '') fieldErrors.password = 'Choose a new password.';
+  else if (password.length < 8) fieldErrors.password = 'Passwords must be at least 8 characters.';
+  else if (confirm !== password) fieldErrors.confirm = 'The two passwords do not match.';
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return { status: 'error', message: 'Please correct the highlighted fields.', fieldErrors };
+  }
+
+  const actor = await getActor();
+  try {
+    await getDataClient().updateMyPassword(actor, password);
+  } catch (error) {
+    return toFormState(error);
+  }
+
+  // The header renders from the signed-in profile; nothing about it changes
+  // here, but the session cookies may have been rotated by GoTrue during the
+  // update, and re-rendering the layout is how the new pair reaches the browser.
+  revalidatePath('/', 'layout');
+  return { status: 'success' };
 }
 
 /**

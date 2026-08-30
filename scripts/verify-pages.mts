@@ -101,6 +101,10 @@ process.env.SESSION_SECRET = 'verify-pages-throwaway-session-secret';
 
 const { getDataClient } = await import('@/lib/data');
 const { mutateDb } = await import('@/lib/data/mock/store');
+// Mock-only token mechanics. Imported so the reset LINK can be planted before
+// the server boots — the store is cached in the server process, so a token
+// minted after boot would be invisible to it.
+const { issueResetToken } = await import('@/lib/auth/reset-tokens');
 
 // ---------------------------------------------------------------------------
 // Seeded ids, mirrored from store.ts. Hand-written rather than imported: an
@@ -154,6 +158,12 @@ async function plantFixtures(): Promise<{
   soldUnreviewedCoachId: string;
   soldUnreviewedOfferId: string;
   adminTakenDownOfferId: string;
+  instantCoachId: string;
+  instantOfferId: string;
+  instantUnreadyOfferId: string;
+  instantBuyerId: string;
+  resetUserId: string;
+  resetToken: string;
 }> {
   const db = getDataClient();
 
@@ -284,12 +294,94 @@ async function plantFixtures(): Promise<{
 
   await db.softDeleteListing(ADMIN, takenDown.id);
 
+  // --- F6 -------------------------------------------------------------------
+  // INSTANT DELIVERY, both of its states, on a coach of their own.
+  //
+  // A coach of their own rather than Cory, because these two offers are
+  // PUBLISHED — unlike the takedown above, which is invisible from the moment it
+  // exists — so hanging them off Cory would move every count on his profile and
+  // in the cross-link grid. On Iris they move exactly two numbers, the browse
+  // grid's card count and the coach directory's, and both are asserted.
+  //
+  // A fresh invite is MINTED rather than reusing a seeded code: the two seeded
+  // codes are single-use and Dana and Rune have already spent them.
+  //
+  // A buyer of their own too, for the same reason. `/purchases` is newest-first
+  // and the order-page assertions scrape the FIRST link on it, so giving this
+  // claim to Lena or Dana would silently retarget an existing section at a
+  // different order.
+  const invite = await db.createInvite(ADMIN, { note: 'verify-pages instant delivery fixture' });
+  const iris = await db.signUp({
+    email: 'iris@verify-pages.test',
+    password: 'learner1234',
+    fullName: 'Iris Vale',
+  });
+  const IRIS: Actor = { userId: iris.id };
+  await db.redeemInviteCode(IRIS, invite.code);
+
+  const instantOffer = await db.createListing(IRIS, {
+    title: 'Instant Plan For Winter Throws',
+    description:
+      'A ready-made twelve-week winter plan, downloadable the moment you claim it. The same file for everybody.',
+    price_cents: 1900,
+    category: 'training_plan',
+    fulfilment: 'instant',
+  });
+  // The PATH only. The mock has no storage at all, so there are no bytes behind
+  // it — which is exactly what the order page's "not available right now" branch
+  // is for, and asserting that branch is asserting that the page does not fall
+  // apart when a signed URL cannot be minted.
+  await db.setListingAsset(IRIS, instantOffer.id, `${instantOffer.id}/abcd1234-winter-plan.pdf`);
+
+  // The other state, and the one the coach dashboard exists to flag: an instant
+  // offer that is published, visible and IMPOSSIBLE TO CLAIM because nothing is
+  // attached. Legal by construction — the path is pinned under the listing's own
+  // id, so a row must exist before a file can be stored under it.
+  const instantUnready = await db.createListing(IRIS, {
+    title: 'Instant Offer Awaiting Its File',
+    description:
+      'Published as an instant download with nothing attached yet, which is a state the dashboard has to flag.',
+    price_cents: 2100,
+    category: 'training_plan',
+    fulfilment: 'instant',
+  });
+
+  const otto = await db.signUp({
+    email: 'otto@verify-pages.test',
+    password: 'learner1234',
+    fullName: 'Otto Brandt',
+  });
+  const OTTO: Actor = { userId: otto.id };
+  await db.createOrder(OTTO, instantOffer.id);
+
+  // --- F7 -------------------------------------------------------------------
+  // A live password-reset link. Minted here rather than requested through the
+  // form, because the form is a Server Action and this suite speaks only GET —
+  // and because the link is what the assertions are about, not the sending.
+  //
+  // Its own account, since redeeming it creates a session and burning it is the
+  // point of one of the assertions. Doing that to a seeded actor would leave
+  // whatever came before it in a state the next reader cannot predict.
+  const reset = await db.signUp({
+    email: 'locked-out@verify-pages.test',
+    password: 'learner1234',
+    fullName: 'Lockie Out',
+  });
+  const resetToken = await issueResetToken('locked-out@verify-pages.test');
+  if (!resetToken) throw new Error('fixture: could not mint a password-reset token');
+
   return {
     deapprovedCoachId: dana.id,
     deapprovedOfferId: danaOffer.id,
     soldUnreviewedCoachId: rune.id,
     soldUnreviewedOfferId: runeOffer.id,
     adminTakenDownOfferId: takenDown.id,
+    instantCoachId: iris.id,
+    instantOfferId: instantOffer.id,
+    instantUnreadyOfferId: instantUnready.id,
+    instantBuyerId: otto.id,
+    resetUserId: reset.id,
+    resetToken,
   };
 }
 
@@ -747,10 +839,15 @@ try {
   // =========================================================================
   section('/offers — stats on cards');
   // =========================================================================
-  // Five published seeded offers (…0104 is withdrawn above) plus the two
-  // planted coaches' offers. Asserting the exact count is what stops a card
-  // that silently stopped rendering from hiding behind its siblings.
-  check('the grid renders one card per published offer', offers.cards.size, 7);
+  // Five published seeded offers (…0104 is withdrawn above), the two planted
+  // coaches' offers, and Iris's two instant ones — which are published on
+  // purpose, because "visible but unclaimable" is a state that only exists on a
+  // published offer. Asserting the exact count is what stops a card that
+  // silently stopped rendering from hiding behind its siblings.
+  //
+  // The takedown fixture is NOT in this number and never should be: it is
+  // withdrawn from the moment it exists.
+  check('the grid renders one card per published offer', offers.cards.size, 9);
   check('the withdrawn offer has no card', offers.cards.has(OFFER.video), false);
   check(
     'the well-reviewed offer shows 4.7 over "3 reviews", and 3 sales',
@@ -1400,6 +1497,195 @@ try {
   const learnerSales = await getAs('/coach/sales', LEARNER);
   check('a learner has no sales page to speak of',
     learnerSales.text.includes('You are not an approved coach yet'), true);
+
+  // -------------------------------------------------------------------------
+  section('Instant delivery — the mode on screen, and the two states of a file');
+
+  /*
+   * THE PUBLIC OFFER PAGE tells a buyer how a thing arrives BEFORE they claim
+   * it. Both halves are checked, on the two offers, because a page that printed
+   * one label unconditionally would satisfy either assertion alone.
+   */
+  const instantPage = await get(`/offers/${fixtures.instantOfferId}`);
+  check('an instant offer says so', instantPage.text.includes('Instant download'), true);
+  check('...and explains what that means before the claim',
+    instantPage.text.includes('the file is yours to download straight away'), true);
+  check('...and does NOT claim to be made for each buyer',
+    instantPage.text.includes('Made for each buyer'), false);
+
+  const personalisedPage = await get(`/offers/${OFFER.fundamentals}`);
+  check('a personalised offer says THAT', personalisedPage.text.includes('Made for each buyer'), true);
+  check('...and does not offer an instant download',
+    personalisedPage.text.includes('Instant download'), false);
+
+  /*
+   * AND NEITHER PAGE PUBLISHES THE PATH. `asset_path` is revoked from every
+   * client role in SQL and projected off `ListingWithCoach` in TypeScript; this
+   * is the assertion that would catch a page reaching past both.
+   */
+  check('the public page never prints the object path',
+    instantPage.html.includes('abcd1234-winter-plan.pdf'), false);
+  check('...not even to an anonymous reader of the raw HTML',
+    /offer-assets|asset_path/.test(instantPage.html), false);
+
+  // The unready offer is PUBLISHED and unclaimable, and the public page says
+  // nothing about that — deliberately, because `asset_path` is not public. What
+  // a buyer sees is an ordinary instant offer; the refusal lives in claim_offer.
+  const unreadyPublic = await get(`/offers/${fixtures.instantUnreadyOfferId}`);
+  check('an instant offer with no file still renders publicly', unreadyPublic.status, 200);
+  check('...and gives away nothing about the missing file',
+    unreadyPublic.text.includes('Needs a file'), false);
+
+  /*
+   * THE COACH DASHBOARD is where that state is visible, and only to its owner.
+   */
+  const irisDash = await getAs('/coach/offers', fixtures.instantCoachId);
+  check('the owner is warned that the fileless offer cannot be claimed',
+    irisDash.text.includes('Needs a file'), true);
+  check('...with the consequence spelled out',
+    irisDash.text.includes('Nobody can claim this until you attach a file'), true);
+  // The control: the offer that DOES have a file is on the same page and must
+  // not be flagged, or the warning is unconditional and means nothing.
+  check('...and only ONE of the two offers is flagged',
+    (irisDash.text.match(/Needs a file/g) ?? []).length, 1);
+
+  /*
+   * THE EDITOR carries the attach control, and only for an instant offer.
+   */
+  const instantEditor = await getAs(
+    `/coach/offers/${fixtures.instantOfferId}/edit`, fixtures.instantCoachId);
+  check('the editor offers the delivery-mode choice',
+    instantEditor.html.includes('name="fulfilment"'), true);
+  check('...and, for an instant offer, the file section',
+    instantEditor.text.includes('The file buyers download'), true);
+  check('...naming the attached file', instantEditor.text.includes('winter-plan.pdf'), true);
+
+  const personalisedEditor = await getAs(
+    `/coach/offers/${OFFER.fundamentals}/edit`, COACH);
+  check('a personalised offer gets no file section',
+    personalisedEditor.text.includes('The file buyers download'), false);
+
+  /*
+   * THE ORDER PAGE is the other side of it: a download, and NOT the file
+   * exchange that a personalised order gets. Rendering both would be worse than
+   * rendering the wrong one.
+   */
+  const ottoPurchases = await getAs('/purchases', fixtures.instantBuyerId);
+  const instantOrderHref = /href="(\/orders\/[0-9a-f-]+)"/.exec(ottoPurchases.html)?.[1] ?? '';
+  check('the instant buyer has an order to open', instantOrderHref !== '', true);
+
+  const instantOrder = await getAs(instantOrderHref, fixtures.instantBuyerId);
+  check('the buyer of an instant offer gets a download section', instantOrder.status, 200);
+  check('...headed as their download', instantOrder.text.includes('Your download'), true);
+  check('...and is NOT asked to send their coach a file',
+    instantOrder.text.includes('Send something to your coach'), false);
+  check('...nor told that nothing has been sent yet',
+    instantOrder.text.includes('Nothing has been sent yet'), false);
+  // Delivered the moment it was claimed, so there is no waiting state to be in.
+  check('...and it is not "Awaiting delivery"',
+    instantOrder.text.includes('Awaiting delivery'), false);
+  /*
+   * On the mock backend no URL can be signed, so the graceful branch is what
+   * renders — and asserting it is asserting that a page whose link cannot be
+   * minted still shows the order rather than falling over.
+   */
+  check('...with the unavailable-link branch instead of a broken link',
+    instantOrder.text.includes('This download is not available right now'), true);
+  check('...and still no object path in the HTML',
+    instantOrder.html.includes('abcd1234-winter-plan.pdf'), false);
+
+  // The control on the opposite side: a personalised order is unchanged by all
+  // of this and still gets the exchange, which `buyerOrder` above already
+  // asserted has "Nothing has been sent yet".
+  check('a personalised order still has no download section',
+    buyerOrder.text.includes('Your download'), false);
+
+  // -------------------------------------------------------------------------
+  section('Password reset — the link, end to end over HTTP');
+
+  /*
+   * The one flow whose whole job is to work for somebody who cannot sign in, so
+   * every assertion here is about an ANONYMOUS request. The form itself is a
+   * Server Action and out of this suite's reach; what is reachable — and what
+   * carries the security properties — is the link.
+   */
+  const forgot = await get('/forgot-password');
+  check('the request page is public', forgot.status, 200);
+  check('...and asks for an address', forgot.html.includes('name="email"'), true);
+  check('...and says the link is single-use and short-lived',
+    /works once|expire/i.test(forgot.text), true);
+
+  const login = await get('/login');
+  check('the login page offers a way out of a forgotten password',
+    login.html.includes('href="/forgot-password"'), true);
+
+  /*
+   * THE DEAD END THIS FEATURE EXISTS TO REMOVE. `/reset-password` is a
+   * signed-in page, but an anonymous visitor must NOT be bounced to
+   * `/login?next=/reset-password` — sending somebody who cannot log in to the
+   * login form is the loop the whole flow is built to break.
+   */
+  check('an anonymous visitor to /reset-password is NOT redirected to login',
+    await redirectTarget('/reset-password'), null);
+  const resetAnon = await get('/reset-password');
+  check('...they get an explanation instead', resetAnon.status, 200);
+  check('...naming what they need', resetAnon.text.includes('This page needs a valid reset link'), true);
+  check('...and a way to get another', resetAnon.html.includes('href="/forgot-password"'), true);
+
+  /*
+   * REDEEMING THE LINK. A GET that mutates, deliberately — an email can only
+   * offer a link — so the properties that make it safe are on the token, and
+   * two of them are asserted here over real HTTP.
+   */
+  const badLink = await fetch(`${BASE}/auth/callback?token=not-a-real-token`, { redirect: 'manual' });
+  await badLink.text();
+  check('a token that was never issued is turned away',
+    badLink.headers.get('location'), '/forgot-password?link=expired');
+  check('...and no session is handed out with it',
+    (badLink.headers.get('set-cookie') ?? '').includes('javelin_session='), false);
+
+  const noToken = await fetch(`${BASE}/auth/callback`, { redirect: 'manual' });
+  await noToken.text();
+  check('a link with no token at all gets the same answer',
+    noToken.headers.get('location'), '/forgot-password?link=expired');
+
+  const goodLink = await fetch(
+    `${BASE}/auth/callback?token=${encodeURIComponent(fixtures.resetToken)}`,
+    { redirect: 'manual' },
+  );
+  await goodLink.text();
+  check('a real link lands on the form', goodLink.headers.get('location'), '/reset-password');
+  const issuedCookie = (goodLink.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+  check('...and issues a session', issuedCookie.startsWith('javelin_session='), true);
+
+  // The session it issued is a REAL one for the right account — asserted by
+  // using it, not by decoding it, since the page is what a user would see.
+  const resetPage = await fetch(`${BASE}/reset-password`, { headers: { cookie: issuedCookie } });
+  const resetHtml = toText(await resetPage.text());
+  check('the session it issued opens the form', resetPage.status, 200);
+  check('...for the account the link was minted for',
+    resetHtml.includes('locked-out@verify-pages.test'), true);
+
+  /*
+   * SINGLE USE, over HTTP. The same link a moment later is dead — and this is
+   * the assertion that would fail if `redeemResetToken` ever validated a token
+   * without spending it in the same write.
+   */
+  const replay = await fetch(
+    `${BASE}/auth/callback?token=${encodeURIComponent(fixtures.resetToken)}`,
+    { redirect: 'manual' },
+  );
+  await replay.text();
+  check('the same link cannot be used twice',
+    replay.headers.get('location'), '/forgot-password?link=expired');
+  check('...and the second attempt issues no session',
+    (replay.headers.get('set-cookie') ?? '').includes('javelin_session='), false);
+
+  // And the failure page tells the user what to do about it, rather than
+  // leaving them on a bare redirect.
+  const expiredNotice = await get('/forgot-password?link=expired');
+  check('the failure lands on an explanation',
+    expiredNotice.text.includes('That link no longer works'), true);
 
 } finally {
   stopServer(server);

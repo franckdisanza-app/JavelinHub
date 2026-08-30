@@ -3,12 +3,17 @@
 import { useActionState, useState } from 'react';
 
 import { updateOfferAction } from '@/app/coach/offers/actions';
+import { DeliveryModeChoice, toModeOrDefault } from '@/components/delivery-mode-choice';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Field, fieldDescribedBy } from '@/components/ui/field';
 import { Input, Textarea } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { LISTING_CATEGORY_LABELS, type ListingCategory } from '@/lib/data/types';
+import {
+  LISTING_CATEGORY_LABELS,
+  type FulfilmentMode,
+  type ListingCategory,
+} from '@/lib/data/types';
 import { idleFormState } from '@/lib/forms';
 
 export interface EditOfferFormProps {
@@ -19,6 +24,21 @@ export interface EditOfferFormProps {
   /** The current price, already formatted for the input — e.g. `45.00`. */
   price: string;
   category: string;
+  /** The offer's current delivery mode. */
+  fulfilment: FulfilmentMode;
+  /**
+   * The attached file's path, or `null`. Travels in a hidden input so that
+   * switching to personalised can delete the object it orphans — see
+   * `updateOfferAction`.
+   */
+  assetPath: string | null;
+  /**
+   * True once ANYBODY has claimed this offer. The mode is immutable from then
+   * on: `guard_listing_update()` refuses the change, for an admin too.
+   */
+  claimed: boolean;
+  /** False on the mock backend, which has no file storage. */
+  storageAvailable: boolean;
 }
 
 /**
@@ -35,16 +55,38 @@ export interface EditOfferFormProps {
  *      if nobody says so. The warning is computed on the client purely as a
  *      courtesy — Postgres derives the epoch either way.
  */
-export function EditOfferForm({ id, categories, title, description, price, category }: EditOfferFormProps) {
+export function EditOfferForm({
+  id,
+  categories,
+  title,
+  description,
+  price,
+  category,
+  fulfilment,
+  assetPath,
+  claimed,
+  storageAvailable,
+}: EditOfferFormProps) {
   const [state, formAction, pending] = useActionState(updateOfferAction, idleFormState);
   const errors = state.fieldErrors ?? {};
 
   const [priceValue, setPriceValue] = useState(state.values?.price ?? price);
   const raising = isIncrease(price, priceValue);
 
+  const [mode, setMode] = useState(() => toModeOrDefault(state.values?.fulfilment, fulfilment));
+  // Only warn about losing the file if there IS one to lose.
+  const droppingAsset = fulfilment === 'instant' && mode === 'personalised' && assetPath !== null;
+
   return (
     <form action={formAction} className="flex flex-col gap-5" noValidate>
       <input type="hidden" name="id" value={id} />
+      {/*
+        The path the action deletes when the mode switches away from instant. It
+        is caller-supplied and treated as such — `offer_assets_delete_coach`
+        admits a delete only under a listing the caller owns, so the worst a
+        forged value can do is delete the forger's own file.
+      */}
+      <input type="hidden" name="currentAsset" value={assetPath ?? ''} />
 
       {state.status === 'error' && state.message ? <Alert tone="error">{state.message}</Alert> : null}
 
@@ -122,6 +164,23 @@ export function EditOfferForm({ id, categories, title, description, price, categ
           ))}
         </Select>
       </Field>
+
+      <DeliveryModeChoice
+        value={mode}
+        onChange={setMode}
+        disabled={claimed}
+        disabledNote="Somebody has already claimed this offer, so how it is delivered is fixed. They agreed to a thing that arrives a particular way, and changing it now would rewrite what they were promised."
+        storageAvailable={storageAvailable}
+        error={errors.fulfilment}
+      />
+
+      {droppingAsset ? (
+        <Alert tone="warn" title="This will delete the attached file.">
+          A personalised offer has nothing pre-attached, so saving removes the download for good and buyers
+          get whatever you upload for them individually. Nobody has claimed this offer yet — once somebody
+          does, the delivery mode is fixed and this choice goes away.
+        </Alert>
+      ) : null}
 
       <div>
         <Button type="submit" disabled={pending} className="w-full sm:w-auto">

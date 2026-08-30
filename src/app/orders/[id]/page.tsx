@@ -14,7 +14,11 @@ import { getDataClient } from '@/lib/data';
 import { DataErrorNotice, resolveDataError } from '@/lib/data-error';
 import { isDataError, type Deliverable, type OrderWithListing } from '@/lib/data/types';
 import { formatDate, formatPrice } from '@/lib/format';
-import { deliveryStorageAvailable, signedDeliveryUrl } from '@/lib/storage/deliverables';
+import {
+  deliveryStorageAvailable,
+  signedDeliveryUrl,
+  signedOfferAssetUrl,
+} from '@/lib/storage/deliverables';
 
 export const metadata: Metadata = { title: 'Order' };
 
@@ -75,14 +79,37 @@ export default async function OrderPage({
   const isBuyer = order.learner_id === profile.id;
   const isCoach = order.coach_id === profile.id;
 
+  /*
+   * WHICH OF TWO PAGES THIS IS.
+   *
+   * An instant order is finished the moment it exists: the file was attached
+   * before the offer went on sale, and claiming was the delivery. A personalised
+   * one is the start of an exchange — the buyer sends their throw, the coach
+   * returns an analysis — so it needs an upload control and a list that grows.
+   *
+   * Rendering both would be worse than rendering the wrong one. An "awaiting
+   * delivery" badge over a file that is already downloadable is a false status,
+   * and a "send your coach a file" box on an order with no coach step invites an
+   * upload nobody will read.
+   */
+  const isInstant = order.listing_fulfilment === 'instant';
+
+  // A signed URL for the instant download, minted now and good for five minutes.
+  // `order.asset_path` is `null` unless the viewer is entitled to it — see
+  // `OrderWithListing.asset_path` — and the storage policy is checked again when
+  // this is signed, so neither of the two is doing the job alone.
+  const instantUrl = isInstant && order.asset_path ? await signedOfferAssetUrl(order.asset_path) : null;
+
   let files: Deliverable[] = [];
   let filesFailed = false;
-  try {
-    files = await db.listDeliverables(actor, order.id);
-  } catch {
-    // The files are the point of the page, but a failure to list them must not
-    // take the order summary and the review form down with it.
-    filesFailed = true;
+  if (!isInstant) {
+    try {
+      files = await db.listDeliverables(actor, order.id);
+    } catch {
+      // The files are the point of the page, but a failure to list them must not
+      // take the order summary and the review form down with it.
+      filesFailed = true;
+    }
   }
 
   // A signed URL per file, minted now and good for five minutes. Never stored,
@@ -97,7 +124,9 @@ export default async function OrderPage({
     })),
   );
 
-  const coachHasDelivered = files.some((file) => file.uploaded_by === order.coach_id);
+  // An instant order was delivered at the moment it was claimed, so there is no
+  // waiting state for it to be in.
+  const coachHasDelivered = isInstant || files.some((file) => file.uploaded_by === order.coach_id);
   const justReviewed = search.reviewed === '1';
 
   return (
@@ -119,13 +148,17 @@ export default async function OrderPage({
         />
         <CardBody>
           <p className="text-sm leading-relaxed text-muted">
-            {isCoach
-              ? coachHasDelivered
-                ? 'You have sent something for this order. You can send more if you need to.'
-                : 'Somebody claimed this. Send them what you promised.'
-              : coachHasDelivered
-                ? 'Your coach has sent something. It is below.'
-                : 'Your coach can see this order. Anything they send appears below.'}
+            {isInstant
+              ? isCoach
+                ? 'This is an instant download. They received the attached file when they claimed it.'
+                : 'This is an instant download. It is below, and it stays here — come back for it whenever you need it.'
+              : isCoach
+                ? coachHasDelivered
+                  ? 'You have sent something for this order. You can send more if you need to.'
+                  : 'Somebody claimed this. Send them what you promised.'
+                : coachHasDelivered
+                  ? 'Your coach has sent something. It is below.'
+                  : 'Your coach can see this order. Anything they send appears below.'}
           </p>
         </CardBody>
         <CardFooter>
@@ -133,7 +166,49 @@ export default async function OrderPage({
         </CardFooter>
       </Card>
 
+      {/* -------------------------------------------- Instant download */}
+      {isInstant ? (
+        <Card tone="raised">
+          <CardHeader
+            title="Your download"
+            description="Only you and the coach can open this. The link below is good for a few minutes; reload the page for a fresh one."
+          />
+          <CardBody>
+            {instantUrl ? (
+              /*
+                A short-lived signed URL, so an ordinary link rather than a route
+                of ours — and no `download` attribute, for the reason `FileRow`
+                gives: the signed URL carries the filename as a
+                content-disposition, which a `download` attribute would not
+                survive the redirect to apply.
+              */
+              <a
+                href={instantUrl}
+                rel="noopener noreferrer"
+                className={linkButtonClass({ variant: 'secondary' })}
+              >
+                Download {order.listing_title}
+              </a>
+            ) : (
+              /*
+                Three different things land here and none of them is the buyer's
+                fault: the coach removed the file after this was claimed, the
+                signing failed, or the viewer is an admin — who can see that an
+                order exists and is deliberately not handed its file. One
+                sentence for all three, because distinguishing them would tell an
+                admin they were refused rather than simply not served.
+              */
+              <p className="text-sm leading-relaxed text-muted">
+                This download is not available right now. If it does not come back, ask the coach — the
+                order is unaffected and nothing about it has changed.
+              </p>
+            )}
+          </CardBody>
+        </Card>
+      ) : null}
+
       {/* ------------------------------------------------------------ Files */}
+      {isInstant ? null : (
       <Card tone="raised">
         <CardHeader
           title="Files"
@@ -176,6 +251,7 @@ export default async function OrderPage({
           )}
         </CardBody>
       </Card>
+      )}
 
       {/* ----------------------------------------------------------- Review */}
       {isBuyer ? (

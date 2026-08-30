@@ -11,7 +11,7 @@ import { Rating, Stat, StatEmpty } from '@/components/ui/stat';
 import { ClaimForm } from '@/app/offers/[id]/claim-form';
 import { getActor } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
-import { isListingCategory, listingCategoryLabel } from '@/lib/data/types';
+import { FULFILMENT_LABELS, isListingCategory, listingCategoryLabel } from '@/lib/data/types';
 import { firstValue } from '@/lib/search-params';
 import { formatDate, formatPrice } from '@/lib/format';
 
@@ -145,10 +145,20 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
       ) : null}
 
       <header className="mt-4">
-        {/* The label, never the stored slug — nobody should read "video_review". */}
-        <Badge tone="neutral" wrap>
-          {listingCategoryLabel(listing.category)}
-        </Badge>
+        {/*
+          The label, never the stored slug — nobody should read "video_review".
+          The delivery mode sits beside it in the same neutral tone: it is a fact
+          about the offer, not a status, and this page's one accent element is
+          already spent on the claim button (see the note on the component).
+        */}
+        <span className="flex flex-wrap items-center gap-2">
+          <Badge tone="neutral" wrap>
+            {listingCategoryLabel(listing.category)}
+          </Badge>
+          <Badge tone="neutral" wrap>
+            {FULFILMENT_LABELS[listing.fulfilment]}
+          </Badge>
+        </span>
         <h1 className="mt-3 text-2xl font-bold tracking-tight break-words text-ink sm:text-3xl">
           {listing.title}
         </h1>
@@ -191,6 +201,24 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
             */}
             <p className="mt-2 text-sm leading-relaxed break-words whitespace-pre-line text-muted">
               {listing.description}
+            </p>
+
+            {/*
+              HOW IT ARRIVES, stated before the claim rather than discovered
+              after it. The two modes are genuinely different purchases — one
+              ends at the download, the other starts a back-and-forth — and the
+              badge above names the mode without saying what it means.
+
+              Nothing here says whether a file is actually attached: `asset_path`
+              is not public and deliberately never will be. An instant offer with
+              no file cannot be claimed at all, which is what `claim_offer`
+              refuses and what the coach's own dashboard flags.
+            */}
+            <h2 className="mt-5 text-sm font-semibold text-ink">How you get it</h2>
+            <p className="mt-2 text-sm leading-relaxed text-muted">
+              {listing.fulfilment === 'instant'
+                ? 'Claim it and the file is yours to download straight away, from your purchases. The same file for every buyer.'
+                : 'Your coach puts this together for you after you claim it. You will both be able to send files on the order page — a video of your throw, for instance — and it appears in your purchases.'}
             </p>
           </div>
 

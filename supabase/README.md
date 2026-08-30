@@ -1,26 +1,56 @@
 # `supabase/` — schema, RLS, and the mock → Postgres swap path
 
 **Applied.** Project ref `trocsdetpwyqcgyfclir`, PostgreSQL 17, migrations
-0001-0005 pushed, `DATA_BACKEND=supabase`, and the app verified serving real
+**0001-0012** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
 pages off it.
 
-Verified against the live database rather than by inspection:
+**But the project holds no data and no administrator** — see the warning under
+"Swap path" step 1. The schema being applied is not the same as the project
+being usable, and it currently is not.
 
-| Check | Result |
+**The checks against the live database are now a script**, not a table
+somebody re-ran by hand: `npm run verify:supabase`. It asks PostgREST and
+GoTrue directly, with the same anon key a browser gets, and it is READ-ONLY by
+default because it runs against whatever `NEXT_PUBLIC_SUPABASE_URL` names —
+here, the live project. Last run: **43 passed** read-only, **53 passed** with
+the signed-in tier, 0 failed, the coach tier skipped for want of an invite code.
+
+What the read-only tier covers, and why each one is here rather than in the
+mock suites:
+
+| Check | Why only Postgres can answer it |
 |---|---|
-| `listings?select=*` | `42501` — the column revoke on `deleted_by` holds |
-| `listings?select=deleted_by` | `42501` |
-| `listings?select=<the ten granted columns>` | 200 — matches `LISTING_COLUMNS` |
-| anon `INSERT` into `profiles` / `listings` / `orders` | `42501 new row violates row-level security policy` |
-| the four privileged RPCs, anonymously | each returns its OWN authored sentence |
-| `/offers/junk`, `/coaches/junk` | 404, not the error boundary |
-| `/`, `/offers`, `/coaches`, `/login`, `/signup` | 200, empty states rendering |
+| `select=*`, `deleted_by`, `asset_path`, `is_demo` on `listings` → `42501` | column-level grants; **undone silently by any later blanket grant**, and the app would not notice because it always names its columns |
+| the granted projection → 200 | the control — every refusal above would also hold for a table nobody can read |
+| `owned_listings` / `entitled_offer_assets` → admitted, EMPTY for anon | the `auth.uid()` predicate is inside the view, so a caller-supplied filter cannot widen it |
+| `public_profiles?select=email` / `role` → absent | the projection is the boundary that keeps `profiles` off public pages |
+| anon `INSERT` into six tables → `42501` | RLS, not the app: a browser holding the anon key can issue these |
+| `claim_offer`, `grant_admin`, `redeem_invite_code` anonymously | each returns its OWN authored sentence, which is the half of `errors.ts` that preserves rather than replaces |
+| every `ListingCategory` and `FulfilmentMode` accepted by the cast | the TypeScript unions are hand-written; a member added to one and not the other is invisible until a write fails |
+| `deliverables` / `offer-assets` list nothing for anon | 0008 makes one bucket public and 0011 makes these two private; a bucket that silently flipped would serve every delivered file |
 
-The mock remains the code twin and is still what `npm run verify:authz` (758
-assertions) and `npm run verify:pages` (134) exercise — both hard-set
-`DATA_BACKEND=mock`, so **neither suite covers `SupabaseDataClient`**. The table
-above is the only evidence for the Postgres path, and it is a smoke test, not a
-suite.
+**Email confirmation is confirmed OFF**, which is what the swap path asks for
+and what password reset depends on — the signed-in tier's account came back
+with a session rather than the confirmation-pending shape, so this is measured
+rather than assumed.
+
+Two write tiers sit behind `VERIFY_SUPABASE_WRITES=1` — the signed-in one
+(signup trigger, self-promotion refusals, publish refusal) and the coach one
+(the fulfilment freeze, the `asset_path` CHECK, entitlement from both sides,
+the derived `price_epoch`). The second needs an unredeemed invite code, since
+publishing needs an approved coach and **no key in this repo can make the first
+administrator**: `grant_admin()` authorises on `session_user <> 'authenticator'`
+and every PostgREST request arrives as `authenticator`, service-role included.
+The suite confirms that rather than assuming it — `grant_admin` anonymously
+answers `42501 Only an administrator can grant administrator access.`
+
+The mock remains the code twin and is still what `npm run verify:authz` (850
+assertions) and `npm run verify:pages` (247) exercise — both hard-set
+`DATA_BACKEND=mock`, so **neither of those two covers `SupabaseDataClient`.**
+
+The app itself was separately checked serving real pages off this project:
+`/offers/junk` and `/coaches/junk` give 404 rather than the error boundary, and
+`/`, `/offers`, `/coaches`, `/login`, `/signup` render their empty states.
 
 **Still not exercised end to end: signup.** That needs a real email address, and
 therefore an account on somebody's domain — see "Before trusting this" below.
@@ -34,6 +64,11 @@ therefore an account on somebody's domain — see "Before trusting this" below.
 | `migrations/0005_privileged_uid.sql` | `public.jwt_uid()`, and the three privileged functions rewired onto it |
 | `migrations/0006_demo_flag.sql` | `is_demo` on every table that can hold a fixture, plus `demo_data_summary` |
 | `migrations/0007_demo_summary_revoke.sql` | makes that summary private — 0006's claim that it was not granted was wrong |
+| `migrations/0008_avatars.sql` | the public `avatars` bucket, its storage policies, and `profiles.avatar_path` |
+| `migrations/0009_claim_offer.sql` | `claim_offer(uuid)` — the RPC that is the only way an order comes into existence |
+| `migrations/0010_claim_offer_policies.sql` | the policy work that call needs; there is still no client `INSERT` on `orders` |
+| `migrations/0011_delivery.sql` | the two fulfilment modes, `deliverables`, the private `deliverables` and `offer-assets` buckets, and the claim refusal for an instant offer with no file |
+| `migrations/0012_instant_delivery_reads.sql` | the two row-level reads instant delivery needs — `asset_path` on `owned_listings`, and `entitled_offer_assets` |
 | `seed.sql` | demo fixtures — the SQL mirror of `seedDatabase()` in `src/lib/data/mock/store.ts`. **Fabricated purchases and reviews; do not load into a project real users will see.** Flags everything it inserts as `is_demo` |
 
 ### Finding fabricated data
@@ -75,6 +110,26 @@ between the interface and the schema.
 | `listReviewsForListing` | reviews at the offer's CURRENT epoch only | `public_reviews` deliberately omits `price_epoch`, so a client has nothing to filter on | `public.public_listing_reviews` — epoch + published filters inside the view, epoch still never projected |
 | `listReviewsForCoach` | every review, including those on WITHDRAWN offers | reaching `coach_id`/`listing_title` means joining `listings`, where `listings_select_public` hides withdrawn rows from anon — the list would silently disagree with `coach_stats` | `public.public_coach_reviews` — carries `coach_id` and the title, with no `deleted_at` and no epoch predicate |
 | `listCoaches` | newest-first ordering | `public_coaches` never projected `created_at`, and PostgREST cannot order by a column a view does not expose — despite `profiles_approved_coach_created_at_idx` existing in 0001 for exactly this query | `created_at` appended to `public_coaches` (`PublicCoach` is unchanged: the client orders by it without selecting it) |
+
+### Why 0012 exists — and it is the same reason
+
+Instant delivery hit the pattern above a third time, and the answer is the same
+instrument. `listings.asset_path` is withheld from the client column grant in
+0011 because it is the key of a private object; a *grant* cannot relax that,
+because grants are role-level and giving `authenticated` the column would
+publish every coach's paths through PostgREST to any signed-in visitor.
+
+| Method | What it needs | Why 0011 cannot serve it | 0012 adds |
+|---|---|---|---|
+| `listMyListings`, `setListingAsset` | the OWNER's own `asset_path`, to render and replace the file | SELECT on the column is revoked from every client role | `fulfilment` and `asset_path` appended to `public.owned_listings`, already self-scoped by `auth.uid()` |
+| `getOrder`, `listMyOrders`, `listOrdersForCoach` | the path to sign a download URL from | same, and the caller here is the BUYER, who does not own the row | `public.entitled_offer_assets` — the `offer_assets_read_entitled` storage policy restated against the listing: the offer's coach, or a learner holding an order for it |
+
+Both views are owner-run and carry their `auth.uid()` predicate **inside** the
+view, so no `?listing_id=eq.` from a caller can widen them. Neither has an admin
+arm, deliberately: an admin can read somebody else's order and is not handed its
+file. And a path is not a capability either way — the bucket is private, so
+reading the bytes still goes through the storage policy evaluated against the
+reader's own session when the URL is signed.
 
 ## What broke on the way in, and why none of it was visible beforehand
 
@@ -183,15 +238,37 @@ it still occupies quota. Clear them from the dashboard's Storage browser.
 ## Swap path: mock → Supabase
 
 The whole point of `DataClient` (`src/lib/data/client.ts`) is that **no calling
-code moves**. Steps 2 and 3 are DONE; 1 and 4 are outstanding and both need
-credentials only the project owner has.
+code moves**. All four steps are now DONE — but see the warning under step 1:
+the schema being applied is not the same as the project being usable, and right
+now it is not.
 
-1. **Apply the schema.** ⟵ OUTSTANDING
+1. ~~**Apply the schema.**~~ **Done** — every migration through `0012` is
+   recorded in `supabase_migrations.schema_migrations` on
+   `trocsdetpwyqcgyfclir`; a `db push` today applies nothing.
    ```bash
    npx supabase login              # interactive: opens a browser
    npm run db:link                 # prompts for the database password
-   npm run db:push                 # applies 0001, 0002, 0003 in order
+   npm run db:push                 # applies any migration not yet recorded
    ```
+
+   > **⚠ THE SEED AND THE ADMIN BOOTSTRAP NEVER HAPPENED, and the project is
+   > unusable without them.** Measured against the live project: `listings`,
+   > `public_coaches` and `public_reviews` are EMPTY, and `profiles` holds
+   > exactly one row — a throwaway LEARNER that `verify:supabase`'s write tier
+   > created for itself. So **there is no administrator**, and `grant_admin()`
+   > authorises on `session_user <> 'authenticator'` while every PostgREST
+   > request arrives as `authenticator` (service-role included), so one cannot
+   > be made through the API at all. That refusal is asserted by the suite
+   > rather than assumed. It also means there are no invite codes, because
+   > `invites.created_by` references a profile that does not exist.
+   >
+   > The result is a closed loop: a visitor can sign up and apply to coach, and
+   > nobody can ever approve them. Fix it by signing up through the deployed
+   > app and then running `select public.grant_admin('<that user id>');` in the
+   > SQL editor — see "Bootstrapping (and repairing) an administrator" below.
+   > Running `seed.sql` as well is optional and deliberate: those are the
+   > fabricated rows "Finding fabricated data" above says to check for before a
+   > public launch.
    The CLI is a **dev dependency**, not a global install — Supabase dropped
    support for `npm i -g supabase`, so it is `npx supabase` (or the `db:*`
    scripts in `package.json`). `supabase login` is the only interactive step
@@ -247,7 +324,8 @@ credentials only the project owner has.
 3. ~~**Register it**~~ **Done** — `src/lib/data/index.ts` now constructs
    `SupabaseDataClient` for `backend === 'supabase'`.
 
-4. **Flip the config.** ⟵ OUTSTANDING (do it after step 1, not before)
+4. ~~**Flip the config.**~~ **Done** — `.env.local` carries all three, and the
+   Vercel deployment was rebuilt to pick them up.
    ```
    DATA_BACKEND=supabase
    NEXT_PUBLIC_SUPABASE_URL=https://trocsdetpwyqcgyfclir.supabase.co
@@ -631,7 +709,9 @@ error you get*, or about capabilities that exist on only one side.
 | `grant_admin()` | SQL-only. The mock seeds its admin from `SEED_ADMIN_EMAIL`; there is no `DataClient` method, by design. |
 | Validation messages | The mock validates lengths (title ≤ 140, bio ≥ 20 chars, …) before touching the store; SQL only has `price_cents >= 0` and NOT NULL. Field-level messages therefore come from application code in both backends — the `SupabaseDataClient` must keep the same validation helpers or the UI copy changes on swap. |
 | `invites.created_by` is `ON DELETE RESTRICT` | Deliberate: an invite is the audit record of who granted somebody coach status, and an author that has silently become NULL is worth little. The documented cost is that an admin who has minted invites cannot be hard-deleted until those invites are reassigned or removed. `redeemed_by` and `reviewed_by` are `ON DELETE SET NULL`, so they never block a deletion. The mock does not model deletion at all. |
-| Password storage | The mock uses `scrypt` in `store.ts`; Supabase uses its own `auth.users`. `signUp`/`signInWithPassword` are the only methods whose internals differ completely. |
+| Password storage | The mock uses `scrypt` in `store.ts`; Supabase uses its own `auth.users`. `signUp`, `signInWithPassword` and `updateMyPassword` are the methods whose internals differ completely. All three share `requirePassword()` so the length rule and its wording are identical, and none of them TRIMS — a password is stored exactly as typed, which `requireText` would not do and which a regression test in `verify-authz.mts` pins. GoTrue applies its own minimum on top, a project setting, so Supabase can be stricter. |
+| Password RESET | **The mechanism exists on only one side.** GoTrue owns minting, storing, emailing, expiring and redeeming a recovery token; the mock has no mail transport and no GoTrue, so `src/lib/auth/reset-tokens.ts` implements the equivalent against the JSON store (32 random bytes, SHA-256 at rest, one hour, single use, superseded by any newer request) and prints the link to the SERVER console. `password-reset.ts` dispatches between them, and neither half is on `DataClient` — the same reasoning that keeps object storage off it. What IS shared is the write that follows, `updateMyPassword`, because by then a session exists. |
+| Changing a password does not revoke OTHER sessions | True in both backends and worth knowing. The mock session is a self-contained signed cookie with no revocation list, so a copy taken earlier survives a password change until its own 30-day expiry. On Supabase, `auth.updateUser` rotates the calling session's tokens and leaves other refresh tokens alone unless the project is configured otherwise. Neither is what a user assumes "I changed my password" means. Closing it needs a session table on the mock side and `signOut({ scope: 'others' })` on the Supabase side — deliberately not faked in one backend only. |
 | `createReview` error granularity | The mock distinguishes `not_found` (no such order) from `forbidden` (somebody else's order). In Postgres both are one failed `with check` → 42501, so the `SupabaseDataClient` must re-`select` the order to reproduce the distinction, or accept a single `forbidden`. Same shape as the `revokeInvite` row above. The distinction is not an enumeration oracle: order ids are random v4 UUIDs, so "does this id exist" cannot be asked usefully. |
 | `getCoachStats` for an unknown id | The mock returns zeros with a `null` average — the same answer a brand-new coach gets — and never checks whether the id is a real profile. Deliberate: an error would make the endpoint an existence probe. **The view does not do this by itself.** `coach_stats` selects `from public.profiles`, so an id that is not a profile matches **no row**, and returning that straight through would yield `null`/`undefined` and break the interface's "always returns a row" guarantee. `SupabaseDataClient` must coalesce a missing row to `{ coach_id, rating_average: null, review_count: 0, sales_count: 0 }`. A brand-new coach who *does* have a profile row needs no fallback — the aggregate subqueries already return 0 and NULL over their empty sets. |
 | `getOrder` error granularity | The mock throws `forbidden` for somebody else's order and returns `null` for one that does not exist. RLS expresses both as ZERO ROWS, and telling them apart needs a read that bypasses `orders_select_*` — which this client deliberately cannot make. **`SupabaseDataClient.getOrder` therefore returns `null` for both.** `listOrdersForCoach` still throws `forbidden`, and that is not an inconsistency: it takes a coach id and can compare it with the actor's own id without asking the database anything. The UI treats `null` as a 404, which is the right answer for a stranger either way. |

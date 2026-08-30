@@ -62,6 +62,32 @@ export interface AuthUser {
   created_at: string;
 }
 
+/**
+ * A pending password reset. **MOCK ONLY, and it has no `public.*` twin.**
+ *
+ * On Supabase this whole record is GoTrue's business: `resetPasswordForEmail`
+ * mints a recovery token, stores it in `auth.users`, emails it, and expires it,
+ * and none of that is reachable — or ours to reimplement. So this type lives
+ * here rather than in `types.ts`, which mirrors the SQL schema and nothing else.
+ * It is the same reasoning that keeps object storage out of `DataClient`: one
+ * side of the split has no analogue on the other.
+ *
+ * THE TOKEN ITSELF IS NEVER STORED. `token_hash` is a SHA-256 of it, so a
+ * leaked `db.json` yields no usable links — the same reason a password column
+ * holds a hash. Verification hashes the presented token and compares.
+ */
+export interface PasswordReset {
+  id: string;
+  user_id: string;
+  /** SHA-256 of the token, hex. The token exists only inside the emailed link. */
+  token_hash: string;
+  created_at: string;
+  /** ISO-8601. Past this, the row is dead however untouched it looks. */
+  expires_at: string;
+  /** When it was redeemed. Non-null means spent: a reset link works ONCE. */
+  used_at: string | null;
+}
+
 export interface MockDb {
   /** Bumped when the on-disk shape changes; a mismatch triggers a reseed. */
   version: number;
@@ -76,6 +102,8 @@ export interface MockDb {
   reviews: Review[];
   /** Personalised delivery files. Paths only — the mock has no file storage. */
   deliverables: Deliverable[];
+  /** Pending password resets. Mock only — GoTrue owns this on Supabase. */
+  password_resets: PasswordReset[];
 }
 
 const DB_VERSION = 1;
@@ -92,6 +120,7 @@ function emptyDb(): MockDb {
     orders: [],
     reviews: [],
     deliverables: [],
+    password_resets: [],
   };
 }
 
@@ -593,6 +622,14 @@ export function seedDatabase(db: MockDb): void {
       // state the suite already builds at runtime through softDeleteListing().
       deleted_at: null,
       deleted_by: null,
+      // Every seeded offer is PERSONALISED, mirroring supabase/seed.sql, which
+      // names neither column and takes the same defaults. An instant fixture
+      // would have to point at a file, and there is no file: the mock has no
+      // storage at all. The suite builds instant offers at runtime through
+      // createListing() + setListingAsset() instead — the same treatment
+      // withdrawal gets, for the same reason.
+      fulfilment: 'personalised',
+      asset_path: null,
       created_at: created,
       updated_at: created,
     });
@@ -616,6 +653,25 @@ export function seedDatabase(db: MockDb): void {
     // both the honest value and the one restoreListing() treats as
     // "unattributed, the owner may restore".
     if (typeof listing.deleted_by !== 'string' || listing.deleted_by === '') listing.deleted_by = null;
+    // `fulfilment` and `asset_path` arrived with instant delivery. Backfilled
+    // rather than bumping DB_VERSION, like every column above — and the values
+    // are not merely convenient defaults, they are the only honest ones. An
+    // offer published before the column existed has no file attached, so
+    // calling it an instant download would promise a download that does not
+    // exist. This is the same reasoning as the `default 'personalised'` in
+    // 0011_delivery.sql, and it must stay in step with it.
+    //
+    // Normalised on membership, NOT on falsiness, so a hand-edited store
+    // holding rubbish fails CLOSED to the mode with nothing to deliver.
+    if (listing.fulfilment !== 'instant' && listing.fulfilment !== 'personalised') {
+      listing.fulfilment = 'personalised';
+    }
+    if (typeof listing.asset_path !== 'string' || listing.asset_path === '') listing.asset_path = null;
+    // A personalised row can never carry a path — `listings_asset_path_shape`
+    // in SQL, and setListingAsset() refuses to write one. Repaired here too,
+    // because the store is an unvalidated JSON file and a row that violates the
+    // constraint would be one the Supabase backend could not hold.
+    if (listing.fulfilment === 'personalised') listing.asset_path = null;
   }
 
   // `deliverables` arrived after the first stores were written, so a real
@@ -623,6 +679,13 @@ export function seedDatabase(db: MockDb): void {
   // than bumping DB_VERSION, exactly as the columns above are — an absent
   // collection is not a corrupt store, it is an older one.
   if (!Array.isArray(db.deliverables)) db.deliverables = [];
+
+  // `password_resets` arrived with the reset flow, and is backfilled for the
+  // same reason: an absent collection is an OLDER store, not a corrupt one, and
+  // throwing a developer's whole store away to add an empty array is a worse
+  // trade than repairing it on load. Nothing is seeded into it — a pending
+  // reset is not a fixture, it is a live credential.
+  if (!Array.isArray(db.password_resets)) db.password_resets = [];
 
   // The three coach columns arrived after the first stores were written, so a
   // real `data/db.json` is holding profile rows with no such keys at all.

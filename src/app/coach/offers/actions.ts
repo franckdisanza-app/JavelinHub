@@ -5,7 +5,13 @@ import { redirect } from 'next/navigation';
 
 import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
-import { isDataError, isListingCategory } from '@/lib/data/types';
+import { isDataError, isFulfilmentMode, isListingCategory } from '@/lib/data/types';
+import {
+  checkDeliveryFile,
+  deleteOfferAsset,
+  deliveryStorageAvailable,
+  uploadOfferAsset,
+} from '@/lib/storage/deliverables';
 import { fieldError, formError, toFormState, type FormState } from '@/lib/forms';
 import { parsePriceToCents } from '@/lib/format';
 
@@ -48,8 +54,14 @@ export async function updateOfferAction(_prev: FormState, formData: FormData): P
   const price = String(formData.get('price') ?? '').trim();
   const category = String(formData.get('category') ?? '').trim();
   const categorySlug = isListingCategory(category) ? category : null;
+  // Unrecognised or absent means UNCHANGED here, not "personalised" — the
+  // opposite of the composer, where there is no existing value to preserve.
+  // `updateListing` leaves the column alone when it is not sent, which is what
+  // keeps a direct POST from resetting an offer's delivery mode by omission.
+  const rawFulfilment = String(formData.get('fulfilment') ?? '').trim();
+  const fulfilment = isFulfilmentMode(rawFulfilment) ? rawFulfilment : undefined;
 
-  const values = { title, description, price, category };
+  const values = { title, description, price, category, fulfilment: fulfilment ?? '' };
 
   if (id === '') return formError('That offer could not be found.', values);
 
@@ -91,7 +103,26 @@ export async function updateOfferAction(_prev: FormState, formData: FormData): P
       description,
       price_cents: priceCents,
       category: categorySlug,
+      fulfilment,
     });
+
+    /*
+     * Switching to personalised cleared `asset_path` in the same statement —
+     * `listings_asset_path_shape` refuses the row otherwise. The OBJECT is this
+     * layer's to tidy up, and only once the column has moved: an orphan in the
+     * bucket is invisible, while bytes deleted before the column would leave a
+     * live offer pointing at a download that fails.
+     *
+     * `currentAsset` is a hidden input and therefore caller-supplied, which is
+     * fine and is the same trust `removeDeliverableAction` places in its `path`:
+     * `offer_assets_delete_coach` admits a delete only under a listing the
+     * caller owns, so the worst a forged value can do is delete the forger's own
+     * file. Best-effort, like every other object delete in this app.
+     */
+    if (fulfilment === 'personalised') {
+      const previous = String(formData.get('currentAsset') ?? '').trim();
+      if (previous !== '') await deleteOfferAsset(previous);
+    }
   } catch (error) {
     if (!isDataError(error)) throw error;
     // Deferred: `redirect()` throws, and must not be thrown from inside a catch.
@@ -107,6 +138,88 @@ export async function updateOfferAction(_prev: FormState, formData: FormData): P
   revalidatePath('/', 'layout');
 
   redirect(`${DASHBOARD_PATH}?saved=${encodeURIComponent(id)}`);
+}
+
+/**
+ * Attaches, replaces or removes an instant offer's downloadable file.
+ *
+ * ITS OWN ACTION, separate from the edit above, for the same reason
+ * `updateAvatarAction` is separate from the profile save: it is a different kind
+ * of write. The four content columns are text a coach typed; this is bytes going
+ * to object storage. Keeping them apart means a failed upload cannot discard a
+ * description, and removing a file does not require re-submitting the price.
+ *
+ * ORDER MATTERS IN BOTH DIRECTIONS, and it is chosen so that a failure never
+ * leaves a claimable offer pointing at nothing:
+ *
+ *   setting   upload FIRST, then write the column, then delete the file being
+ *             replaced. A failed upload leaves the old file live and the offer
+ *             claimable; a failed column write rolls the new object back, since
+ *             an object nothing points at is litter nobody can later remove.
+ *   clearing  write the column FIRST, then delete the object. A failed delete
+ *             leaves an orphan that is invisible to everyone.
+ *
+ * Clearing makes the offer UNCLAIMABLE — `claim_offer` refuses an instant offer
+ * with no file — which is a real and sometimes wanted state (a coach fixing a
+ * bad upload), so it is offered plainly and the dashboard says so afterwards.
+ */
+export async function setOfferAssetAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const id = String(formData.get('id') ?? '').trim();
+  if (id === '') return formError('That offer could not be found.');
+
+  const intent = String(formData.get('intent') ?? 'set');
+  const previous = String(formData.get('current') ?? '').trim();
+
+  if (intent !== 'clear' && !deliveryStorageAvailable()) {
+    return formError(
+      'File uploads need the Supabase backend. This app is running on the local JSON store, which has no file storage.',
+    );
+  }
+
+  const actor = await getActor();
+
+  let needsLogin = false;
+  try {
+    const db = getDataClient();
+
+    if (intent === 'clear') {
+      await db.setListingAsset(actor, id, null);
+      if (previous !== '') await deleteOfferAsset(previous);
+    } else {
+      const file = formData.get('asset');
+      if (!(file instanceof File) || file.size === 0) return formError('Choose a file to attach.');
+
+      const check = checkDeliveryFile(file);
+      if (!check.ok) return formError(check.message ?? 'That file could not be used.');
+
+      const { path } = await uploadOfferAsset(id, file);
+      try {
+        await db.setListingAsset(actor, id, path);
+      } catch (rowError) {
+        await deleteOfferAsset(path);
+        throw rowError;
+      }
+      // Only now is the old file unreachable through the product. Note this is
+      // a NEW key rather than an overwrite, so a buyer holding a signed URL to
+      // the old bytes keeps a working link until it expires — see
+      // `uploadOfferAsset`.
+      if (previous !== '' && previous !== path) await deleteOfferAsset(previous);
+    }
+  } catch (error) {
+    if (!isDataError(error)) throw error;
+    if (error.code === 'unauthorized') needsLogin = true;
+    else return toFormState(error);
+  }
+
+  if (needsLogin) redirect(loginPath(`${DASHBOARD_PATH}/${id}/edit`));
+
+  // Whether an instant offer is claimable at all turns on this file, and that
+  // shows on the offer page as well as on the dashboard.
+  revalidatePath('/', 'layout');
+
+  // No redirect: the editor is already the current page, and the revalidation
+  // re-renders it with the new file in place.
+  return { status: 'success' };
 }
 
 /** Takes an offer off sale. A POST, never a link — it changes state. */

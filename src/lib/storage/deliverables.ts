@@ -19,6 +19,27 @@
  * `deliverables` table through `DataClient`; the BYTES are storage and live
  * here, Supabase only.
  *
+ * -----------------------------------------------------------------------------
+ * TWO BUCKETS, ONE MODULE
+ * -----------------------------------------------------------------------------
+ * `deliverables` holds the personalised files attached to one ORDER;
+ * `offer-assets` holds the single instant download attached to one LISTING.
+ * They are the two halves of the same feature, they are configured identically
+ * (private, 50 MB, the same MIME list) and their upload / sign / delete
+ * mechanics are the same three calls — so they share this module rather than
+ * getting a near-copy of it that can drift.
+ *
+ * What is NOT shared is the PATH SHAPE, and that is the load-bearing part,
+ * because in both buckets the path is what the storage policy authorises
+ * against:
+ *
+ *   deliverables   <order_id>/<uploader_id>/<file>
+ *   offer-assets   <listing_id>/<file>
+ *
+ * So each bucket gets its own exported upload function that DERIVES its own
+ * key, and the shared `uploadObject()` below takes a path and never builds one.
+ * Nothing a caller passes may decide which folder bytes land in.
+ *
  * SERVER ONLY.
  */
 
@@ -125,6 +146,50 @@ export async function uploadDeliveryFile(
   uploaderId: string,
   file: File,
 ): Promise<{ path: string; fileName: string }> {
+  const fileName = safeFileName(file.name);
+  const path = `${orderId}/${uploaderId}/${uniquePrefix()}-${fileName}`;
+  await uploadObject(DELIVERABLES_BUCKET, path, file);
+  return { path, fileName };
+}
+
+/**
+ * Uploads an offer's instant download and returns its object path.
+ *
+ * The path is DERIVED — `<listing_id>/<random>-<name>` — and segment 1 is
+ * simultaneously three things: what `offer_assets_write_coach` looks the
+ * listing up by to decide whether this caller owns it, what
+ * `offer_assets_read_entitled` looks it up by to decide whether a reader holds
+ * an order for it, and what the `listings_asset_path_shape` CHECK requires the
+ * stored column to start with. All three break if a caller chooses it, so no
+ * caller does.
+ *
+ * A NEW KEY EVERY TIME, replacements included. Replacing is upload-then-repoint,
+ * never an overwrite: a buyer holding a signed URL to the old file keeps a link
+ * that works until it expires, rather than silently receiving different bytes
+ * from the ones they were looking at. The superseded object is deleted by the
+ * caller once the column has moved.
+ */
+export async function uploadOfferAsset(
+  listingId: string,
+  file: File,
+): Promise<{ path: string; fileName: string }> {
+  const fileName = safeFileName(file.name);
+  const path = `${listingId}/${uniquePrefix()}-${fileName}`;
+  await uploadObject(OFFER_ASSETS_BUCKET, path, file);
+  return { path, fileName };
+}
+
+/** Eight hex characters. Enough that two uploads of `plan.pdf` are two files. */
+function uniquePrefix(): string {
+  return crypto.randomUUID().slice(0, 8);
+}
+
+/**
+ * The shared write. Takes a path and NEVER builds one — see the header: the key
+ * is what the storage policies authorise against, so deriving it is each
+ * caller's job and choosing it is nobody's.
+ */
+async function uploadObject(bucket: string, path: string, file: File): Promise<void> {
   if (!deliveryStorageAvailable()) {
     throw new DataError(
       'invalid',
@@ -135,12 +200,8 @@ export async function uploadDeliveryFile(
   const check = checkDeliveryFile(file);
   if (!check.ok) throw new DataError('invalid', check.message ?? 'That file could not be used.');
 
-  const fileName = safeFileName(file.name);
-  const unique = crypto.randomUUID().slice(0, 8);
-  const path = `${orderId}/${uploaderId}/${unique}-${fileName}`;
-
   const supabase = await createSupabaseServerClient();
-  const { error } = await supabase.storage.from(DELIVERABLES_BUCKET).upload(path, file, {
+  const { error } = await supabase.storage.from(bucket).upload(path, file, {
     contentType: file.type,
     // Never overwrite: the random prefix already makes the key unique, and an
     // upsert here would let a second upload silently replace a delivered file.
@@ -150,8 +211,6 @@ export async function uploadDeliveryFile(
   if (error) {
     throw new DataError('invalid', 'That file could not be uploaded. Please try again.');
   }
-
-  return { path, fileName };
 }
 
 /**
@@ -162,11 +221,27 @@ export async function uploadDeliveryFile(
  * page. The caller shows the file without a download and the rest still works.
  */
 export async function signedDeliveryUrl(path: string, downloadAs?: string): Promise<string | null> {
+  return signedUrlIn(DELIVERABLES_BUCKET, path, downloadAs);
+}
+
+/**
+ * The same, for an offer's instant download.
+ *
+ * `offer_assets_read_entitled` is evaluated against the CALLER's own session, so
+ * this is not a bypass and the entitlement is not decided in TypeScript: a
+ * signed-in visitor who neither owns the offer nor holds an order for it gets
+ * `null` even if they somehow learned the path.
+ */
+export async function signedOfferAssetUrl(path: string, downloadAs?: string): Promise<string | null> {
+  return signedUrlIn(OFFER_ASSETS_BUCKET, path, downloadAs);
+}
+
+async function signedUrlIn(bucket: string, path: string, downloadAs?: string): Promise<string | null> {
   if (!deliveryStorageAvailable()) return null;
   try {
     const supabase = await createSupabaseServerClient();
     const { data, error } = await supabase.storage
-      .from(DELIVERABLES_BUCKET)
+      .from(bucket)
       .createSignedUrl(path, SIGNED_URL_SECONDS, downloadAs ? { download: downloadAs } : undefined);
     if (error || !data?.signedUrl) return null;
     return data.signedUrl;
@@ -185,10 +260,27 @@ export async function signedDeliveryUrl(path: string, downloadAs?: string): Prom
  * permanently unreachable litter.
  */
 export async function deleteDeliveryFile(path: string): Promise<void> {
+  return deleteObject(DELIVERABLES_BUCKET, path);
+}
+
+/**
+ * Removes a superseded or cleared instant download. Best-effort, as above.
+ *
+ * The ORDER of operations is the caller's, and it is the opposite of the
+ * deliverables one: the column moves FIRST and this runs after. A failure here
+ * leaves an orphan in the bucket that nobody can see; a failure the other way
+ * round would leave an offer pointing at bytes that are gone — a download that
+ * fails for every buyer who claimed it.
+ */
+export async function deleteOfferAsset(path: string): Promise<void> {
+  return deleteObject(OFFER_ASSETS_BUCKET, path);
+}
+
+async function deleteObject(bucket: string, path: string): Promise<void> {
   if (!deliveryStorageAvailable()) return;
   try {
     const supabase = await createSupabaseServerClient();
-    await supabase.storage.from(DELIVERABLES_BUCKET).remove([path]);
+    await supabase.storage.from(bucket).remove([path]);
   } catch {
     // Deliberately swallowed — see above.
   }

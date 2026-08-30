@@ -126,6 +126,7 @@ npm run lint          # eslint
 npm run typecheck     # tsc --noEmit
 npm run verify:authz  # authorization regression suite (throwaway store)
 npm run verify:pages  # rendered-page regression suite (throwaway store + server)
+npm run verify:supabase   # the same rules, asked of the real database (read-only)
 ```
 
 `verify:authz` is the executable half of the security model. Both suites run
@@ -133,9 +134,36 @@ against the **mock** backend, which is the point: the mock is the code twin of
 the RLS policy set, so asserting its rules is how the policies are reviewed while
 no Postgres is reachable. Run it after any change to `src/lib/data/**`.
 
-Neither suite exercises `SupabaseDataClient` — that needs a database with the
-schema applied, and nothing can stand in for RLS. Until then it is covered by
-static review against the mapping table in `supabase/README.md`.
+Neither of those two exercises `SupabaseDataClient`, and nothing can stand in
+for RLS — so `verify:supabase` asks the database itself, over PostgREST and
+GoTrue, with the same anon key a browser gets.
+
+It is **read-only by default**, because there is no throwaway Postgres the way
+there is a throwaway JSON file: it runs against whatever
+`NEXT_PUBLIC_SUPABASE_URL` names, which for this project is the live one. The
+default tier is every assertion that can be made with a GET — the column
+revokes on `deleted_by` and `asset_path`, the self-scoped views returning
+nothing for anon, the RLS refusals on every anon INSERT, the RPCs answering
+with their own sentences, and the two enums matching the TypeScript unions.
+
+That tier exists mainly to catch one specific silent failure. `0002_rls.sql`
+says it in as many words — *"THIS REVOKE IS UNDONE BY ANY LATER BLANKET GRANT,
+SILENTLY"* — and nothing in the app would notice, because the client always
+names its columns.
+
+```bash
+VERIFY_SUPABASE_WRITES=1 npm run verify:supabase                        # + signed-in tier
+VERIFY_SUPABASE_WRITES=1 VERIFY_SUPABASE_INVITE=XXXX-XXXX-XXXX npm run verify:supabase   # + coach tier
+```
+
+The write tiers create real accounts, listings and orders that **cannot be
+fully cleaned up** — there is no hard delete of a listing for any role and no
+delete path for an order, both by design — so they are opt-in and leave
+labelled fixtures behind. The coach tier additionally needs an unredeemed
+invite code, because publishing needs an approved coach and the only routes to
+that require an administrator to already exist. Anything it cannot run reports
+SKIP with the reason; a skipped assertion is counted separately and is never
+reported as a pass.
 
 `verify:pages` is the other half, and the two do not overlap: `verify:authz`
 never renders anything, so it cannot see an empty state, a cross-link or a

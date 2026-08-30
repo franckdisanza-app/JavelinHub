@@ -81,8 +81,11 @@ import {
   requireIsoTimestamp,
   requireListingCategory,
   requirePriceCents,
+  requirePassword,
   requireRating,
+  optionalAssetPath,
   optionalAvatarPath,
+  optionalFulfilment,
   requireText,
 } from '../validation';
 import { generateInviteCode } from '../invite-code';
@@ -273,6 +276,10 @@ function withCoach(db: MockDb, listing: Listing): ListingWithCoach {
     category: listing.category,
     price_epoch: listing.price_epoch,
     deleted_at: listing.deleted_at,
+    // Public, unlike `asset_path` below it on the row: how an offer arrives is
+    // something a buyer should know before claiming, which is why 0011 grants
+    // SELECT on this column and withholds the other.
+    fulfilment: listing.fulfilment,
     created_at: listing.created_at,
     updated_at: listing.updated_at,
     coach_name: coachName(db, listing.coach_id),
@@ -292,9 +299,22 @@ function withdrawnByAdmin(listing: Listing): boolean {
   );
 }
 
-/** The owner-facing shape: the projection above plus the derived takedown flag. */
+/**
+ * The owner-facing shape: the projection above, plus the derived takedown flag,
+ * plus the owner's own `asset_path`.
+ *
+ * Mirrors the `public.owned_listings` view, whose `where l.coach_id =
+ * auth.uid()` is what makes both additions safe. The only caller is
+ * `listMyListings`, which resolves the coach from the actor — so as in SQL,
+ * the scoping is upstream of the projection and this function never decides who
+ * is asking.
+ */
 function asOwned(db: MockDb, listing: Listing): OwnedListing {
-  return { ...withCoach(db, listing), withdrawn_by_admin: withdrawnByAdmin(listing) };
+  return {
+    ...withCoach(db, listing),
+    withdrawn_by_admin: withdrawnByAdmin(listing),
+    asset_path: listing.asset_path,
+  };
 }
 
 /**
@@ -307,11 +327,42 @@ function listingTitle(db: MockDb, listingId: string): string {
   return db.listings.find((l) => l.id === listingId)?.title ?? 'Unknown offer';
 }
 
-function withListing(db: MockDb, order: Order): OrderWithListing {
+/**
+ * Resolves an order into the shape both sides of it render from.
+ *
+ * `viewerId` is here for ONE field. `asset_path` is the instant download, and
+ * the mock mirrors `public.entitled_offer_assets` (0012) rather than handing it
+ * to whoever asked: the offer's coach, or a learner holding an order for that
+ * offer, and nobody else. An ADMIN reading somebody else's order therefore gets
+ * `null` — they can see the order exists, they cannot help themselves to the
+ * file — which is the SQL view's behaviour too, since it is scoped by
+ * `auth.uid()` with no admin arm.
+ *
+ * `listing_fulfilment` needs no such test: it is public.
+ */
+function withListing(db: MockDb, order: Order, viewerId: string | null): OrderWithListing {
+  const listing = db.listings.find((l) => l.id === order.listing_id) ?? null;
+
+  // A row whose listing has vanished is not a state any write path can produce
+  // — `orders.listing_id` is ON DELETE RESTRICT and nothing hard-deletes a
+  // listing — but `listingTitle()` already tolerates it, so this does too, and
+  // it falls back to the column DEFAULT rather than to the mode with a file.
+  const fulfilment = listing?.fulfilment ?? 'personalised';
+
+  const entitled =
+    listing !== null &&
+    listing.fulfilment === 'instant' &&
+    listing.asset_path !== null &&
+    viewerId !== null &&
+    (listing.coach_id === viewerId ||
+      db.orders.some((o) => o.listing_id === listing.id && o.learner_id === viewerId));
+
   return {
     ...order,
     listing_title: listingTitle(db, order.listing_id),
     has_review: db.reviews.some((r) => r.order_id === order.id),
+    listing_fulfilment: fulfilment,
+    asset_path: entitled ? listing.asset_path : null,
   };
 }
 
@@ -438,7 +489,8 @@ export class MockDataClient implements DataClient {
   async signUp(input: SignUpInput): Promise<Profile> {
     const email = requireEmail(input?.email);
     const fullName = requireText(input?.fullName, 'Full name', 120, 2);
-    const password = requireText(input?.password, 'Password', 200, 8);
+    // NOT requireText: a password is never trimmed — see requirePassword.
+    const password = requirePassword(input?.password);
 
     return mutateDb((db) => {
       // Mirrors: Supabase auth's own duplicate-email rejection on
@@ -494,6 +546,39 @@ export class MockDataClient implements DataClient {
       if (!verifyPassword(input.password, user.password_hash, user.password_salt)) return null;
       const profile = db.profiles.find((p) => p.id === user.id);
       return profile ? copy(profile) : null;
+    });
+  }
+
+  async updateMyPassword(actor: Actor, newPassword: string): Promise<void> {
+    // The same rule `signUp` applies, through the same helper, so a password
+    // this method accepts is one the sign-up form would have accepted.
+    const password = requirePassword(newPassword);
+
+    return mutateDb((db) => {
+      // The SUBJECT IS THE RESOLVED ACTOR and is never a parameter. There is no
+      // shape of this call that rewrites somebody else's credentials — the same
+      // construction as `updateMyCoachProfile` and `setMyAvatar`.
+      const profile = resolveProfile(db, actor);
+
+      const user = db.auth_users.find((u) => u.id === profile.id);
+      if (!user) {
+        // A profile with no credential row is a store that has been edited by
+        // hand. Treat it as a broken session rather than creating credentials
+        // for it, which would be this method minting an account.
+        throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
+      }
+
+      // A NEW SALT, not a re-hash against the old one. Reusing the salt would
+      // make "did the password change?" answerable by comparing two hashes
+      // taken from a leaked store.
+      const { hash, salt } = hashPassword(password);
+      user.password_hash = hash;
+      user.password_salt = salt;
+
+      // `auth_users` has no updated_at — it mirrors Supabase's `auth.users`,
+      // which this project never reads columns from. The PROFILE's timestamp is
+      // deliberately left alone too: nothing about the public profile changed,
+      // and moving it would reorder the coach directory on a password change.
     });
   }
 
@@ -795,6 +880,10 @@ export class MockDataClient implements DataClient {
     const description = requireText(input?.description, 'Description', 4000, 10);
     const category = requireListingCategory(input?.category);
     const priceCents = requirePriceCents(input?.price_cents);
+    // Mirrors: `fulfilment public.fulfilment_mode not null default 'personalised'`.
+    // Omitted is not an error — it is the column default, and the default is the
+    // only honest value for an offer that has nothing attached to it yet.
+    const fulfilment = optionalFulfilment(input?.fulfilment) ?? 'personalised';
 
     return mutateDb((db) => {
       // Mirrors: policy `listings_insert_approved_coach` —
@@ -824,6 +913,14 @@ export class MockDataClient implements DataClient {
         // Mirrors: `deleted_by uuid` with no default. An audit column that
         // never reaches a caller — see Listing.deleted_by.
         deleted_by: null,
+        fulfilment,
+        // ALWAYS null on create, for both modes, and there is no input that can
+        // change that. The `listings_asset_path_shape` CHECK pins an instant
+        // offer's path under the listing's OWN id — which does not exist until
+        // this row does — so attaching the file is necessarily a second call.
+        // An instant offer therefore begins life published-but-unclaimable, a
+        // state `claim_offer` refuses out loud rather than papering over.
+        asset_path: null,
         created_at: timestamp,
         updated_at: timestamp,
       };
@@ -840,6 +937,10 @@ export class MockDataClient implements DataClient {
     const description = requireText(input?.description, 'Description', 4000, 10);
     const category = requireListingCategory(input?.category);
     const priceCents = requirePriceCents(input?.price_cents);
+    // NULL MEANS "UNCHANGED", not "default" — see UpdateListingInput.fulfilment.
+    // A caller that does not offer the control must not be able to reset an
+    // offer to personalised and orphan its file by staying silent.
+    const nextFulfilment = optionalFulfilment(input?.fulfilment);
 
     return mutateDb((db) => {
       // Mirrors: policy `listings_update_own_coach` plus the content half of
@@ -883,6 +984,27 @@ export class MockDataClient implements DataClient {
       // Nothing leaks by allowing it: `deleted_at` is untouched, so the offer
       // stays invisible to every public read throughout, and the row goes back
       // through withCoach(), which carries no `deleted_by`.
+
+      // Mirrors: the `new.fulfilment is distinct from old.fulfilment and exists
+      // (select 1 from orders …)` arm of guard_listing_update(), added in 0011.
+      //
+      // A no-op resubmission of the SAME mode is not a change and is not
+      // refused, which is what lets the editor keep the control on the form for
+      // an offer that has already sold — `is distinct from` is the SQL test and
+      // this is the same test.
+      //
+      // THE ANSWER IS THE SAME FOR AN ADMIN. This is not an ownership rule that
+      // a moderator can override; it is a promise to whoever claimed the offer
+      // that what they were told would arrive is what will arrive. The check is
+      // in the trigger rather than in a policy for exactly that reason, and it
+      // is here rather than in the caller for the same one.
+      const changingFulfilment = nextFulfilment !== null && nextFulfilment !== listing.fulfilment;
+      if (changingFulfilment && db.orders.some((o) => o.listing_id === listing.id)) {
+        throw new DataError(
+          'forbidden',
+          'How this offer is delivered cannot change once somebody has claimed it.',
+        );
+      }
 
       const timestamp = nowIso();
 
@@ -933,9 +1055,91 @@ export class MockDataClient implements DataClient {
       listing.category = category;
       listing.price_cents = priceCents;
       if (priceIncreased) listing.price_epoch += 1;
+      if (changingFulfilment) {
+        listing.fulfilment = nextFulfilment;
+        // Mirrors the `(fulfilment = 'personalised' and asset_path is null)` arm
+        // of `listings_asset_path_shape`. Clearing the column is not a courtesy
+        // — the constraint refuses the row otherwise — and the coach was told
+        // this would happen before they saved. The OBJECT is deleted by the
+        // caller, which is the half this layer does not own.
+        if (nextFulfilment === 'personalised') listing.asset_path = null;
+      }
       listing.updated_at = timestamp;
 
       return withCoach(db, listing);
+    });
+  }
+
+  /**
+   * Attaches or clears an instant offer's downloadable file.
+   *
+   * Separate from `updateListing` for the same reason `setMyAvatar` is separate
+   * from `updateMyCoachProfile`: it is a different kind of write, and a failed
+   * upload must not discard a description the coach just typed. It writes ONE
+   * column and never touches the four content fields, the epoch or the
+   * withdrawal state.
+   *
+   * NO REVISION IS WRITTEN, and that is deliberate rather than an oversight.
+   * `listing_revisions` snapshots what an offer SAID — title, description,
+   * price, category — so that a reader can tell which reviews predate a rewrite.
+   * A file swap says nothing about any of that, and the mock must not write a
+   * row the Postgres trigger would not: `record_listing_revision()` fires on
+   * the same UPDATE, but the revision it writes carries none of these columns.
+   *
+   * Mirrors: policy `listings_update_own_coach` + the CONTENT half of
+   * `guard_listing_update()` (0011 added `asset_path` to `v_content_changed`),
+   * the `listings_asset_path_shape` CHECK, and `offer_assets_write_coach`.
+   */
+  async setListingAsset(actor: Actor, listingId: string, path: string | null): Promise<OwnedListing> {
+    const id = requireText(listingId, 'Offer', 200);
+    const next = optionalAssetPath(path);
+
+    return mutateDb((db) => {
+      const profile = resolveProfile(db, actor);
+
+      const listing = db.listings.find((l) => l.id === id);
+      if (!listing) throw new DataError('not_found', 'That offer could not be found.');
+
+      // OWNER ONLY — an admin is refused here like anybody else, and the check
+      // is first so that an admin's own coach_status can never be what refuses
+      // them. Same asymmetry, same reason, as updateListing(): `asset_path` is
+      // CONTENT, and a moderator does not swap the file a coach delivers.
+      if (listing.coach_id !== profile.id) {
+        throw new DataError('forbidden', 'Only the coach who published an offer can edit it.');
+      }
+      if (profile.coach_status !== 'approved') {
+        throw new DataError('forbidden', 'Only approved coaches can edit an offer.');
+      }
+
+      // Mirrors: the `(fulfilment = 'personalised' and asset_path is null)` arm
+      // of `listings_asset_path_shape`. A file on a personalised offer would be
+      // one every buyer of it could fetch — the thing personalised delivery
+      // exists not to be. Clearing is always allowed, whatever the mode, so a
+      // mode switch can tidy up after itself.
+      if (next !== null && listing.fulfilment !== 'instant') {
+        throw new DataError(
+          'invalid',
+          'Only an instant-download offer can have a file attached. Switch this offer to instant delivery first.',
+        );
+      }
+
+      // Mirrors: the `asset_path like (id::text || '/%')` arm of the same
+      // constraint, and `(storage.foldername(name))[1]` in every offer-assets
+      // storage policy. The first path segment IS the claim about which offer
+      // this file belongs to, so a path under another offer's id is refused
+      // rather than stored — exactly as setMyAvatar refuses a path under
+      // another user's id.
+      if (next !== null && !next.startsWith(`${listing.id}/`)) {
+        throw new DataError('forbidden', "A file has to be stored under its own offer's folder.");
+      }
+
+      listing.asset_path = next;
+      listing.updated_at = nowIso();
+
+      // The OWNER's shape, because it is the only one that carries `asset_path`
+      // back — a caller that just set a path and got a row without one would
+      // have to re-read to find out whether it worked.
+      return asOwned(db, listing);
     });
   }
 
@@ -1220,7 +1424,7 @@ export class MockDataClient implements DataClient {
       if (!permitted) {
         throw new DataError('forbidden', 'You can only view your own orders.');
       }
-      return withListing(db, order);
+      return withListing(db, order, profile.id);
     });
   }
 
@@ -1233,7 +1437,7 @@ export class MockDataClient implements DataClient {
       return db.orders
         .filter((o) => o.learner_id === profile.id)
         .sort(byCreatedAtDesc)
-        .map((order) => withListing(db, order));
+        .map((order) => withListing(db, order, profile.id));
     });
   }
 
@@ -1253,7 +1457,7 @@ export class MockDataClient implements DataClient {
       return db.orders
         .filter((o) => o.coach_id === coachId)
         .sort(byCreatedAtDesc)
-        .map((order) => withListing(db, order));
+        .map((order) => withListing(db, order, profile.id));
     });
   }
 
@@ -1270,6 +1474,13 @@ export class MockDataClient implements DataClient {
       if (isWithdrawn(listing)) throw new DataError('invalid', 'That offer is no longer available.');
       if (listing.coach_id === profile.id) {
         throw new DataError('forbidden', 'You cannot claim your own offer.');
+      }
+      // Mirrors the check 0011_delivery.sql added to claim_offer, in the same
+      // position and with the same sentence. The one thing instant delivery
+      // promises is "download it now"; an offer that cannot keep that promise
+      // must refuse the claim rather than let the buyer find out afterwards.
+      if (listing.fulfilment === 'instant' && listing.asset_path === null) {
+        throw new DataError('invalid', 'This offer is not ready to be claimed yet.');
       }
       if (db.orders.some((o) => o.learner_id === profile.id && o.listing_id === listing.id)) {
         throw new DataError('conflict', 'You have already claimed this offer.');

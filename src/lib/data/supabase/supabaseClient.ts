@@ -82,6 +82,7 @@ import {
   type CoachApplicationWithUser,
   type CoachStats,
   type Deliverable,
+  type FulfilmentMode,
   type Invite,
   type ListingCategory,
   type ListingDetail,
@@ -100,7 +101,10 @@ import {
 } from '../types';
 import {
   optionalActorId,
+  optionalAssetPath,
   optionalAvatarPath,
+  optionalFulfilment,
+  requirePassword,
   optionalText,
   optionalYears,
   requireActorId,
@@ -122,10 +126,23 @@ import { createSupabaseServerClient } from './serverClient';
  * Every column of `public.listings` a client role may read. NOT `*` — see the
  * header. `deleted_by` is absent because SELECT on it is revoked in SQL.
  */
-const LISTING_COLUMNS = 'id, coach_id, title, description, price_cents, category, price_epoch, deleted_at, created_at, updated_at';
+const LISTING_COLUMNS =
+  'id, coach_id, title, description, price_cents, category, price_epoch, deleted_at, fulfilment, created_at, updated_at';
 
-/** The same projection from `public.owned_listings`, plus the derived flag. */
-const OWNED_LISTING_COLUMNS = `${LISTING_COLUMNS}, withdrawn_by_admin`;
+/**
+ * The same projection from `public.owned_listings`, plus the two things only an
+ * owner may see: the derived takedown flag, and their own `asset_path`.
+ *
+ * `asset_path` is NOT in {@link LISTING_COLUMNS} and must never be added to it.
+ * The column is withheld from the client grant in `0011_delivery.sql`, so
+ * naming it in a read of `public.listings` is a `42501`, not a wider row. It is
+ * reachable here only because a view is owner-run and this one is scoped
+ * `where l.coach_id = auth.uid()` — see 0012.
+ */
+const OWNED_LISTING_COLUMNS = `${LISTING_COLUMNS}, withdrawn_by_admin, asset_path`;
+
+/** `public.entitled_offer_assets` (0012) — the buyer's and owner's read of an instant path. */
+const ENTITLED_ASSET_COLUMNS = 'listing_id, asset_path';
 
 /** `public.public_coaches` also carries `created_at`, which is for ordering only. */
 const PUBLIC_COACH_COLUMNS = 'id, full_name, coach_headline, coach_bio, coach_years_coaching, avatar_path';
@@ -271,12 +288,14 @@ interface ListingRow {
   category: string;
   price_epoch: number;
   deleted_at: string | null;
+  fulfilment: FulfilmentMode;
   created_at: string;
   updated_at: string;
 }
 
 interface OwnedListingRow extends ListingRow {
   withdrawn_by_admin: boolean;
+  asset_path: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +427,7 @@ function toListingWithCoach(row: ListingRow, names: Map<string, string>): Listin
     category: row.category,
     price_epoch: row.price_epoch,
     deleted_at: row.deleted_at,
+    fulfilment: row.fulfilment,
     created_at: row.created_at,
     updated_at: row.updated_at,
     coach_name: names.get(row.coach_id) ?? UNKNOWN_COACH,
@@ -437,6 +457,14 @@ async function withCoachName(ctx: Ctx, row: ListingRow): Promise<ListingWithCoac
  * whoever may see the order may also see its review: the buyer through
  * `reviews_select_own_author`, the selling coach through
  * `reviews_select_own_coach`, an admin through `reviews_select_admin`.
+ *
+ * `fulfilment` rides along on the title lookup because it is a granted column
+ * on `listings`. `asset_path` is NOT, and cannot be made one — so the third
+ * query reads `public.entitled_offer_assets`, whose `auth.uid()` predicate
+ * decides entitlement inside the view. There is no filter here to get wrong:
+ * the query asks for every listing id on the orders and the VIEW returns rows
+ * only for the ones this caller may download. An admin reading somebody else's
+ * order gets nothing back, which is deliberate — see `OrderWithListing.asset_path`.
  */
 async function withListingTitles(ctx: Ctx, orders: readonly Order[]): Promise<OrderWithListing[]> {
   if (orders.length === 0) return [];
@@ -445,27 +473,47 @@ async function withListingTitles(ctx: Ctx, orders: readonly Order[]): Promise<Or
   const orderIds = orders.map((o) => o.id);
   const hasSession = ctx.userId !== null;
 
-  const [titlesResult, reviewsResult] = await Promise.all([
-    ctx.supabase.from('listings').select('id, title').in('id', listingIds),
+  const [titlesResult, reviewsResult, assetsResult] = await Promise.all([
+    ctx.supabase.from('listings').select('id, title, fulfilment').in('id', listingIds),
     ctx.supabase.from('reviews').select('order_id').in('order_id', orderIds),
+    ctx.supabase.from('entitled_offer_assets').select(ENTITLED_ASSET_COLUMNS).in('listing_id', listingIds),
   ]);
 
   if (titlesResult.error) throwDataError(titlesResult.error, hasSession);
   if (reviewsResult.error) throwDataError(reviewsResult.error, hasSession);
+  if (assetsResult.error) throwDataError(assetsResult.error, hasSession);
 
   const titles = new Map<string, string>();
-  for (const row of (titlesResult.data ?? []) as { id: string; title: string }[]) {
+  const modes = new Map<string, FulfilmentMode>();
+  for (const row of (titlesResult.data ?? []) as ListingTitleRow[]) {
     titles.set(row.id, row.title);
+    modes.set(row.id, row.fulfilment);
   }
   const reviewed = new Set(
     ((reviewsResult.data ?? []) as { order_id: string }[]).map((row) => row.order_id),
   );
+  const assets = new Map<string, string>();
+  for (const row of (assetsResult.data ?? []) as { listing_id: string; asset_path: string }[]) {
+    assets.set(row.listing_id, row.asset_path);
+  }
 
   return orders.map((order) => ({
     ...order,
     listing_title: titles.get(order.listing_id) ?? UNKNOWN_LISTING,
     has_review: reviewed.has(order.id),
+    // The column DEFAULT is the fallback, not the mode with a file: an order
+    // whose listing did not come back must never be rendered as a download
+    // waiting to be collected.
+    listing_fulfilment: modes.get(order.listing_id) ?? 'personalised',
+    asset_path: assets.get(order.listing_id) ?? null,
   }));
+}
+
+/** The narrow listing projection `withListingTitles` reads. Both columns are granted. */
+interface ListingTitleRow {
+  id: string;
+  title: string;
+  fulfilment: FulfilmentMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -531,7 +579,8 @@ export class SupabaseDataClient implements DataClient {
   async signUp(input: SignUpInput): Promise<Profile> {
     const email = requireEmail(input?.email);
     const fullName = requireText(input?.fullName, 'Full name', 120, 2);
-    const password = requireText(input?.password, 'Password', 200, 8);
+    // NOT requireText: a password is never trimmed — see requirePassword.
+    const password = requirePassword(input?.password);
 
     const supabase = await createSupabaseServerClient();
     const { data, error } = await supabase.auth.signUp({
@@ -606,6 +655,35 @@ export class SupabaseDataClient implements DataClient {
 
     if (!data.user) return null;
     return this.getProfile({ userId: data.user.id }, data.user.id);
+  }
+
+  /**
+   * Replaces the signed-in user's password through GoTrue.
+   *
+   * `auth.updateUser` acts on WHOEVER THE REQUEST'S JWT NAMES and takes no user
+   * id, which is the same property the mock gets by resolving the actor: there
+   * is no shape of this call that rewrites somebody else's credentials. The
+   * `actor` argument is therefore not passed on — it is checked, so that a
+   * caller with no session gets `unauthorized` here rather than a GoTrue error
+   * about a missing token.
+   *
+   * The length rule is applied through the shared validator BEFORE the call, so
+   * that both backends refuse a short password with the same sentence. GoTrue
+   * has its own minimum (a project setting, 6 by default) and may still refuse
+   * something this accepts; `authMessage` passes that sentence through, since
+   * it is written for end users.
+   */
+  async updateMyPassword(actor: Actor, newPassword: string): Promise<void> {
+    const password = requirePassword(newPassword);
+    const ctx = await openAuthedContext(actor);
+
+    const { error } = await ctx.supabase.auth.updateUser({ password });
+    if (error) {
+      const authError = error as AuthLikeError;
+      // GoTrue's "New password should be different from the old password."
+      // arrives here, and it is worth showing rather than replacing.
+      throw new DataError('invalid', authMessage(authError, 'Your password could not be changed.'));
+    }
   }
 
   async getProfile(actor: Actor, userId: string): Promise<Profile | null> {
@@ -878,6 +956,11 @@ export class SupabaseDataClient implements DataClient {
     return rows.map((row) => ({
       ...toListingWithCoach(row, names),
       withdrawn_by_admin: row.withdrawn_by_admin === true,
+      // The owner's own path, handed back as the string rather than as a derived
+      // boolean — the opposite treatment to `withdrawn_by_admin` beside it, and
+      // deliberately so: this is the coach's own file and the editor needs the
+      // key to replace or remove it. See `OwnedListing.asset_path`.
+      asset_path: row.asset_path ?? null,
     }));
   }
 
@@ -886,6 +969,7 @@ export class SupabaseDataClient implements DataClient {
     const description = requireText(input?.description, 'Description', 4000, 10);
     const category = requireListingCategory(input?.category);
     const priceCents = requirePriceCents(input?.price_cents);
+    const fulfilment = optionalFulfilment(input?.fulfilment) ?? 'personalised';
 
     const ctx = await openAuthedContext(actor);
     const coach = await requireApprovedCoachProfile(ctx);
@@ -893,6 +977,11 @@ export class SupabaseDataClient implements DataClient {
     // `coach_id` comes from the resolved actor, never from input — and
     // `listings_insert_approved_coach` pins it to `auth.uid()` regardless.
     // `price_epoch` and `deleted_at` take their column defaults (1, null).
+    //
+    // `asset_path` is NOT sent and there is no input that could supply one: the
+    // `listings_asset_path_shape` CHECK pins it under the listing's own id,
+    // which does not exist until this insert returns. Attaching the file is
+    // `setListingAsset`, a second call — see CreateListingInput.
     const { data, error } = await ctx.supabase
       .from('listings')
       .insert({
@@ -901,6 +990,7 @@ export class SupabaseDataClient implements DataClient {
         description,
         price_cents: priceCents,
         category,
+        fulfilment,
       })
       .select(LISTING_COLUMNS)
       .maybeSingle();
@@ -930,6 +1020,10 @@ export class SupabaseDataClient implements DataClient {
     const description = requireText(input?.description, 'Description', 4000, 10);
     const category = requireListingCategory(input?.category);
     const priceCents = requirePriceCents(input?.price_cents);
+    // NULL MEANS "UNCHANGED" — see UpdateListingInput.fulfilment. A column that
+    // is not sent is not written, so a caller that does not know about delivery
+    // modes cannot silently reset one.
+    const nextFulfilment = optionalFulfilment(input?.fulfilment);
 
     const ctx = await openAuthedContext(actor);
     const profile = await resolveProfile(ctx);
@@ -943,15 +1037,105 @@ export class SupabaseDataClient implements DataClient {
       throw new DataError('forbidden', 'Only approved coaches can edit an offer.');
     }
 
+    const changingFulfilment = nextFulfilment !== null && nextFulfilment !== existing.fulfilment;
+
+    // Switching to personalised must clear the path in the SAME statement, or
+    // `listings_asset_path_shape` refuses the row: a personalised offer may not
+    // hold an asset. Two statements would also be a window in which the offer
+    // is personalised AND still pointing at a file every buyer could fetch.
+    //
+    // The refusal for an offer that has already been claimed is NOT pre-checked
+    // here. `guard_listing_update()` raises it with a 42501 and a sentence
+    // already written as end-user copy — "How this offer is delivered cannot
+    // change once somebody has claimed it." — which `errors.ts` passes through.
+    // Duplicating the `exists (select 1 from orders …)` test here would need a
+    // read of every order on the listing, and would be a second copy of a rule
+    // that must never differ from the trigger's.
+    const patch: Record<string, unknown> = { title, description, price_cents: priceCents, category };
+    if (changingFulfilment) {
+      patch.fulfilment = nextFulfilment;
+      if (nextFulfilment === 'personalised') patch.asset_path = null;
+    }
+
     const { data, error } = await ctx.supabase
       .from('listings')
-      .update({ title, description, price_cents: priceCents, category })
+      .update(patch)
       .eq('id', id)
       .select(LISTING_COLUMNS)
       .maybeSingle();
     if (error) throwDataError(error, true);
     if (!data) throw new DataError('not_found', 'That offer could not be found.');
     return withCoachName(ctx, data as ListingRow);
+  }
+
+  /**
+   * Attaches or clears an instant offer's downloadable file. Owner only.
+   *
+   * THE PATH IS DATA, THE FILE IS STORAGE — the same split as `setMyAvatar`,
+   * and the reason `src/lib/storage/deliverables.ts` is not part of
+   * `DataClient`. This method writes one column and moves no bytes.
+   *
+   * Three pre-checks and then the write. As everywhere in this file, the
+   * pre-checks exist to produce a SENTENCE; the database is what refuses. Each
+   * is backed by something in SQL that would stop the write anyway:
+   * `listings_update_own_coach` plus the content half of
+   * `guard_listing_update()` for the first two, and
+   * `listings_asset_path_shape` for the last two — which is also enforced a
+   * third time by `offer_assets_write_coach` on the object itself.
+   *
+   * The row is read back from `public.owned_listings` rather than from the
+   * UPDATE's own RETURNING, because `asset_path` is not a grantable column on
+   * `public.listings` and naming it in a read of that table is a 42501. The
+   * view is the only place a client may see it, and it is scoped to the owner —
+   * who, by the time this line runs, is the caller.
+   */
+  async setListingAsset(actor: Actor, listingId: string, path: string | null): Promise<OwnedListing> {
+    const id = requireText(listingId, 'Offer', 200);
+    const next = optionalAssetPath(path);
+
+    const ctx = await openAuthedContext(actor);
+    const profile = await resolveProfile(ctx);
+
+    const existing = await this.readListingRow(ctx, id);
+    if (!existing) throw new DataError('not_found', 'That offer could not be found.');
+    // OWNER ONLY, never an admin — `asset_path` is CONTENT to
+    // `guard_listing_update()`, so this is the `updateListing` asymmetry again.
+    if (existing.coach_id !== profile.id) {
+      throw new DataError('forbidden', 'Only the coach who published an offer can edit it.');
+    }
+    if (profile.coach_status !== 'approved') {
+      throw new DataError('forbidden', 'Only approved coaches can edit an offer.');
+    }
+    if (next !== null && existing.fulfilment !== 'instant') {
+      throw new DataError(
+        'invalid',
+        'Only an instant-download offer can have a file attached. Switch this offer to instant delivery first.',
+      );
+    }
+    // Clearing is allowed in either mode, so a switch to personalised can tidy
+    // up after itself; a path is only ever accepted under its own offer's id.
+    if (next !== null && !next.startsWith(`${existing.id}/`)) {
+      throw new DataError('forbidden', "A file has to be stored under its own offer's folder.");
+    }
+
+    const { error } = await ctx.supabase.from('listings').update({ asset_path: next }).eq('id', id);
+    if (error) throwDataError(error, true);
+
+    const { data, error: readError } = await ctx.supabase
+      .from('owned_listings')
+      .select(OWNED_LISTING_COLUMNS)
+      .eq('id', id)
+      .maybeSingle();
+    if (readError) throwDataError(readError, true);
+    if (!data) throw new DataError('not_found', 'That offer could not be found.');
+
+    const row = data as OwnedListingRow;
+    const names = await coachNamesFor(ctx, [row.coach_id]);
+    return {
+      ...toListingWithCoach(row, names),
+      withdrawn_by_admin: row.withdrawn_by_admin === true,
+      asset_path: row.asset_path ?? null,
+    };
   }
 
   async softDeleteListing(actor: Actor, listingId: string): Promise<ListingWithCoach> {

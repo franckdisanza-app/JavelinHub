@@ -154,6 +154,7 @@ import type {
   CoachApplication,
   CoachApplicationWithUser,
   CoachStats,
+  FulfilmentMode,
   Invite,
   ListingCategory,
   ListingDetail,
@@ -203,6 +204,16 @@ export interface CreateListingInput {
   price_cents: number;
   /** One of the eight taxonomy slugs. Anything else is `invalid`. */
   category: ListingCategory;
+  /**
+   * How the offer will be delivered. Omitted means `'personalised'`, which is
+   * the column default in SQL and the only honest value for an offer with
+   * nothing attached yet.
+   *
+   * `asset_path` is NOT here and must not be added: the path is pinned under
+   * the listing's own id, and that id does not exist until this call returns.
+   * Attaching the file is a second step — {@link DataClient.setListingAsset}.
+   */
+  fulfilment?: FulfilmentMode;
 }
 
 /**
@@ -219,6 +230,20 @@ export interface UpdateListingInput {
   price_cents: number;
   /** One of the eight taxonomy slugs. Anything else is `invalid`. */
   category: ListingCategory;
+  /**
+   * The delivery mode, or omitted to leave it as it is.
+   *
+   * OPTIONAL ON PURPOSE, unlike the four columns above. A caller that predates
+   * instant delivery — or simply does not offer the control — must not silently
+   * reset an offer to `personalised` and orphan its file, so "not sent" means
+   * "unchanged" rather than "default".
+   *
+   * Switching to `personalised` CLEARS `asset_path`, because
+   * `listings_asset_path_shape` forbids a personalised offer from holding one.
+   * Switching in either direction is refused once the offer has been claimed —
+   * see {@link Listing.fulfilment}.
+   */
+  fulfilment?: FulfilmentMode;
 }
 
 /** Input to {@link DataClient.createInvite}. */
@@ -324,6 +349,31 @@ export interface DataClient {
    * "no such email" from "wrong password" in an error message.
    */
   signInWithPassword(input: SignInInput): Promise<Profile | null>;
+
+  /**
+   * Replaces the SIGNED-IN actor's password. Never takes a user id.
+   *
+   * The third member of the family whose internals differ completely between
+   * the backends — `signUp` and `signInWithPassword` are the other two, and
+   * `supabase/README.md` already records the split: the mock keeps scrypt
+   * hashes in `auth_users`, Supabase owns `auth.users` and we never see them.
+   *
+   * NO CURRENT PASSWORD, and that is a scope decision rather than an oversight.
+   * The one caller is the reset flow, where the user has just proved control of
+   * their inbox precisely because they do NOT know the old password. A
+   * change-password-while-signed-in form would want the old one and should ask
+   * for it there — this method would still be what it calls.
+   *
+   * The session is therefore the whole authorization, which puts weight on how
+   * a session gets created: see `src/lib/auth/password-reset.ts`, where a reset
+   * link is single-use, short-lived, and stored as a hash.
+   *
+   * WHAT IT CANNOT DO, in either backend: sign out this user's OTHER sessions.
+   * The mock session is a self-contained signed cookie with no revocation list,
+   * so a stolen one survives a password change — recorded as a known divergence
+   * in `supabase/README.md` rather than papered over.
+   */
+  updateMyPassword(actor: Actor, newPassword: string): Promise<void>;
 
   /**
    * The FULL profile row, including email. Readable only by its owner and by
@@ -571,6 +621,36 @@ export interface DataClient {
    * is no longer `'approved'`.
    */
   updateListing(actor: Actor, listingId: string, input: UpdateListingInput): Promise<ListingWithCoach>;
+
+  /**
+   * Attaches the instant download to one of the actor's own offers, or clears
+   * it with `null`. Returns the offer in the OWNER's shape, which is the only
+   * one carrying `asset_path` back.
+   *
+   * **A PATH CROSSES THIS BOUNDARY, NEVER A FILE** — the same split, and the
+   * same reason, as {@link setMyAvatar}: bytes live in
+   * `src/lib/storage/deliverables.ts` and only Supabase implements them, while
+   * this is an ordinary column write both backends do identically.
+   *
+   * Four rules, all of them enforced here AND in Postgres:
+   *
+   *   1. **Owner only, never an admin.** `guard_listing_update()` counts
+   *      `asset_path` as CONTENT, so this is the `updateListing` asymmetry
+   *      again: a moderator takes an offer down, they do not swap the file it
+   *      delivers.
+   *   2. **Approved coaches only**, for the same reason editing is.
+   *   3. **Instant offers only.** A path on a personalised offer would be a
+   *      file every buyer could fetch, which is the thing personalised delivery
+   *      exists not to be — `listings_asset_path_shape` refuses it.
+   *   4. **Pinned under the listing's own id**: the path must start
+   *      `<listingId>/`. Same construction as the avatar prefix, and checked in
+   *      the CHECK constraint and in `offer_assets_write_coach` as well.
+   *
+   * Withdrawn offers are editable here, exactly as they are through
+   * `updateListing`: a coach whose offer was taken down over its file must be
+   * able to replace it.
+   */
+  setListingAsset(actor: Actor, listingId: string, path: string | null): Promise<OwnedListing>;
 
   /**
    * Withdraws an offer by stamping `deleted_at`. **Never a row delete** — see

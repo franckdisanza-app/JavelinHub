@@ -26,8 +26,10 @@
 import {
   COACH_YEARS_COACHING_MAX,
   DataError,
+  isFulfilmentMode,
   isListingCategory,
   type Actor,
+  type FulfilmentMode,
   type ListingCategory,
 } from './types';
 
@@ -37,6 +39,45 @@ export function requireText(value: unknown, label: string, max: number, min = 1)
   if (trimmed.length < min) throw new DataError('invalid', `${label} is required.`);
   if (trimmed.length > max) throw new DataError('invalid', `${label} must be ${max} characters or fewer.`);
   return trimmed;
+}
+
+/**
+ * A password, on its way to being hashed.
+ *
+ * **NOT `requireText`, and the difference is a lockout bug.** `requireText`
+ * returns `value.trim()`, which is right for a title and wrong for a
+ * credential: `signUp` stored the TRIMMED string while `signInWithPassword`
+ * verifies the RAW one, so an account created with a trailing space — a phone
+ * keyboard adds one after a word completion, a paste from a document carries
+ * one — could never be signed into again. This function returns the value
+ * exactly as it arrived, so what is hashed is what was typed.
+ *
+ * Length is measured on the RAW value too. Trimming before counting would let
+ * `"       a"` fail as one character while `"        "` passed as eight.
+ *
+ * All-whitespace is still refused, and that is the one judgement here: eight
+ * spaces is not a password somebody chose, it is a field a browser filled or a
+ * key held down, and the person who "set" it could not reproduce it. Everything
+ * else — leading, trailing and interior spaces — is preserved.
+ *
+ * The MAXIMUM is not politeness. `scryptSync` runs over whatever it is given,
+ * so an unbounded password is a CPU-exhaustion request that costs the sender
+ * nothing.
+ *
+ * Mirrors nothing in SQL: on Supabase, GoTrue owns the rule and applies its own
+ * minimum (a project setting) on top of this one.
+ */
+export function requirePassword(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new DataError('invalid', 'Password is required.');
+  }
+  if (value.length < 8) {
+    throw new DataError('invalid', 'Passwords must be at least 8 characters.');
+  }
+  if (value.length > 200) {
+    throw new DataError('invalid', 'Password must be 200 characters or fewer.');
+  }
+  return value;
 }
 
 export function optionalText(value: unknown, label: string, max: number): string | null {
@@ -62,6 +103,54 @@ export function requireListingCategory(value: unknown): ListingCategory {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   if (!isListingCategory(trimmed)) {
     throw new DataError('invalid', 'Category must be one of the available categories.');
+  }
+  return trimmed;
+}
+
+/**
+ * Mirrors: the `public.fulfilment_mode` enum (0011_delivery.sql), and the
+ * `not null default 'personalised'` on `listings.fulfilment`.
+ *
+ * Closed like `requireListingCategory`, and for the same reason: this is an
+ * enum column in Postgres, so an unrecognised value is a cast error rather than
+ * a row, and the mock must not be the more permissive of the two.
+ *
+ * `undefined` and `null` are NOT errors — they mean "the caller did not say",
+ * which on a create is the column default and on an update is "leave it alone".
+ * Both callers distinguish those two by testing for `null` themselves; this
+ * function only decides whether a value that WAS supplied is a legal one.
+ */
+export function optionalFulfilment(value: unknown): FulfilmentMode | null {
+  if (value === undefined || value === null) return null;
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!isFulfilmentMode(trimmed)) {
+    throw new DataError('invalid', 'Choose how this offer is delivered.');
+  }
+  return trimmed;
+}
+
+/**
+ * The object path of an offer's instant download, or `null` to clear it.
+ *
+ * The same shape rules as {@link optionalAvatarPath} — no traversal, no
+ * absolute path, no backslashes, a sane length — because it is the same kind of
+ * value used the same way: a storage object key, written into a column.
+ *
+ * What it deliberately does NOT check is the `<listing_id>/` prefix that
+ * `listings_asset_path_shape` and `offer_assets_write_coach` both require. That
+ * is not a property of the string, it is a relationship between the string and
+ * a row, so each backend checks it where it has the row — exactly as
+ * `setMyAvatar` checks the avatar prefix against the resolved actor rather than
+ * here.
+ */
+export function optionalAssetPath(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw new DataError('invalid', 'That file is not valid.');
+  const trimmed = value.trim();
+  if (trimmed === '') return null;
+  if (trimmed.length > 300) throw new DataError('invalid', 'That file is not valid.');
+  if (trimmed.includes('..') || trimmed.startsWith('/') || trimmed.includes('\\')) {
+    throw new DataError('invalid', 'That file is not valid.');
   }
   return trimmed;
 }

@@ -101,6 +101,38 @@ export function seedAdminPassword(): string {
 }
 
 /**
+ * The app's own public origin — `https://javelinhub.example`, no trailing slash.
+ *
+ * ONE THING NEEDS THIS AND IT IS SECURITY-RELEVANT: the absolute link in a
+ * password-reset email. `resetPasswordForEmail` takes a `redirectTo`, and that
+ * URL is emailed to somebody who is, by definition, locked out and inclined to
+ * click it.
+ *
+ * IT IS DELIBERATELY NOT DERIVED FROM THE REQUEST. The obvious implementation
+ * reads the `Host` (or `X-Forwarded-Host`) header of the request that submitted
+ * the form, and that header is attacker-controlled: a crafted request produces
+ * a real, valid reset link for a real account pointing at the attacker's
+ * domain, sent by us, to the victim. Host-header poisoning of password-reset
+ * emails is a well-worn bug and configuration is the only fix that does not
+ * depend on a proxy being configured exactly right.
+ *
+ * Supabase applies a second, independent check — `redirectTo` must match the
+ * project's Redirect URLs allow-list — so a misconfiguration here fails closed
+ * rather than sending a poisoned link. Both are wanted; neither replaces the
+ * other.
+ *
+ * Falls back to `http://localhost:3000` so local development needs no setup.
+ * That fallback is only reachable when the variable is unset, and an unset
+ * variable in production means reset links point at localhost, which is a
+ * visible failure rather than a silent one.
+ */
+export function siteUrl(): string {
+  const value = process.env.NEXT_PUBLIC_SITE_URL;
+  const raw = value && value.trim() !== '' ? value.trim() : 'http://localhost:3000';
+  return raw.replace(/\/+$/, '');
+}
+
+/**
  * Supabase configuration. Unused while `DATA_BACKEND=mock`, declared here so
  * that the eventual `SupabaseDataClient` is a config change and not a code
  * change. `NEXT_PUBLIC_*` reads are written as static member expressions

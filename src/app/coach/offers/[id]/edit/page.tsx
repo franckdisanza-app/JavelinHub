@@ -5,12 +5,15 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { EditOfferForm } from '@/app/coach/offers/[id]/edit/edit-offer-form';
+import { OfferAssetForm } from '@/app/coach/offers/[id]/edit/offer-asset-form';
 import { Alert } from '@/components/ui/alert';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { getActor, requireUser } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { DataErrorNotice, resolveDataError } from '@/lib/data-error';
 import { LISTING_CATEGORY_LABELS, isDataError, type ListingRevision, type OwnedListing } from '@/lib/data/types';
+import { firstValue } from '@/lib/search-params';
+import { deliveryStorageAvailable, signedOfferAssetUrl } from '@/lib/storage/deliverables';
 import { formatDate, formatPrice } from '@/lib/format';
 
 export const metadata: Metadata = { title: 'Edit offer' };
@@ -31,7 +34,13 @@ const DASHBOARD_PATH = '/coach/offers';
  * That 404 is also the right answer for a stranger poking at ids: it says
  * nothing about whether the offer exists.
  */
-export default async function EditOfferPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function EditOfferPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const { id } = await params;
   const editPath = `${DASHBOARD_PATH}/${id}/edit`;
 
@@ -69,8 +78,47 @@ export default async function EditOfferPage({ params }: { params: Promise<{ id: 
 
   const categories = await db.listCategories();
 
+  /*
+   * Has anybody claimed this offer? It decides one thing: whether the delivery
+   * mode is still changeable, because `guard_listing_update()` freezes it at the
+   * first claim.
+   *
+   * Read from the coach's own sales rather than from `getOfferStats`, which
+   * looks like the cheaper answer and is the wrong one: that rollup counts sales
+   * AT THE CURRENT PRICE EPOCH, so an offer whose price has gone up since it
+   * sold reports zero — and would unlock a control the database will refuse.
+   * A failure here falls back to LOCKED, so the worst case is a control that is
+   * missing rather than one that is guaranteed to fail.
+   */
+  let claimed = true;
+  try {
+    const sales = await db.listOrdersForCoach(actor, profile.id);
+    claimed = sales.some((order) => order.listing_id === offer.id);
+  } catch (error) {
+    if (!isDataError(error)) throw error;
+  }
+
+  const storageAvailable = deliveryStorageAvailable();
+  // Minted per render and good for five minutes, so the coach can check what a
+  // buyer actually receives. Never stored.
+  const assetUrl = offer.asset_path ? await signedOfferAssetUrl(offer.asset_path) : null;
+  const attachFailed = firstValue((await searchParams).attach) === 'failed';
+
   return (
     <Shell id={id} title={offer.title}>
+      {/*
+        Set by `createListingAction` when the offer was published but its file
+        did not attach — a window that cannot be closed, because the path is
+        pinned under an id the insert is what produces. The offer exists, is on
+        sale, and cannot be claimed until the upload below succeeds.
+      */}
+      {attachFailed ? (
+        <Alert tone="warn" title="The offer was published, but the file did not attach.">
+          Everything else saved. Attach the file below and the offer becomes claimable — until then every
+          attempt to claim it is refused.
+        </Alert>
+      ) : null}
+
       {offer.deleted_at !== null ? (
         <Alert
           tone={offer.withdrawn_by_admin ? 'warn' : 'info'}
@@ -93,9 +141,36 @@ export default async function EditOfferPage({ params }: { params: Promise<{ id: 
             // The input speaks pounds; the row stores integer cents.
             price={(offer.price_cents / 100).toFixed(2)}
             category={offer.category}
+            fulfilment={offer.fulfilment}
+            assetPath={offer.asset_path}
+            claimed={claimed}
+            storageAvailable={storageAvailable}
           />
         </CardBody>
       </Card>
+
+      {/*
+        Only for an instant offer. A personalised one attaches its files to each
+        ORDER instead, on the order page, where both parties can see them —
+        there is nothing to attach here.
+      */}
+      {offer.fulfilment === 'instant' ? (
+        <Card tone="raised">
+          <CardHeader
+            title="The file buyers download"
+            description="One file, the same for everyone, handed over the moment somebody claims this offer."
+          />
+          <CardBody>
+            <OfferAssetForm
+              listingId={offer.id}
+              currentPath={offer.asset_path}
+              currentName={assetFileName(offer.asset_path)}
+              currentUrl={assetUrl}
+              available={storageAvailable}
+            />
+          </CardBody>
+        </Card>
+      ) : null}
 
       <RevisionHistory revisions={revisions} failed={revisionsFailed} current={offer} />
     </Shell>
@@ -184,6 +259,26 @@ function RevisionHistory({
       </CardBody>
     </Card>
   );
+}
+
+/**
+ * The display name of the attached file, recovered from its object key.
+ *
+ * The key is `<listing_id>/<random>-<name>`, built by `uploadOfferAsset` from a
+ * name `safeFileName()` has already stripped — so this is a reversal of a shape
+ * this app produced, not a parse of anything a browser sent. The random prefix
+ * is dropped; a key that does not match the shape is shown as-is rather than
+ * being replaced with a guess.
+ *
+ * Unlike a deliverable, there is no `file_name` column to read: the instant
+ * asset is one column on `listings`, not a row of its own. That is the cost of
+ * the simpler schema, and it is paid here.
+ */
+function assetFileName(path: string | null): string | null {
+  if (!path) return null;
+  const last = path.split('/').pop() ?? path;
+  const dash = last.indexOf('-');
+  return dash > 0 ? last.slice(dash + 1) : last;
 }
 
 /** See the matching note on the dashboard: `category` is widened with `string`. */

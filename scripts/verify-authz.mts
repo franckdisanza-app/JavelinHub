@@ -40,6 +40,10 @@ process.env.SESSION_SECRET = 'verify-authz-throwaway-session-secret';
 const { getDataClient } = await import('@/lib/data');
 const { isDataError } = await import('@/lib/data/types');
 const { __resetStoreCache, mutateDb } = await import('@/lib/data/mock/store');
+// Mock-only, and deliberately free of any framework import so it can be called
+// from here — see the header of that file. Its sibling `password-reset.ts`
+// writes cookies and therefore cannot be.
+const { hashToken, issueResetToken, redeemResetToken } = await import('@/lib/auth/reset-tokens');
 
 const db = getDataClient();
 
@@ -179,25 +183,48 @@ const LISTING_ROW_COLUMNS = [
   'price_epoch',
   'deleted_at',
   'deleted_by',
+  'fulfilment',
+  'asset_path',
   'created_at',
   'updated_at',
 ] as const;
 /**
  * What EVERY method that returns a listing actually returns — reads and writes
- * alike. It is the row MINUS `deleted_by`, PLUS the joined coach name.
+ * alike. It is the row MINUS `deleted_by` and `asset_path`, PLUS the joined
+ * coach name.
  *
- * The omission is the load-bearing part. After a takedown `deleted_by` holds an
- * ADMINISTRATOR's id, and handing that to a visitor, to a buyer reading a
- * tombstone, or even to the coach who owns the offer is administrator
- * enumeration — the disclosure `PublicProfile` drops `role` to prevent. So it is
- * asserted at every call site, not spot-checked at one.
+ * The omissions are the load-bearing part, and they are two different
+ * disclosures. After a takedown `deleted_by` holds an ADMINISTRATOR's id, and
+ * handing that to a visitor, to a buyer reading a tombstone, or even to the
+ * coach who owns the offer is administrator enumeration — the disclosure
+ * `PublicProfile` drops `role` to prevent. `asset_path` is the key of a private
+ * object in `offer-assets`; SELECT on it is revoked from every client role in
+ * `0011_delivery.sql`, so a listing read that carried it would be a shape
+ * Postgres cannot produce. Both are asserted at every call site, not
+ * spot-checked at one.
+ *
+ * `fulfilment` deliberately survives: how an offer arrives is public.
  */
 const LISTING_WITH_COACH_COLUMNS = [
-  ...LISTING_ROW_COLUMNS.filter((c) => c !== 'deleted_by'),
+  ...LISTING_ROW_COLUMNS.filter((c) => c !== 'deleted_by' && c !== 'asset_path'),
   'coach_name',
 ] as const;
-/** The owner's dashboard shape: the projection plus the derived takedown flag — still no id. */
-const OWNED_LISTING_COLUMNS = [...LISTING_WITH_COACH_COLUMNS, 'withdrawn_by_admin'] as const;
+/**
+ * The owner's dashboard shape: the projection, plus the derived takedown flag,
+ * plus the owner's own `asset_path` added back.
+ *
+ * Note the two additions are opposite treatments of the same problem. The
+ * takedown is published as a BOOLEAN because the underlying value is an
+ * administrator's id; the asset is published as the STRING because it is the
+ * coach's own file and the editor needs the key. Both are safe for the same
+ * reason and only that reason: `public.owned_listings` is scoped
+ * `where coach_id = auth.uid()`.
+ */
+const OWNED_LISTING_COLUMNS = [
+  ...LISTING_WITH_COACH_COLUMNS,
+  'withdrawn_by_admin',
+  'asset_path',
+] as const;
 /** A superseded version of an offer. No `updated_at`: the table is append-only. */
 const LISTING_REVISION_COLUMNS = [
   'id',
@@ -223,6 +250,13 @@ const ORDER_COLUMNS = [
   'created_at',
   'listing_title',
   'has_review',
+  // Joined from the LIVE listing, which is safe only because the mode is
+  // immutable once anything has been claimed.
+  'listing_fulfilment',
+  // The instant download, or null. Scoped by `public.entitled_offer_assets` in
+  // SQL and by the same predicate in the mock: the offer's coach, or a learner
+  // holding an order for it. An admin reading somebody else's order gets null.
+  'asset_path',
 ] as const;
 /** The public offer rollup: counts, an average, and no epoch. */
 const OFFER_STATS_COLUMNS = ['listing_id', 'rating_average', 'review_count', 'sales_count'] as const;
@@ -1355,6 +1389,12 @@ await mutateDb((store) => {
     price_epoch: 1,
     deleted_at: null,
     deleted_by: null,
+    // The two delivery columns at their backfilled values. A row written before
+    // 0011 has neither; `seedDatabase()` repairs it to exactly this on load, and
+    // writing it out here keeps the fixture a legacy CATEGORY row rather than
+    // also a legacy delivery row, which is a different test.
+    fulfilment: 'personalised',
+    asset_path: null,
     created_at: stamp,
     updated_at: stamp,
   });
@@ -3658,6 +3698,487 @@ expectEqual(
   'F14: a whitespace-only profile bio counts as empty, so the copy still fires',
   (await db.getPublicCoach(blankBioUser.id))?.coach_bio,
   WHITESPACE_APP_BIO,
+);
+
+// ---------------------------------------------------------------------------
+section('Instant delivery — the mode, the file, and who may see the path');
+// ---------------------------------------------------------------------------
+// Everything here is built at RUNTIME rather than seeded, for the same reason
+// withdrawal is: the seed mirrors supabase/seed.sql row for row, every seeded
+// offer is `personalised` there, and an instant fixture would have to point at a
+// file the mock has no storage for.
+//
+// Two rules carry the weight and they protect different people:
+//
+//   `asset_path` is not public          — the key of a private object, revoked
+//                                         from every client role in SQL, so a
+//                                         listing shape carrying it is a shape
+//                                         Postgres cannot produce.
+//   the mode is frozen at first claim   — a promise to the buyer, which is why
+//                                         it binds an ADMIN too.
+
+const instantOffer = await allows(
+  'a coach may publish an INSTANT offer',
+  () =>
+    db.createListing(COACH, {
+      title: 'Instant delivery fixture',
+      description: 'Published as an instant download, to exercise the attach-a-file path end to end.',
+      price_cents: 2500,
+      category: 'training_plan',
+      fulfilment: 'instant',
+    }),
+  (r) => `${r.id} fulfilment=${r.fulfilment}`,
+);
+expectEqual('...and it really is instant', instantOffer?.fulfilment, 'instant');
+// THE disclosure assertion. `asset_path` must be absent from the shape, not
+// merely null in it — a public listing read that names the column is a 42501
+// against the real database.
+expectShape(
+  '...and the returned shape carries NO asset_path',
+  instantOffer,
+  LISTING_WITH_COACH_COLUMNS,
+);
+
+const defaultedOffer = await allows(
+  'omitting the mode falls back to the column DEFAULT, not to instant',
+  () =>
+    db.createListing(COACH, {
+      title: 'Unspecified delivery fixture',
+      description: 'Created with no fulfilment at all, mirroring a caller that predates the column.',
+      price_cents: 2600,
+      category: 'training_plan',
+    }),
+  (r) => `fulfilment=${r.fulfilment}`,
+);
+expectEqual('...which is personalised', defaultedOffer?.fulfilment, 'personalised');
+
+for (const bogus of ['Instant', 'INSTANT', 'immediate', '', ' ', 'personalized']) {
+  await refuses(`createListing rejects fulfilment=${JSON.stringify(bogus)}`, 'invalid', () =>
+    db.createListing(COACH, {
+      title: 'Rejected mode fixture',
+      description: 'Should never reach the store, because the mode is closed like the category is.',
+      price_cents: 2700,
+      category: 'training_plan',
+      fulfilment: bogus as unknown as 'instant',
+    }),
+  );
+}
+// THE CONTROL for that loop, which would otherwise pass for a method that
+// refuses everything — and it pins the one transformation the validator does
+// make. Surrounding whitespace is trimmed and the value accepted; nothing else
+// is. Both backends have to agree here, and they do because they share
+// `optionalFulfilment`: the Supabase client sends Postgres the TRIMMED string,
+// so the enum column never sees the space that would make it a cast error.
+const trimmedMode = await allows(
+  'a mode with surrounding whitespace is trimmed, not rejected',
+  () =>
+    db.createListing(COACH, {
+      title: 'Trimmed mode fixture',
+      description: 'The one transformation the mode validator makes, pinned so it cannot quietly widen.',
+      price_cents: 2700,
+      category: 'training_plan',
+      fulfilment: ' instant ' as unknown as 'instant',
+    }),
+  (r) => `fulfilment=${r.fulfilment}`,
+);
+expectEqual('...and it lands as the exact enum value', trimmedMode?.fulfilment, 'instant');
+
+// --- setListingAsset: who may attach ---------------------------------------
+const ASSET = `${instantOffer!.id}/abcd1234-plan.pdf`;
+
+await refuses('another approved coach may not attach a file', 'forbidden', () =>
+  db.setListingAsset(NILS, instantOffer!.id, ASSET),
+);
+// The same asymmetry as updateListing, and it is the point of the method: a
+// moderator takes an offer down, they do not swap the file it delivers.
+expectEqual('the admin actor is an approved coach, so approval cannot be what refuses', await coachStatusOf(ADMIN!.userId), 'approved');
+await refuses('an ADMIN may not attach a file either', 'forbidden', () =>
+  db.setListingAsset(ADMIN, instantOffer!.id, ASSET),
+);
+await refuses('a learner may not attach a file', 'forbidden', () =>
+  db.setListingAsset(MARCUS, instantOffer!.id, ASSET),
+);
+await refuses('an anonymous caller may not attach a file', 'unauthorized', () =>
+  db.setListingAsset(null, instantOffer!.id, ASSET),
+);
+
+// --- setListingAsset: what may be attached ---------------------------------
+await refuses("a path under ANOTHER offer's folder is refused", 'forbidden', () =>
+  db.setListingAsset(COACH, instantOffer!.id, `${defaultedOffer!.id}/stolen.pdf`),
+);
+await refuses('a bare filename with no folder is refused', 'forbidden', () =>
+  db.setListingAsset(COACH, instantOffer!.id, 'plan.pdf'),
+);
+for (const [shape, path] of [
+  ['traversal', `${instantOffer!.id}/../${defaultedOffer!.id}/plan.pdf`],
+  ['an absolute path', `/${instantOffer!.id}/plan.pdf`],
+  ['a backslash', `${instantOffer!.id}\\plan.pdf`],
+] as Array<[string, string]>) {
+  await refuses(`setListingAsset rejects ${shape}`, 'invalid', () =>
+    db.setListingAsset(COACH, instantOffer!.id, path),
+  );
+}
+// A file on a personalised offer is the one thing personalised delivery exists
+// not to be: bytes every buyer of the offer could fetch.
+await refuses('a PERSONALISED offer cannot hold a file', 'invalid', () =>
+  db.setListingAsset(COACH, defaultedOffer!.id, `${defaultedOffer!.id}/plan.pdf`),
+);
+
+// --- the control -----------------------------------------------------------
+const attached = await allows(
+  'the OWNER may attach a file to their own instant offer',
+  () => db.setListingAsset(COACH, instantOffer!.id, ASSET),
+  (r) => `asset_path=${r.asset_path}`,
+);
+expectShape('...returning the OWNER shape, which is the only one with a path', attached, OWNED_LISTING_COLUMNS);
+expectEqual('...and the path is the one that was sent', attached?.asset_path, ASSET);
+
+// The disclosure boundary, from both sides of the same row.
+const publicView = await db.getListing(instantOffer!.id);
+expectShape('the PUBLIC read of that same offer still has no asset_path', publicView, LISTING_WITH_COACH_COLUMNS);
+expectEqual('...while still publishing the mode, which IS public', publicView?.fulfilment, 'instant');
+const ownRows = await db.listMyListings(COACH);
+expectEqual(
+  'the owner’s own dashboard row carries the path',
+  ownRows.find((row) => row.id === instantOffer!.id)?.asset_path,
+  ASSET,
+);
+
+// --- claiming --------------------------------------------------------------
+// An instant offer with no file cannot be claimed. Asserted on a THIRD offer,
+// because the one above now has a file and could not fail this way.
+const unreadyOffer = await allows(
+  'a coach may publish an instant offer before attaching its file',
+  () =>
+    db.createListing(COACH, {
+      title: 'Instant offer with nothing attached',
+      description: 'Legal to publish and impossible to claim, which is the state the dashboard flags.',
+      price_cents: 2800,
+      category: 'training_plan',
+      fulfilment: 'instant',
+    }),
+  (r) => r.id,
+);
+await refuses('...but nobody can claim it while it has no file', 'invalid', () =>
+  db.createOrder(AISHA, unreadyOffer!.id),
+);
+
+const instantOrder = await allows(
+  'a learner may claim an instant offer that HAS a file',
+  () => db.createOrder(LEARNER, instantOffer!.id),
+  (r) => r.id,
+);
+
+const buyerOrder = await db.getOrder(LEARNER, instantOrder!.id);
+expectShape('the order shape carries the mode and the path', buyerOrder, ORDER_COLUMNS);
+expectEqual('...the mode is joined from the live listing', buyerOrder?.listing_fulfilment, 'instant');
+expectEqual('...and the BUYER gets the download path', buyerOrder?.asset_path, ASSET);
+const sellerOrder = await db.getOrder(COACH, instantOrder!.id);
+expectEqual('...so does the selling coach', sellerOrder?.asset_path, ASSET);
+// THE asymmetry worth having. An admin may read the order — they can see that a
+// purchase happened — and is deliberately not handed the file, because
+// `entitled_offer_assets` is scoped by auth.uid() with no admin arm.
+const adminOrder = await db.getOrder(ADMIN, instantOrder!.id);
+expectEqual('an ADMIN can still read the order itself', adminOrder?.id, instantOrder!.id);
+expectEqual('...and is NOT handed the download path', adminOrder?.asset_path, null);
+// The control for that null: a personalised order reports null too, so the
+// assertion above needs something that distinguishes "withheld" from "always
+// null". The buyer's row two assertions up is that control.
+const personalOrder = await allows(
+  'a learner may claim a personalised offer',
+  () => db.createOrder(MARCUS, defaultedOffer!.id),
+  (r) => r.id,
+);
+const personalRead = await db.getOrder(MARCUS, personalOrder!.id);
+expectEqual('a personalised order reports its mode', personalRead?.listing_fulfilment, 'personalised');
+expectEqual('...and has no asset path, because there is no asset', personalRead?.asset_path, null);
+
+// --- the mode is frozen once anything has been claimed ---------------------
+const FROZEN_EDIT = {
+  title: 'Instant delivery fixture',
+  description: 'Published as an instant download, to exercise the attach-a-file path end to end.',
+  price_cents: 2500,
+  category: 'training_plan',
+} as const;
+
+await refuses('the mode cannot change once the offer has been claimed', 'forbidden', () =>
+  db.updateListing(COACH, instantOffer!.id, { ...FROZEN_EDIT, fulfilment: 'personalised' }),
+);
+expectEqual(
+  '...and the refused edit reached nothing',
+  (await db.getListing(instantOffer!.id))?.fulfilment,
+  'instant',
+);
+// Re-submitting the SAME mode is not a change, which is what lets the editor
+// keep the control on the form for an offer that has already sold.
+await allows(
+  're-submitting the same mode is a no-op, not a refusal',
+  () => db.updateListing(COACH, instantOffer!.id, { ...FROZEN_EDIT, fulfilment: 'instant' }),
+  (r) => `fulfilment=${r.fulfilment}`,
+);
+// Omitting it entirely must also be a no-op — a caller that does not offer the
+// control must not be able to reset the mode by staying silent.
+await allows(
+  'omitting the mode on an edit leaves it alone',
+  () => db.updateListing(COACH, instantOffer!.id, FROZEN_EDIT),
+  (r) => `fulfilment=${r.fulfilment}`,
+);
+expectEqual(
+  '...and the offer is still instant after both',
+  (await db.getListing(instantOffer!.id))?.fulfilment,
+  'instant',
+);
+
+// --- switching BEFORE a claim, which clears the file ------------------------
+const switchable = await allows(
+  'a fresh instant offer with a file, nobody has claimed',
+  async () => {
+    const created = await db.createListing(COACH, {
+      title: 'Switchable delivery fixture',
+      description: 'Attached, then switched to personalised, to prove the file goes with the mode.',
+      price_cents: 2900,
+      category: 'training_plan',
+      fulfilment: 'instant',
+    });
+    return db.setListingAsset(COACH, created.id, `${created.id}/switchme.pdf`);
+  },
+  (r) => `asset_path=${r.asset_path}`,
+);
+await allows(
+  'switching it to personalised is allowed while unclaimed',
+  () =>
+    db.updateListing(COACH, switchable!.id, {
+      title: 'Switchable delivery fixture',
+      description: 'Attached, then switched to personalised, to prove the file goes with the mode.',
+      price_cents: 2900,
+      category: 'training_plan',
+      fulfilment: 'personalised',
+    }),
+  (r) => `fulfilment=${r.fulfilment}`,
+);
+const switched = (await db.listMyListings(COACH)).find((row) => row.id === switchable!.id);
+expectEqual('...the mode really changed', switched?.fulfilment, 'personalised');
+// The half a CHECK constraint enforces in SQL: a personalised offer may not
+// hold a path, so the switch has to clear it in the same write.
+expectEqual('...and the path went with it', switched?.asset_path, null);
+
+// --- clearing a file re-blocks claiming ------------------------------------
+await allows(
+  'the owner may clear the file from an instant offer',
+  () => db.setListingAsset(COACH, unreadyOffer!.id, `${unreadyOffer!.id}/temporary.pdf`),
+  (r) => `asset_path=${r.asset_path}`,
+);
+await allows(
+  '...and claiming it now works',
+  () => db.createOrder(AISHA, unreadyOffer!.id),
+  (r) => r.id,
+);
+const cleared = await allows(
+  'clearing it again is allowed',
+  () => db.setListingAsset(COACH, unreadyOffer!.id, null),
+  (r) => `asset_path=${String(r.asset_path)}`,
+);
+expectEqual('...the path is null', cleared?.asset_path, null);
+await refuses('...and a DIFFERENT learner can no longer claim it', 'invalid', () =>
+  db.createOrder(MARCUS, unreadyOffer!.id),
+);
+// The buyer who claimed it while the file was there keeps their order. A
+// withdrawn file is not a repossession.
+const keptOrder = (await db.listMyOrders(AISHA)).find((o) => o.listing_id === unreadyOffer!.id);
+expectEqual('the earlier buyer still holds their order', typeof keptOrder?.id, 'string');
+
+// ---------------------------------------------------------------------------
+section('Password reset — the link is a credential');
+// ---------------------------------------------------------------------------
+// The one flow that runs for a user who cannot prove who they are, so the token
+// carries the whole weight. Four properties are asserted, and each of them is
+// the difference between a reset flow and an account-takeover endpoint:
+// single use, expiry, supersession, and hashed at rest.
+//
+// A DEDICATED ACCOUNT. Every assertion below either changes a password or burns
+// a token, so doing it to a seeded actor would leave every earlier section's
+// credentials in a state later readers cannot predict.
+
+const RESET_EMAIL = 'reset@javelin.test';
+const RESET_FIRST_PASSWORD = 'reset-first-password';
+const resetUser = await allows(
+  'a fixture account for the reset flow',
+  () => db.signUp({ email: RESET_EMAIL, password: RESET_FIRST_PASSWORD, fullName: 'Rosa Setter' }),
+  (p) => p.id,
+);
+const RESET_ACTOR: Actor = { userId: resetUser!.id };
+
+// --- issuing ---------------------------------------------------------------
+const firstToken = await issueResetToken(RESET_EMAIL);
+expectEqual('a token is issued for a real address', typeof firstToken, 'string');
+expectEqual('...and is long enough not to be guessable', (firstToken ?? '').length >= 32, true);
+
+// THE ENUMERATION PROPERTY, at the layer that knows the answer. `null` and a
+// token are distinguishable HERE on purpose — the caller is what must not
+// distinguish them, and `requestPasswordReset` returns void so that it cannot.
+expectEqual('an unknown address mints nothing', await issueResetToken('nobody@javelin.test'), null);
+expectEqual('...and neither does an empty one', await issueResetToken(''), null);
+expectEqual('...and neither does a non-string', await issueResetToken(undefined as unknown as string), null);
+// Addresses are normalised the same way sign-in normalises them, or a user who
+// capitalises their own address is told there is no account.
+const casedToken = await issueResetToken('  RESET@Javelin.TEST  ');
+expectEqual('a differently-cased, padded address still finds the account', typeof casedToken, 'string');
+
+// --- hashed at rest --------------------------------------------------------
+// The row must not contain anything that could be replayed as a link. Asserted
+// against the STORE rather than against the return value, because that is what
+// a leaked `db.json` would hand over.
+const storedRows = await mutateDb((store) => store.password_resets.map((r) => ({ ...r })));
+expectEqual(
+  'no stored row holds a token in the clear',
+  storedRows.some((r) => r.token_hash === casedToken || r.token_hash === firstToken),
+  false,
+);
+expectEqual(
+  '...and the stored hash is the SHA-256 of the live token',
+  storedRows.some((r) => r.token_hash === hashToken(casedToken!)),
+  true,
+);
+
+// --- supersession ----------------------------------------------------------
+// `casedToken` was minted after `firstToken` for the same account, so the first
+// one is already dead. A forwarded first email must not stay live for its full
+// hour after the user asks again.
+expectEqual('minting a new token kills the older one', await redeemResetToken(firstToken!), null);
+
+// --- single use ------------------------------------------------------------
+expectEqual('the newest token redeems to its user', await redeemResetToken(casedToken!), resetUser!.id);
+expectEqual('...and is dead immediately afterwards', await redeemResetToken(casedToken!), null);
+
+// --- everything else is one answer ----------------------------------------
+for (const [shape, value] of [
+  ['a token that was never issued', 'not-a-real-token'],
+  ['an empty token', ''],
+  ['the stored HASH replayed as a token', hashToken(casedToken!)],
+] as Array<[string, string]>) {
+  expectEqual(`${shape} redeems to null`, await redeemResetToken(value), null);
+}
+
+// --- expiry ----------------------------------------------------------------
+// Aged by moving `expires_at` into the past rather than by waiting an hour.
+// The check reads the STORED expiry, so this is the same code path a genuinely
+// old token takes.
+const staleToken = await issueResetToken(RESET_EMAIL);
+await mutateDb((store) => {
+  const row = store.password_resets.find((r) => r.token_hash === hashToken(staleToken!));
+  if (row) row.expires_at = new Date(Date.now() - 1000).toISOString();
+});
+expectEqual('an expired token is refused', await redeemResetToken(staleToken!), null);
+// The control: without the ageing above, that same token would have worked.
+const freshToken = await issueResetToken(RESET_EMAIL);
+expectEqual('...while a fresh one issued the same way is accepted', await redeemResetToken(freshToken!), resetUser!.id);
+
+// --- updateMyPassword ------------------------------------------------------
+// The other half: once a session exists, the password write is an ordinary
+// actor-scoped row write and belongs to `DataClient`.
+await refuses('an anonymous caller cannot change a password', 'unauthorized', () =>
+  db.updateMyPassword(null, 'a-perfectly-good-password'),
+);
+for (const [shape, value] of [
+  ['a short password', 'short'],
+  ['an empty password', ''],
+  ['whitespace only', '        '],
+  ['a password longer than the scrypt cap', 'x'.repeat(201)],
+] as Array<[string, string]>) {
+  await refuses(`updateMyPassword rejects ${shape}`, 'invalid', () =>
+    db.updateMyPassword(RESET_ACTOR, value),
+  );
+}
+
+/*
+ * A PASSWORD IS NEVER TRIMMED, and this is a regression test for a lockout.
+ *
+ * `requireText` returns the trimmed string, so using it here — as `signUp` used
+ * to — stored `"  spaced out  "` as `"spaced out"` while `signInWithPassword`
+ * verifies the raw input. The account would have been unreachable with the
+ * password its owner typed, and reachable with one they never chose.
+ *
+ * Both halves are asserted, because storing the raw value is only half the fix:
+ * the trimmed form must NOT work either, or the trimming has just moved.
+ */
+const PADDED_PASSWORD = '  spaced out  ';
+await allows(
+  'a password with surrounding spaces is accepted verbatim',
+  () => db.updateMyPassword(RESET_ACTOR, PADDED_PASSWORD),
+  () => 'set',
+);
+expectEqual(
+  '...and signs in exactly as typed',
+  (await db.signInWithPassword({ email: RESET_EMAIL, password: PADDED_PASSWORD }))?.id,
+  resetUser!.id,
+);
+expectEqual(
+  '...while its trimmed form does NOT',
+  await db.signInWithPassword({ email: RESET_EMAIL, password: PADDED_PASSWORD.trim() }),
+  null,
+);
+// The same rule on the way IN, so an account cannot be created in the broken
+// state that this method can no longer produce.
+const paddedSignUp = await allows(
+  'signUp keeps a padded password verbatim too',
+  () => db.signUp({ email: 'padded@javelin.test', password: PADDED_PASSWORD, fullName: 'Pat Padded' }),
+  (p) => p.id,
+);
+expectEqual(
+  '...and that account signs in as typed',
+  (await db.signInWithPassword({ email: 'padded@javelin.test', password: PADDED_PASSWORD }))?.id,
+  paddedSignUp!.id,
+);
+expectEqual(
+  '...and not with the trimmed form',
+  await db.signInWithPassword({ email: 'padded@javelin.test', password: PADDED_PASSWORD.trim() }),
+  null,
+);
+// Put the fixture back on a known password for the assertions below.
+await db.updateMyPassword(RESET_ACTOR, RESET_FIRST_PASSWORD);
+// A forged actor cannot name somebody else: there is no subject parameter to
+// forge, which is the point of the shape. Asserted anyway, because "there is no
+// parameter" is a claim about the signature that a future edit could break.
+const RESET_NEW_PASSWORD = 'reset-second-password';
+await allows(
+  'the actor may change their OWN password',
+  () => db.updateMyPassword(RESET_ACTOR, RESET_NEW_PASSWORD),
+  () => 'changed',
+);
+expectEqual(
+  'the new password signs in',
+  (await db.signInWithPassword({ email: RESET_EMAIL, password: RESET_NEW_PASSWORD }))?.id,
+  resetUser!.id,
+);
+expectEqual(
+  '...and the old one no longer does',
+  await db.signInWithPassword({ email: RESET_EMAIL, password: RESET_FIRST_PASSWORD }),
+  null,
+);
+// Nobody else's credentials moved. The seeded coach is the control: if
+// `updateMyPassword` were resolving the wrong subject, this is what would break.
+expectEqual(
+  'no other account’s password was touched',
+  (await db.signInWithPassword({ email: 'coach@javelin.test', password: 'coach1234' }))?.id,
+  COACH!.userId,
+);
+// A new salt every time, so two identical passwords do not produce one hash —
+// and so "did it change?" is not answerable by comparing two leaked rows.
+const credentials = await mutateDb((store) => {
+  const row = store.auth_users.find((u) => u.email === RESET_EMAIL);
+  return row ? { hash: row.password_hash, salt: row.password_salt } : null;
+});
+await db.updateMyPassword(RESET_ACTOR, RESET_NEW_PASSWORD);
+const recredentials = await mutateDb((store) => {
+  const row = store.auth_users.find((u) => u.email === RESET_EMAIL);
+  return row ? { hash: row.password_hash, salt: row.password_salt } : null;
+});
+expectEqual('re-setting the SAME password re-salts', credentials?.salt === recredentials?.salt, false);
+expectEqual('...and therefore produces a different hash', credentials?.hash === recredentials?.hash, false);
+expectEqual(
+  '...and the password still works afterwards',
+  (await db.signInWithPassword({ email: RESET_EMAIL, password: RESET_NEW_PASSWORD }))?.id,
+  resetUser!.id,
 );
 
 // ---------------------------------------------------------------------------

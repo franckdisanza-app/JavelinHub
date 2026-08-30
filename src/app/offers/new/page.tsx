@@ -7,6 +7,7 @@ import { linkButtonClass } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { getDataClient } from '@/lib/data';
 import type { CoachStatus } from '@/lib/data/types';
+import { deliveryStorageAvailable } from '@/lib/storage/deliverables';
 import { requireUser } from '@/lib/auth/session';
 
 export const metadata: Metadata = { title: 'New offer' };
@@ -57,7 +58,12 @@ export default async function NewListingPage() {
           description="Learners see the title, price, your name and the description before they open it."
         />
         <CardBody>
-          <NewListingForm categories={categories} />
+          {/*
+            `deliveryStorageAvailable()` is a server-side read of the configured
+            backend, so it is resolved here and handed down — a Client Component
+            cannot ask which data backend the server is running.
+          */}
+          <NewListingForm categories={categories} storageAvailable={deliveryStorageAvailable()} />
         </CardBody>
       </Card>
     </div>

@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "verify:authz": "node --import ./scripts/register-ts.mjs scripts/verify-authz.mts",
     "verify:pages": "node --import ./scripts/register-ts.mjs scripts/verify-pages.mts",
+    "verify:supabase": "node --import ./scripts/register-ts.mjs scripts/verify-supabase.mts",
     "db:link": "supabase link --project-ref trocsdetpwyqcgyfclir",
     "db:push": "supabase db push"
   },

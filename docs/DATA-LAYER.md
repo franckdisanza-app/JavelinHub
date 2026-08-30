@@ -733,6 +733,65 @@ The consequence a page has to handle: a review's offer title should only be a
 **link** when that offer is still published, or the link is a 404. Build the
 published set from `listListingsByCoach` and check membership before linking.
 
+## Instant delivery: one public column, one that is not
+
+`listings` carries two delivery columns and they are governed differently on
+purpose.
+
+**`fulfilment` is public.** A buyer should know whether a thing downloads
+immediately or is made for them *before* they claim it, so `0011_delivery.sql`
+grants `select (fulfilment)` to `anon` and `authenticated`, and it is on
+`ListingWithCoach` like any other public column.
+
+**`asset_path` is not, and there is no grant that would make it so.** It is the
+key of an object in the private `offer-assets` bucket. A column grant is
+role-level, so granting it to `authenticated` would publish every coach's paths
+to every signed-in visitor through PostgREST. So the column stays revoked and
+the two people who legitimately need it reach it **row-wise, through a view**
+(0012), each scoped by `auth.uid()` inside the view:
+
+| view | who it serves | predicate |
+|---|---|---|
+| `owned_listings` | the coach who owns the offer | `coach_id = auth.uid()` |
+| `entitled_offer_assets` | that coach, or a learner holding an order for it | mirrors the `offer_assets_read_entitled` storage policy |
+
+This is the same instrument `owned_listings` already used for `deleted_by`, and
+the opposite conclusion: `deleted_by` is published as the derived boolean
+`withdrawn_by_admin` because the underlying value is somebody *else's* id, while
+`asset_path` is published as the string because it is the owner's own file and
+the editor needs the key.
+
+Consequences worth knowing before writing a page:
+
+* `OwnedListing` is the **only** listing shape carrying `asset_path`.
+  `ListingWithCoach` is `Omit<Listing, 'deleted_by' | 'asset_path'>`, so a public
+  read cannot leak it by being spread.
+* `OrderWithListing.asset_path` is `null` for an **admin** reading somebody
+  else's order. They can see the purchase happened; they are not handed the
+  file. Neither view has an admin arm and that is deliberate.
+* **A path is not a capability.** The bucket is private, so a leaked path buys
+  nothing: reading still goes through `offer_assets_read_entitled`, evaluated
+  against the reader's own session at the moment the URL is signed. The view
+  predicates are defence in depth, written to match that policy so the two
+  cannot drift into different answers.
+
+Two rules the write path enforces in both backends and in Postgres:
+
+1. **The mode is frozen at the first claim**, for an admin too. A buyer claimed
+   a thing that was going to arrive a particular way; flipping the mode
+   afterwards rewrites what they were promised. `guard_listing_update()` raises
+   it, so it is a rule about the offer rather than about who is asking.
+2. **A personalised offer may not hold a path** (`listings_asset_path_shape`), so
+   switching to personalised clears `asset_path` in the same statement. The
+   storage object is deleted by the caller *afterwards* — column first, bytes
+   second, so a failure leaves an invisible orphan rather than a live offer
+   pointing at nothing.
+
+An instant offer with a `null` path is legal and publishable — the path is
+pinned under the listing's own id, so the row has to exist before the file can
+be stored under it. It simply **cannot be claimed**: `claim_offer` refuses it,
+and the coach's dashboard flags it as *Needs a file*.
+
 ## Who may do what
 
 | Operation | Requirement |
@@ -742,6 +801,7 @@ published set from `listListingsByCoach` and check membership before linking.
 | `getListingForViewer` | none for a published offer; a withdrawn one needs the owner, an admin, or an order for it — everyone else gets `null` |
 | `listMyListings` | any signed-in actor; returns only their own offers |
 | `updateListing` | the offer's **owner**, whose stored `coach_status` is `'approved'` — **never an admin** |
+| `setListingAsset` | the same, and the offer must be `instant` — the file is CONTENT, so it carries `updateListing`'s asymmetry exactly |
 | `softDeleteListing` | the offer's owner (approval not required), **or an admin** |
 | `restoreListing` | an admin; or the owner, but only if the owner is who withdrew it — an admin takedown is `forbidden` to the coach |
 | `listListingRevisions` | the offer's owner, or an admin |
@@ -752,6 +812,7 @@ published set from `listListingsByCoach` and check membership before linking.
 | `listOrdersForCoach` | that coach, or an admin |
 | `createReview` | signed in, owns the order, has not reviewed it, is not the offer's coach |
 | `signUp`, `signInWithPassword` | none |
+| `updateMyPassword` | any signed-in actor, on their OWN password — there is no subject parameter to point elsewhere. Getting the session in the first place is where password reset does its work: see `src/lib/auth/password-reset.ts` |
 | `listMyOrders`, `createCoachApplication`, `getMyCoachApplication`, `redeemInviteCode` | any signed-in actor |
 | `createListing` | the actor's **stored** `coach_status` is `'approved'` |
 | `createInvite`, `listInvites`, `revokeInvite`, `listCoachApplications`, `reviewCoachApplication` | the actor's **stored** `role` is `'admin'` |
