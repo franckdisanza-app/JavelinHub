@@ -1163,6 +1163,92 @@ at `MAX_PAGE_SIZE` and throws rather than returning a prefix.
 **It is for writers that need the whole set, never for rendering.** Anywhere a
 human is looking at the result, a page is the right answer.
 
+## Caching
+
+Twelve public reads are cached. Everything else is not, and the line between them
+is the same line `publicClient.ts` draws: **a read may be cached only if its
+answer is the same for everybody.**
+
+```ts
+import { cachedListings } from '@/lib/data/cached';
+
+const page = await cachedListings({ q: 'javelin' }, { cursor });
+```
+
+`src/lib/data/cached.ts` is the whole list — browse, the coach directory, a
+coach's offers and reviews, an offer's reviews, and the aggregates. Purchases,
+sales, the coach dashboard, every admin queue and `getListingForViewer` are
+absent, because none of them is the same for two people.
+
+### The cookie-free client came first
+
+A cached read must not touch `cookies()` anywhere in its call stack, and every
+Supabase read used to go through a client built from the request's cookies. So
+`publicClient.ts` exists: one shared, session-less client that reaches Postgres
+as `anon`. RLS is still enforced — it is the publishable key, and there is still
+no service-role client under `src/` — but the policies are evaluated for a caller
+with no identity, which is exactly why only the public surface may use it. A read
+that returns more to a signed-in user would come back **empty rather than
+refused**, and an empty list is what "you have nothing" looks like.
+
+`supabaseClient.ts` routes eleven reads through `openPublicContext()`.
+`getListingForViewer` deliberately still uses the cookie client: its answer
+depends on who is looking.
+
+### Four tags, invalidated by every write
+
+`cache-tags.ts` defines `listings`, `coaches`, `reviews` and `stats`, and every
+Server Action that changes what a public read returns calls
+`invalidatePublicData(...)` after the write and before any redirect.
+
+The tags are **deliberately coarse**. Per-entity tags (`listing:<id>`) are more
+precise and would need every write to remember which ids it touched — and these
+writes touch more than they look like they do: withdrawing one offer changes the
+browse grid, the coach's profile, their card in the directory, the cross-sell
+grid on four other offers, and every aggregate on all of them. A stale page is a
+bug nobody reports, because it looks like a page. One coarse call that cannot be
+got wrong beats a precise one that can.
+
+`revalidateTag(tag, { expire: 0 })`, not the recommended `'max'`: that profile
+serves the old entry once more while a new one builds, and the caller is a coach
+who just pressed Publish and must see what they published.
+
+The 60-second `revalidate` is a backstop, not the mechanism. It covers the one
+case tags cannot: a row changed from outside the app — the SQL editor, the demo
+seed.
+
+### Why not Cache Components
+
+Next 16's `use cache` is the direction the framework is going. This app was built
+against it — `cacheComponents: true`, `<Suspense>` boundaries on all 23 pages,
+cached reads with `cacheLife`/`cacheTag` — measured, and then backed out. The
+reason is in the header of `cached.ts` in full; the short version:
+
+**Cache Components requires every route to produce a static shell, which commits
+the response status before the page runs.** Nearly every route here answers an
+authorization question with a status: `requireUser()` redirects, `requireAdmin()`
+and `notFound()` answer 404 so a page's existence is never confirmed to somebody
+who may not see it. Measured under `next start`, with the site header's session
+read behind the one boundary every route inherits from the root layout:
+
+| Route | Before | With Cache Components |
+|---|---|---|
+| `/settings`, signed out | `307 → /login?next=/settings` | `200`, no `Location`, `NEXT_REDIRECT` in the body |
+| `/admin/reports`, signed out | `307` | `200` |
+| `/offers/<unknown>` | `404` | `200` |
+
+A redirect only a JavaScript client follows, and a 404-versus-200 distinction
+that the admin routes rely on to hide their own existence, gone. The two ways out
+— moving the gates into `proxy.ts` (a second authorization implementation, for a
+role this app deliberately keeps out of the session cookie) or two root layouts
+(a full page load on every navigation between them) — were both worse than
+keeping the previous rendering model and caching the data.
+
+> **Local gotcha.** `unstable_cache` entries live in `.next/cache` and survive a
+> rebuild — including a change of `DATA_BACKEND`. Flipping between the mock and
+> Supabase locally without `rm -rf .next/cache` will serve the other backend's
+> rows, which looks exactly like a query bug.
+
 ## Server-only
 
 `src/lib/data/**` uses `node:fs` and `node:crypto`. Import it from server

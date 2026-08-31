@@ -356,9 +356,31 @@ them twice is how the two diverge.
   now throttled — but `generateInviteCode()` draws 12 characters from a
   30-character alphabet, which is 30¹² ≈ 2⁵⁹. That is not a guessing target, and
   leaving the claim in place dilutes the limits that were real.
-* **No caching.** Every route renders dynamically (`ƒ` in the build output).
-  `/offers` and `/coaches` are public reads and should not be.
+* ~~**No caching.**~~ **Done.** Twelve public reads — browse, the coach
+  directory, a coach's offers and reviews, an offer's reviews, and every
+  aggregate — are cached with `unstable_cache`, tagged, and expired by every
+  write that can make them stale. Measured under `next start`: `/offers` 712ms
+  cold, 25ms warm; `/coaches` 165ms then 13ms.
 
+  The prerequisite was a **cookie-free Supabase client**. A cached read must not
+  touch `cookies()` anywhere in its call stack, and every read went through a
+  client built from the request's cookies. `publicClient.ts` is one shared
+  session-less client that reaches Postgres as `anon` — RLS still enforced, still
+  no service-role client under `src/` — and only the public surface may use it,
+  because a read that returns more to a signed-in user would come back EMPTY
+  rather than refused.
+
+  **Cache Components was built, measured and backed out.** `cacheComponents:
+  true` with `<Suspense>` on all 23 pages works, and it commits the response
+  status before the page runs — so `/settings` answered `200` with no `Location`
+  and `NEXT_REDIRECT` in the body, `/admin/reports` answered `200` to a signed-out
+  visitor, and an unknown offer answered `200` instead of `404`. Nearly every
+  route here answers an authorization question with a status code, and the admin
+  routes rely on 404-versus-200 to hide their own existence. Moving the gates
+  into middleware would mean a second authorization implementation for a role
+  this app deliberately keeps out of the session cookie; two root layouts would
+  make every navigation between them a full page load. `docs/DATA-LAYER.md`
+  carries the table and the reasoning.
 ---
 
 ## 7. Trust, safety, operations

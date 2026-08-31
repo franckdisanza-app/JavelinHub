@@ -4,6 +4,11 @@ import { revalidatePath } from 'next/cache';
 
 import { getActor } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import {
+  CACHE_TAGS,
+  invalidateAllPublicData,
+  invalidatePublicData,
+} from '@/lib/data/cache-tags';
 import { drainAll } from '@/lib/data/pagination';
 import { isDataError } from '@/lib/data/types';
 import { formError, formSuccess, toFormState, type FormState } from '@/lib/forms';
@@ -92,9 +97,10 @@ export async function setCoachStandingAction(_prev: FormState, formData: FormDat
   }
 
   // Their offers vanished from browse, from search, from the coach profile and
-  // from the cross-sell grids. `'/'` + `'layout'` is the blunt instrument that
-  // covers every surface that was showing them — the same reasoning as
-  // `removeReviewAction`.
+  // from the cross-sell grids; they left the directory; every aggregate that
+  // counted their sales moved. This is the one write whose blast radius
+  // genuinely is everything public.
+  await invalidateAllPublicData();
   revalidatePath('/', 'layout');
 
   return formSuccess(describe(status, withdrawn));
@@ -118,6 +124,7 @@ export async function restoreCoachListingAction(_prev: FormState, formData: Form
     return toFormState(error);
   }
 
+  await invalidatePublicData(CACHE_TAGS.listings);
   revalidatePath('/', 'layout');
   return formSuccess('Back on sale.');
 }

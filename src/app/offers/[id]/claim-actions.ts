@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 
 import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError } from '@/lib/data/types';
 import { formError, toFormState, type FormState } from '@/lib/forms';
 
@@ -43,6 +44,9 @@ export async function claimOfferAction(_prev: FormState, formData: FormData): Pr
 
   // The sales count on this offer, on the coach's page and on every card that
   // shows it are all stale now.
+  // A claim moves the offer's sale count and the coach's, both of which are
+  // rendered on cards a stranger sees.
+  await invalidatePublicData(CACHE_TAGS.stats);
   revalidatePath('/', 'layout');
 
   redirect('/purchases?claimed=1');

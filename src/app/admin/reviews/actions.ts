@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 
 import { getActor } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError } from '@/lib/data/types';
 import { formError, toFormState, type FormState } from '@/lib/forms';
 
@@ -51,6 +52,9 @@ export async function removeReviewAction(_prev: FormState, formData: FormData): 
    * and `'/'` + `'layout'` is the blunt instrument that covers every surface
    * that was counting it.
    */
+  // The row is DELETED, so every aggregate over it changes too — the same
+  // reasoning the `revalidatePath('/', 'layout')` below already carried.
+  await invalidatePublicData(CACHE_TAGS.reviews, CACHE_TAGS.stats);
   revalidatePath('/', 'layout');
 
   // No redirect: the queue is the current page and the revalidation re-renders

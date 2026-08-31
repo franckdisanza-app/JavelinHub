@@ -13,13 +13,19 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardBody } from '@/components/ui/card';
 import { Rating, Stat, StatEmpty } from '@/components/ui/stat';
 import { getActor } from '@/lib/auth/session';
-import { getDataClient } from '@/lib/data';
+import {
+  cachedCoachStats,
+  cachedListingsByCoach,
+  cachedOfferStatsFor,
+  cachedPublicCoach,
+  cachedReviewsForCoach,
+} from '@/lib/data/cached';
 import type { PublicReviewWithListing } from '@/lib/data/types';
 import { firstValue } from '@/lib/search-params';
 
 export async function generateMetadata({ params }: PageProps<'/coaches/[id]'>): Promise<Metadata> {
   const { id } = await params;
-  const coach = await getDataClient().getPublicCoach(id);
+  const coach = await cachedPublicCoach(id);
   // A missing coach renders `not-found`, so the title must not assert one exists.
   return { title: coach ? coach.full_name : 'Coach not found' };
 }
@@ -61,9 +67,8 @@ export async function generateMetadata({ params }: PageProps<'/coaches/[id]'>): 
  */
 export default async function CoachProfilePage({ params, searchParams }: PageProps<'/coaches/[id]'>) {
   const { id } = await params;
-  const db = getDataClient();
 
-  const coach = await db.getPublicCoach(id);
+  const coach = await cachedPublicCoach(id);
   if (!coach) notFound();
 
   /*
@@ -78,12 +83,12 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
   const reviewCursor = firstValue(search.reviews).trim();
 
   const [stats, offerPage, reviewPage] = await Promise.all([
-    db.getCoachStats(coach.id),
+    cachedCoachStats(coach.id),
     // Public, published-only. `actor` is accepted for interface symmetry and is
     // not consulted — this read is deliberately not dual-mode, so it can never
     // be talked into returning somebody's withdrawn offers.
-    db.listListingsByCoach(null, coach.id, { cursor: offerCursor || undefined }),
-    db.listReviewsForCoach(coach.id, { cursor: reviewCursor || undefined }),
+    cachedListingsByCoach(coach.id, { cursor: offerCursor || undefined }),
+    cachedReviewsForCoach(coach.id, { cursor: reviewCursor || undefined }),
   ]);
   const offers = offerPage.items;
   const reviews = reviewPage.items;
@@ -98,7 +103,7 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
   // epoch and every withdrawn offer. They are supposed to disagree, and the
   // cards showing their own smaller numbers is what makes that visible rather
   // than mysterious. Do not reconcile them.
-  const offerStats = await db.listOfferStats(offers.map((offer) => offer.id));
+  const offerStats = await cachedOfferStatsFor(offers.map((offer) => offer.id));
   const offerStatsById = new Map(offerStats.map((stats) => [stats.listing_id, stats]));
 
   const backHref = buildBackHref(firstValue(search.q).trim());

@@ -149,6 +149,7 @@ import {
   requireText,
 } from '../validation';
 import { throwDataError } from './errors';
+import { publicSupabase } from './publicClient';
 import { createSupabaseServerClient } from './serverClient';
 
 // ---------------------------------------------------------------------------
@@ -350,6 +351,26 @@ async function openContext(): Promise<Ctx> {
   const supabase = await createSupabaseServerClient();
   const { data, error } = await supabase.auth.getUser();
   return { supabase, userId: error ? null : (data.user?.id ?? null) };
+}
+
+/**
+ * A context with NO SESSION, for reads whose answer is the same for everybody.
+ *
+ * It still awaits, but for nothing that touches the request: no cookies to read
+ * and no token to validate against the auth server. That is the whole
+ * difference, and it is what lets these reads run inside a `use cache` scope —
+ * see `publicClient.ts` for the rule about which reads may use it, why the list
+ * is short, and why building the client is asynchronous at all.
+ *
+ * `userId: null` is not a placeholder, it is the truth: Postgres will evaluate
+ * every policy for `anon`. It reaches `throwDataError(error, false)` below,
+ * which maps a 42501 to `unauthorized` ("sign in") rather than `forbidden`
+ * ("not yours") — the honest reading of a refusal aimed at a request that
+ * carried no identity. None of these reads should ever produce one: every
+ * relation they touch is granted to `anon` and carries its own predicate.
+ */
+async function openPublicContext(): Promise<Ctx> {
+  return { supabase: await publicSupabase(), userId: null };
 }
 
 interface AuthedCtx extends Ctx {
@@ -938,7 +959,7 @@ export class SupabaseDataClient implements DataClient {
     const unique = [...new Set(userIds)].filter((id) => typeof id === 'string' && id !== '');
     if (unique.length === 0) return [];
 
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
     const { data, error } = await ctx.supabase
       .from('public_profiles')
       .select('id, full_name, is_approved_coach, avatar_path')
@@ -1006,7 +1027,7 @@ export class SupabaseDataClient implements DataClient {
 
   async getPublicProfile(userId: string): Promise<PublicProfile | null> {
     if (typeof userId !== 'string' || userId === '') return null;
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
 
     const { data, error } = await ctx.supabase
       .from('public_profiles')
@@ -1028,7 +1049,7 @@ export class SupabaseDataClient implements DataClient {
     const q = typeof filter?.q === 'string' ? filter.q.trim() : '';
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.coaches, page?.cursor);
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
 
     // The approval predicate lives INSIDE public_coaches, so there is nothing
     // to filter on here and no way for a caller to widen the result.
@@ -1070,7 +1091,7 @@ export class SupabaseDataClient implements DataClient {
 
   async getPublicCoach(coachId: string): Promise<PublicCoach | null> {
     if (typeof coachId !== 'string' || coachId === '') return null;
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
 
     // A non-approved id simply matches no row here, which is deliberately
     // indistinguishable from an id that does not exist.
@@ -1314,7 +1335,7 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(spec, page?.cursor);
 
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
 
     // Assembled once as a closure so `runPaged` can run the same filters twice —
     // with the keyset for the rows, without it for the count. See `runPaged`.
@@ -1365,7 +1386,7 @@ export class SupabaseDataClient implements DataClient {
 
   async getListing(id: string): Promise<ListingWithCoach | null> {
     if (typeof id !== 'string' || id === '') return null;
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
 
     const { data, error } = await ctx.supabase
       .from('listings')
@@ -1485,7 +1506,7 @@ export class SupabaseDataClient implements DataClient {
     void actor;
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.coachListings, page?.cursor);
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
 
     const { data, error, count } = await runPaged(
       (opts: CountOptions) => ctx.supabase
@@ -1896,7 +1917,7 @@ export class SupabaseDataClient implements DataClient {
     const ids = listingIds.filter((id) => typeof id === 'string' && isUuid(id));
     if (ids.length === 0) return [];
 
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
     const { data, error } = await ctx.supabase
       .from('offer_stats')
       .select('listing_id, rating_average, review_count, sales_count')
@@ -1955,7 +1976,7 @@ export class SupabaseDataClient implements DataClient {
       return coachIds.map((id) => emptyCoachStats(typeof id === 'string' && id !== '' ? id : ''));
     }
 
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
     const { data, error } = await ctx.supabase
       .from('coach_stats')
       .select('coach_id, rating_average, review_count, sales_count')
@@ -1994,7 +2015,7 @@ export class SupabaseDataClient implements DataClient {
     if (typeof listingId !== 'string' || listingId === '') return emptyPage();
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.listingReviews, page?.cursor);
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
 
     const { data, error, count } = await runPaged(
       (opts: CountOptions) => ctx.supabase
@@ -2110,7 +2131,7 @@ export class SupabaseDataClient implements DataClient {
     if (typeof coachId !== 'string' || coachId === '') return emptyPage();
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.coachReviews, page?.cursor);
-    const ctx = await openContext();
+    const ctx = await openPublicContext();
 
     // `listing_published` is projected by the view (0026) rather than worked out
     // here by intersecting with the coach's offer list — that intersection is

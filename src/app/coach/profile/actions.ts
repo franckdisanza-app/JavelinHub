@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 
 import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { COACH_BIO_MAX, COACH_HEADLINE_MAX, COACH_YEARS_COACHING_MAX, isDataError } from '@/lib/data/types';
 import { fieldError, toFormState, type FormState } from '@/lib/forms';
 
@@ -74,6 +75,9 @@ export async function updateCoachProfileAction(_prev: FormState, formData: FormD
   // The three columns are published through `public_coaches`, so the directory
   // and this coach's public page are both stale now. `'/'`+`'layout'` covers
   // every route under the root layout, which is all of them.
+  // The headline and bio are the coach's card in the directory and the top of
+  // their public profile.
+  await invalidatePublicData(CACHE_TAGS.coaches);
   revalidatePath('/', 'layout');
 
   // Redirect rather than returning a success state, for the reason given in

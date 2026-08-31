@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 
 import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError } from '@/lib/data/types';
 import { formError, toFormState, type FormState } from '@/lib/forms';
 import { checkDeliveryFile, deleteDeliveryFile, uploadDeliveryFile } from '@/lib/storage/deliverables';
@@ -150,6 +151,9 @@ export async function createReviewAction(_prev: FormState, formData: FormData): 
 
   // The review changes the offer's public rating and the coach's account
   // rating, so this is not confined to the order page.
+  // A review changes the text on two pages and the rating on every card that
+  // names the offer or the coach.
+  await invalidatePublicData(CACHE_TAGS.reviews, CACHE_TAGS.stats);
   revalidatePath('/', 'layout');
   redirect(`/orders/${orderId}?reviewed=1`);
 }

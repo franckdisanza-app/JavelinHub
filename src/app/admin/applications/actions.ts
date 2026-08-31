@@ -6,6 +6,7 @@ import { redirect } from 'next/navigation';
 import { parseFilter } from '@/app/admin/applications/filters';
 import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError } from '@/lib/data/types';
 import { formError, type FormState } from '@/lib/forms';
 
@@ -73,6 +74,10 @@ export async function reviewApplicationAction(_prev: FormState, formData: FormDa
 
   if (needsLogin) redirect(loginPath(ADMIN_APPLICATIONS_PATH));
 
+  // An approval adds a row to the public coach directory. A rejection does not,
+  // but this action does not branch on the decision and a wasted invalidation
+  // costs one query — where a missed one leaves a coach invisible.
+  await invalidatePublicData(CACHE_TAGS.coaches);
   revalidatePath(ADMIN_APPLICATIONS_PATH);
 
   // The decided row leaves the pending queue, which unmounts the component

@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 
 import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError } from '@/lib/data/types';
 import type { FormState } from '@/lib/forms';
 import { clientIp } from '@/lib/client-ip';
@@ -79,6 +80,9 @@ export async function redeemInviteAction(_prev: FormState, formData: FormData): 
   // The user's role and coach_status just changed. The header is rendered from
   // the profile in the root layout, so without this the nav would keep showing
   // "Become a coach" to someone who is now a coach.
+  // They are an approved coach as of this call, which means a new row in the
+  // public directory.
+  await invalidatePublicData(CACHE_TAGS.coaches);
   revalidatePath('/', 'layout');
 
   // Redirect rather than return a success state. That revalidation re-renders

@@ -8,7 +8,12 @@ import { Button, linkButtonClass } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { getDataClient } from '@/lib/data';
+import {
+  cachedCategories,
+  cachedListings,
+  cachedOfferStatsFor,
+  cachedPublicProfiles,
+} from '@/lib/data/cached';
 import { emptyPage } from '@/lib/data/pagination';
 import type { ListingWithCoach } from '@/lib/data/types';
 import {
@@ -91,14 +96,13 @@ export default async function OffersPage({
   const sort: ListingSort = isListingSort(rawSort) ? rawSort : 'newest';
   const cursor = firstValue(params.after).trim();
 
-  const db = getDataClient();
   const [page, categories] = await Promise.all([
     // Short-circuited rather than queried: `listListings` would also return an
     // empty page for an out-of-taxonomy slug, but not asking is clearer than
     // relying on it.
     unknownCategory
       ? Promise.resolve(emptyPage<ListingWithCoach>())
-      : db.listListings(
+      : cachedListings(
           {
             q: q || undefined,
             category: category ?? undefined,
@@ -108,7 +112,7 @@ export default async function OffersPage({
           },
           { cursor: cursor || undefined },
         ),
-    db.listCategories(),
+    cachedCategories(),
   ]);
   const listings = page.items;
 
@@ -132,12 +136,12 @@ export default async function OffersPage({
   // at all is better than a caller that relies on a promise.
   // ---------------------------------------------------------------------------
   const [offerStats, coachProfiles] = await Promise.all([
-    db.listOfferStats(listings.map((listing) => listing.id)),
+    cachedOfferStatsFor(listings.map((listing) => listing.id)),
     // BY THE IDS ON THIS PAGE, not the whole coach directory. The directory is
     // itself a page now, so asking it would answer "is this coach approved?"
     // with "they were not in the first 24", and a coach further down the list
     // would silently stop being a link.
-    db.listPublicProfiles(listings.map((listing) => listing.coach_id)),
+    cachedPublicProfiles(listings.map((listing) => listing.coach_id)),
   ]);
   const statsById = new Map(offerStats.map((stats) => [stats.listing_id, stats]));
   // Which coach names may be links. `getPublicCoach` — and this directory read —

@@ -7,7 +7,7 @@ import { Alert } from '@/components/ui/alert';
 import { Button, linkButtonClass } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
-import { getDataClient } from '@/lib/data';
+import { cachedCoachStatsFor, cachedCoaches } from '@/lib/data/cached';
 import { firstValue } from '@/lib/search-params';
 
 /**
@@ -53,13 +53,12 @@ export default async function CoachesPage({ searchParams }: PageProps<'/coaches'
 
   const cursor = firstValue(params.after).trim();
 
-  const db = getDataClient();
-  const page = await db.listCoaches({ q: q || undefined }, { cursor: cursor || undefined });
+  const page = await cachedCoaches({ q: q || undefined }, { cursor: cursor || undefined });
   const coaches = page.items;
   // One row per id, in the order given — `listCoachStats` never drops one, so
   // the zip below cannot slip. Batched over THIS PAGE's ids, which is what
   // keeps a directory of any size to two reads.
-  const stats = await db.listCoachStats(coaches.map((coach) => coach.id));
+  const stats = await cachedCoachStatsFor(coaches.map((coach) => coach.id));
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-10 sm:px-6 sm:py-14">

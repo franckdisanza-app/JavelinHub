@@ -6,6 +6,7 @@ import { redirect } from 'next/navigation';
 import { banAuthUser } from '@/lib/auth/account-deletion';
 import { destroySession, getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { drainAll } from '@/lib/data/pagination';
 import { isDataError } from '@/lib/data/types';
 import { fieldError, formError, toFormState, type FormState } from '@/lib/forms';
@@ -63,6 +64,9 @@ export async function updateNameAction(_prev: FormState, formData: FormData): Pr
 
   // Not confined to this page: the header, the coach directory card and every
   // review this person has written all render the name.
+  // The display name and picture are on the coach directory card, the public
+  // profile, and every review byline.
+  await invalidatePublicData(CACHE_TAGS.coaches, CACHE_TAGS.reviews);
   revalidatePath('/', 'layout');
   return { status: 'success', values };
 }
@@ -125,6 +129,9 @@ export async function updateAvatarAction(_prev: FormState, formData: FormData): 
 
   // The picture is on the coach directory card and the coach profile page, so
   // this is not confined to settings either.
+  // The display name and picture are on the coach directory card, the public
+  // profile, and every review byline.
+  await invalidatePublicData(CACHE_TAGS.coaches, CACHE_TAGS.reviews);
   revalidatePath('/', 'layout');
   return { status: 'success' };
 }
@@ -178,6 +185,9 @@ export async function changeEmailAction(_prev: FormState, formData: FormData): P
 
   // The address is rendered in the header on neither backend, but `profiles`
   // is read by the layout and a mock change lands immediately.
+  // The display name and picture are on the coach directory card, the public
+  // profile, and every review byline.
+  await invalidatePublicData(CACHE_TAGS.coaches, CACHE_TAGS.reviews);
   revalidatePath('/', 'layout');
 
   // The two arms carry different truths, so the form is told which one happened
@@ -243,6 +253,9 @@ export async function changePasswordAction(_prev: FormState, formData: FormData)
 
   // GoTrue rotates the session's tokens as part of the change, and the layout
   // re-render is how the new pair reaches the browser.
+  // The display name and picture are on the coach directory card, the public
+  // profile, and every review byline.
+  await invalidatePublicData(CACHE_TAGS.coaches, CACHE_TAGS.reviews);
   revalidatePath('/', 'layout');
   return { status: 'success' };
 }
@@ -326,6 +339,9 @@ export async function deleteAccountAction(_prev: FormState, formData: FormData):
 
   // Step 4.
   await destroySession();
+  // The display name and picture are on the coach directory card, the public
+  // profile, and every review byline.
+  await invalidatePublicData(CACHE_TAGS.coaches, CACHE_TAGS.reviews);
   revalidatePath('/', 'layout');
   redirect('/?deleted=1');
 }

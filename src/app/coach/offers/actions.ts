@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 
 import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError, isFulfilmentMode, isListingCategory } from '@/lib/data/types';
 import {
   checkDeliveryFile,
@@ -135,6 +136,7 @@ export async function updateOfferAction(_prev: FormState, formData: FormData): P
   // The offer's own page, the browse grid and the coach's public page all show
   // this row. `'/'`+`'layout'` is the blunt instrument that covers all of them
   // plus the dashboard itself.
+  await invalidatePublicData(CACHE_TAGS.listings);
   revalidatePath('/', 'layout');
 
   redirect(`${DASHBOARD_PATH}?saved=${encodeURIComponent(id)}`);
@@ -215,6 +217,7 @@ export async function setOfferAssetAction(_prev: FormState, formData: FormData):
 
   // Whether an instant offer is claimable at all turns on this file, and that
   // shows on the offer page as well as on the dashboard.
+  await invalidatePublicData(CACHE_TAGS.listings);
   revalidatePath('/', 'layout');
 
   // No redirect: the editor is already the current page, and the revalidation
@@ -262,6 +265,7 @@ async function setWithdrawn(formData: FormData, mode: 'withdraw' | 'restore'): P
 
   // Withdrawal removes the offer from every public read and restoration puts it
   // back, so this is not confined to the dashboard.
+  await invalidatePublicData(CACHE_TAGS.listings);
   revalidatePath('/', 'layout');
 
   // No redirect: the dashboard is already the current page and the revalidation

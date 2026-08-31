@@ -5,6 +5,7 @@ import { redirect } from 'next/navigation';
 
 import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError, isFulfilmentMode, isListingCategory } from '@/lib/data/types';
 import {
   checkDeliveryFile,
@@ -175,6 +176,10 @@ export async function createListingAction(_prev: FormState, formData: FormData):
   if (needsLogin) redirect(loginPath(NEW_OFFER_PATH));
 
   // The offers page is a different route and now has one more offer on it.
+  // A new offer belongs in the browse grid and on its coach's profile
+  // immediately — the coach is redirected to it and would otherwise land on a
+  // page that does not list what they just published.
+  await invalidatePublicData(CACHE_TAGS.listings);
   revalidatePath('/offers');
 
   if (attachFailed) redirect(`/coach/offers/${createdId}/edit?attach=failed`);

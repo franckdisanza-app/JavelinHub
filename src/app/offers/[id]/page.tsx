@@ -14,6 +14,13 @@ import { ClaimForm } from '@/app/offers/[id]/claim-form';
 import { getActor } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import {
+  cachedListingsByCoach,
+  cachedOfferStats,
+  cachedOfferStatsFor,
+  cachedPublicCoach,
+  cachedReviewsForListing,
+} from '@/lib/data/cached';
+import {
   FULFILMENT_LABELS,
   isListingCategory,
   listingCategoryLabel,
@@ -136,22 +143,22 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
   const reviewCursor = firstValue(search.after).trim();
 
   const [stats, reviewPage, coach, coachOffers] = await Promise.all([
-    db.getOfferStats(listing.id),
-    db.listReviewsForListing(listing.id, { cursor: reviewCursor || undefined }),
+    cachedOfferStats(listing.id),
+    cachedReviewsForListing(listing.id, { cursor: reviewCursor || undefined }),
     // `null` for an unknown id AND for anyone who is not an approved coach —
     // the two are deliberately indistinguishable. It gates the cross-links
     // below rather than being rendered: a coach can be de-approved while their
     // offers stay published (file an application, redeem an invite code, which
     // approves without closing the application, then have that application
     // rejected), and an unconditional link to `/coaches/<id>` would 404.
-    db.getPublicCoach(listing.coach_id),
+    cachedPublicCoach(listing.coach_id),
     // Public and published-only, like every other public listing read. The
     // actor argument exists for interface symmetry and does not widen it.
     //
     // ONE MORE THAN THE CAP, because this offer is almost always among them and
     // is filtered out below — asking for exactly four would show three whenever
     // it was.
-    db.listListingsByCoach(null, listing.coach_id, { limit: MORE_OFFERS_SHOWN + 1 }),
+    cachedListingsByCoach(listing.coach_id, { limit: MORE_OFFERS_SHOWN + 1 }),
   ]);
 
   const reviews = reviewPage.items;
@@ -160,7 +167,7 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
   // Batched, and keyed by id rather than zipped by index: `listOfferStats`
   // drops ids it has no row for, so a positional zip would misalign and print
   // one offer's rating under another offer's title.
-  const shownOfferStats = await db.listOfferStats(shownOffers.map((offer) => offer.id));
+  const shownOfferStats = await cachedOfferStatsFor(shownOffers.map((offer) => offer.id));
   const shownStatsById = new Map(shownOfferStats.map((row) => [row.listing_id, row]));
 
   // Have they already claimed this? ONE LOOKUP, not a scan of their purchase
