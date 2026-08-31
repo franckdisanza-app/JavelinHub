@@ -183,6 +183,7 @@ async function plantFixtures(): Promise<{
   resetUserId: string;
   resetToken: string;
   adminId: string;
+  withdrawnOfferBuyerId: string;
 }> {
   const db = getDataClient();
 
@@ -279,6 +280,15 @@ async function plantFixtures(): Promise<{
   // review (account-level aggregates ignore `deleted_at`) while its title stops
   // being a link, because the offer is now a 404 for the public.
   await db.softDeleteListing(CORY, OFFER.video);
+
+  // WHO BOUGHT THE OFFER THAT WAS JUST WITHDRAWN. Looked up rather than
+  // hardcoded: the seed picks the buyer, and an assertion that pins a name the
+  // seed chose is one that breaks when the seed is reshuffled for an unrelated
+  // reason. This buyer is the person the tombstone exists for.
+  const withdrawnBuyer = await mutateDb(
+    (store) => store.orders.find((o) => o.listing_id === OFFER.video)?.learner_id ?? null,
+  );
+  if (!withdrawnBuyer) throw new Error('fixture: the withdrawn offer has no buyer to assert with');
 
   // An ADMIN TAKEDOWN, which the seed has no example of and which
   // /coach/offers renders differently from a coach's own withdrawal: no Restore
@@ -402,6 +412,7 @@ async function plantFixtures(): Promise<{
     resetUserId: reset.id,
     resetToken,
     adminId: adminProfile.id,
+    withdrawnOfferBuyerId: withdrawnBuyer,
   };
 }
 
@@ -1619,6 +1630,71 @@ try {
   // asserted has "Nothing has been sent yet".
   check('a personalised order still has no download section',
     buyerOrder.text.includes('Your download'), false);
+
+  // -------------------------------------------------------------------------
+  section('/offers/[id] — the tombstone, and the dead link it replaces');
+
+  /*
+   * THE REGRESSION THIS SECTION EXISTS FOR. `/purchases` has always rendered an
+   * unconditional "View the offer" link, under a comment claiming it was "only
+   * rendered when there is somewhere to go". It was not — and a withdrawn offer
+   * had no page — so a buyer whose coach took an offer down followed their own
+   * purchase history straight into the 404.
+   *
+   * Asserted as a round trip rather than as markup: scrape the href the buyer
+   * would actually click, then follow it.
+   */
+  const buyerPurchases = await getAs('/purchases', fixtures.withdrawnOfferBuyerId);
+  check('the buyer of the withdrawn offer still sees their purchase',
+    buyerPurchases.text.includes('Video Analysis'), true);
+  check('...with a link to the offer',
+    buyerPurchases.html.includes(`href="/offers/${OFFER.video}"`), true);
+  check('...which no longer 404s',
+    (await getAs(`/offers/${OFFER.video}`, fixtures.withdrawnOfferBuyerId)).status, 200);
+
+  const tombstone = await getAs(`/offers/${OFFER.video}`, fixtures.withdrawnOfferBuyerId);
+  check('...and says what happened', tombstone.text.includes('No longer available'), true);
+  check('...with the date it happened', /Withdrawn on/.test(tombstone.text), true);
+  check('...and reassures them their order is untouched',
+    tombstone.text.includes('still in your purchases'), true);
+
+  /*
+   * WHAT THE TOMBSTONE MUST NOT OFFER. The offer is off sale and `claim_offer`
+   * would refuse it, so a claim control would be a button whose only outcome is
+   * an error — the same rule the dashboard follows about Restore.
+   */
+  check('the tombstone offers no way to claim', tombstone.html.includes('name="listingId"'), false);
+  // The CONTROL for that negative, and it needs one: a page that failed to
+  // render at all would also contain no `name="listingId"`. A PUBLISHED offer
+  // does contain it, so the input name is real and the assertion above bites.
+  check('control: a published offer DOES carry the claim input',
+    (await get(`/offers/${OFFER.fundamentals}`)).html.includes('name="listingId"'), true);
+  // Every rating read filters `deleted_at`, so these would be empty anyway;
+  // rendering "No reviews yet" over an offer that HAS one would be a lie told
+  // by an empty query.
+  check('...and no reviews section', tombstone.text.includes('No reviews yet'), false);
+  check('...and no cross-sell grid', tombstone.text.includes('More offers from'), false);
+
+  // The other two entitled viewers.
+  check('the coach who withdrew it sees the tombstone',
+    (await getAs(`/offers/${OFFER.video}`, COACH)).status, 200);
+  check('an admin sees it too',
+    (await getAs(`/offers/${OFFER.video}`, fixtures.adminId)).status, 200);
+
+  /*
+   * AND THE BOUNDARY, which is the half that makes the rest safe. A signed-in
+   * stranger gets the same 404 the public gets — a refusal would confirm that
+   * something once existed at this id, which is the one fact withdrawal
+   * retracts.
+   */
+  check('a signed-in stranger still gets 404',
+    (await getAs(`/offers/${OFFER.video}`, fixtures.soldUnreviewedCoachId)).status, 404);
+  check('...and so does the public', await status(`/offers/${OFFER.video}`), 404);
+
+  // The tab title follows the same rule, or the tombstone renders under
+  // "Offer not found" for exactly the people entitled to read it.
+  check('the entitled viewer’s tab title names the offer',
+    /<title>[^<]*Video Analysis/i.test(tombstone.html), true);
 
   // -------------------------------------------------------------------------
   section('/admin/reviews — moderation, and who is told it exists');

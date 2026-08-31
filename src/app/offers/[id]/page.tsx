@@ -11,7 +11,13 @@ import { Rating, Stat, StatEmpty } from '@/components/ui/stat';
 import { ClaimForm } from '@/app/offers/[id]/claim-form';
 import { getActor } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
-import { FULFILMENT_LABELS, isListingCategory, listingCategoryLabel } from '@/lib/data/types';
+import {
+  FULFILMENT_LABELS,
+  isListingCategory,
+  listingCategoryLabel,
+  type ListingWithCoach,
+  type PublicCoach,
+} from '@/lib/data/types';
 import { firstValue } from '@/lib/search-params';
 import { formatDate, formatPrice } from '@/lib/format';
 
@@ -31,9 +37,18 @@ const MORE_OFFERS_SHOWN = 4;
 
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { id } = await params;
-  const listing = await getDataClient().getListing(id);
-  // A missing listing renders `not-found`, so the title must not assert one exists.
-  return { title: listing ? listing.title : 'Offer not found' };
+  /*
+   * VIEWER-AWARE, like the page body. `getListing` filters withdrawn offers, so
+   * using it here would put "Offer not found" in the tab title of a page that is
+   * rendering a tombstone perfectly well — and would do it only for the three
+   * people entitled to see one, which is a confusing way to treat exactly the
+   * users this route was extended for.
+   *
+   * It leaks nothing extra: the same read decides what the body renders, and a
+   * stranger still gets `null` and the not-found title.
+   */
+  const detail = await getDataClient().getListingForViewer(await getActor(), id);
+  return { title: detail ? detail.listing.title : 'Offer not found' };
 }
 
 /**
@@ -69,8 +84,49 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 export default async function OfferDetailPage({ params, searchParams }: PageProps) {
   const { id } = await params;
   const db = getDataClient();
-  const listing = await db.getListing(id);
-  if (!listing) notFound();
+
+  /*
+   * Who is looking is decided FIRST now, because it decides what this page is.
+   *
+   * `getListingForViewer` replaces `getListing` here, and the difference is the
+   * whole point of that method: a withdrawn offer is a 404 for the public and a
+   * TOMBSTONE for its owner, an admin, and anyone holding an order for it. It
+   * was the last method in the interface with no caller, and the gap it left was
+   * invisible only because nothing linked a buyer to a withdrawn offer — which
+   * `/purchases` and `/orders/[id]` now do.
+   *
+   * `null` is still a 404 and still says nothing about whether anything ever
+   * existed at this id.
+   */
+  const viewer = await getActor();
+  const detail = await db.getListingForViewer(viewer, id);
+  if (!detail) notFound();
+  const listing = detail.listing;
+
+  const search = await searchParams;
+  const backHref = buildBackHref(search);
+
+  /*
+   * THE TOMBSTONE, returned early rather than threaded through the 300 lines
+   * below as conditionals. Everything under here — the claim control, the
+   * rating, the reviews, the cross-sell grid — is about an offer somebody can
+   * still buy, and none of it applies.
+   *
+   * The reads are skipped too, not just the markup: `getOfferStats` and
+   * `listReviewsForListing` both filter `deleted_at is null`, so they would
+   * return empty for a withdrawn offer anyway. Fetching them to render nothing
+   * is two round trips to prove a thing the type already says.
+   */
+  if (detail.state === 'withdrawn') {
+    return (
+      <WithdrawnOffer
+        listing={listing}
+        withdrawnAt={detail.withdrawn_at}
+        backHref={backHref}
+        coach={await db.getPublicCoach(listing.coach_id)}
+      />
+    );
+  }
 
   const [stats, reviews, coach, coachOffers] = await Promise.all([
     db.getOfferStats(listing.id),
@@ -95,16 +151,13 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
   const shownOfferStats = await db.listOfferStats(shownOffers.map((offer) => offer.id));
   const shownStatsById = new Map(shownOfferStats.map((row) => [row.listing_id, row]));
 
-  // Who is looking, and have they already claimed this? Both decide the claim
-  // control, and neither widens what the page shows: `listMyOrders` is scoped
-  // to the actor by the data layer and returns [] for an anonymous viewer.
-  const viewer = await getActor();
+  // Have they already claimed this? It decides the claim control and widens
+  // nothing: `listMyOrders` is scoped to the actor by the data layer and
+  // returns [] for an anonymous viewer.
   const myOrders = viewer ? await db.listMyOrders(viewer) : [];
   const alreadyClaimed = myOrders.some((order) => order.listing_id === listing.id);
   const isOwnOffer = viewer?.userId === listing.coach_id;
 
-  const search = await searchParams;
-  const backHref = buildBackHref(search);
   // Set by createListingAction's redirect. Trusted only to show a message —
   // it grants nothing, and the listing above it is the real confirmation.
   const justPublished = firstValue(search.published) === '1';
@@ -461,6 +514,122 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
  * slug or it is dropped, so the back link always lands on a filter the offers
  * page can actually apply rather than reconstructing a dead one.
  */
+/**
+ * A withdrawn offer, for the three people entitled to see one: its coach, an
+ * administrator, and anyone holding an order for it. Everyone else got a 404
+ * several lines above.
+ *
+ * WHAT IT DELIBERATELY OMITS is most of the page. No claim control — the offer
+ * is off sale and `claim_offer` would refuse it. No rating, no sales count, no
+ * reviews: every one of those reads filters `deleted_at is null`, so they would
+ * be empty by construction, and rendering "No reviews yet" over an offer that
+ * has been reviewed would be a lie told by an empty query. No cross-sell grid
+ * either — a page somebody reached from their purchase history is not a place
+ * to sell them something else.
+ *
+ * WHAT IT KEEPS is what a buyer came for: what they bought, from whom, what it
+ * said, and what happened to it. The description is the coach's own copy at the
+ * moment of withdrawal, which is the version the buyer's purchase was about.
+ *
+ * It carries no `deleted_by`, and cannot: `ListingWithCoach` omits the column
+ * by construction, which is why the tombstone can name the fact of withdrawal
+ * without ever naming the administrator who performed one.
+ */
+function WithdrawnOffer({
+  listing,
+  withdrawnAt,
+  backHref,
+  coach,
+}: {
+  listing: ListingWithCoach;
+  withdrawnAt: string;
+  backHref: string;
+  coach: PublicCoach | null;
+}) {
+  return (
+    <div className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
+      <p className="text-sm">
+        <Link
+          href={backHref}
+          className="inline-flex min-h-11 items-center text-muted underline-offset-2 hover:text-ink hover:underline"
+        >
+          ← Back to offers
+        </Link>
+      </p>
+
+      <header className="mt-4">
+        <span className="flex flex-wrap items-center gap-2">
+          <Badge tone="neutral" wrap>
+            {listingCategoryLabel(listing.category)}
+          </Badge>
+          <Badge tone="warn" wrap>
+            No longer available
+          </Badge>
+        </span>
+        <h1 className="mt-3 text-2xl font-bold tracking-tight break-words text-ink sm:text-3xl">
+          {listing.title}
+        </h1>
+        <p className="mt-2 text-sm break-words text-muted">
+          by{' '}
+          {coach ? (
+            <Link
+              href={`/coaches/${coach.id}`}
+              className="font-medium text-ink underline decoration-muted underline-offset-2 hover:decoration-ink"
+            >
+              {listing.coach_name}
+            </Link>
+          ) : (
+            <span className="font-medium text-ink">{listing.coach_name}</span>
+          )}
+        </p>
+      </header>
+
+      <div className="mt-6">
+        <Alert tone="warn" title={`Withdrawn on ${formatDate(withdrawnAt)}`}>
+          {/*
+            Said without blame and without detail. A coach may have withdrawn
+            this themselves or an administrator may have taken it down, and
+            `ListingWithCoach` carries no `deleted_by` to tell them apart — which
+            is the point: publishing which administrator acted is the disclosure
+            `owned_listings` exists to avoid.
+          */}
+          The coach has taken this offer off sale, so it cannot be claimed any more. If you already claimed
+          it, nothing has changed — it is still in your purchases, and anything delivered against it is
+          still there.
+        </Alert>
+      </div>
+
+      <Card tone="raised" className="mt-6">
+        <CardBody className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-ink">What this was</h2>
+            <p className="mt-2 text-sm leading-relaxed break-words whitespace-pre-line text-muted">
+              {listing.description}
+            </p>
+          </div>
+          <div className="shrink-0 sm:w-48 sm:text-right">
+            {/*
+              The price it was withdrawn AT, which is not necessarily the price
+              anyone paid — an order carries `price_cents_at_purchase` for that,
+              and the order page is where a buyer sees what they were charged.
+            */}
+            <p className="text-2xl font-bold tabular-nums text-ink">{formatPrice(listing.price_cents)}</p>
+            <p className="mt-1 text-xs text-faint">Last listed price</p>
+          </div>
+        </CardBody>
+        <CardFooter>
+          <p>
+            <Link href="/purchases" className="font-medium text-brand underline underline-offset-2">
+              Your purchases
+            </Link>{' '}
+            has everything you have claimed, including this if you did.
+          </p>
+        </CardFooter>
+      </Card>
+    </div>
+  );
+}
+
 function buildBackHref(params: Record<string, string | string[] | undefined>): string {
   const search = new URLSearchParams();
   for (const key of ['q', 'category'] as const) {

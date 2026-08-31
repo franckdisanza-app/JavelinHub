@@ -104,9 +104,20 @@ function PurchaseRow({ order }: { order: OrderWithListing }) {
             </Link>
             {/*
               The offer page, not the coach page: the buyer is most likely
-              looking for what they claimed. A withdrawn offer has no public
-              page, so this link is only rendered when there is somewhere to go
-              — the ORDER survives a withdrawal, which is exactly why
+              looking for what they claimed.
+              
+              THIS LINK USED TO 404. The comment here claimed it was "only
+              rendered when there is somewhere to go", and it was not — it is
+              unconditional, and a withdrawn offer had no page at all, so a buyer
+              whose coach took an offer down followed this straight into the
+              not-found page. That was the dead end `getListingForViewer` was
+              written for and never wired up to.
+              
+              It now lands on a tombstone, because `/offers/[id]` asks
+              `getListingForViewer` rather than `getListing`: published for
+              everyone, and withdrawn-with-a-date for the coach, an admin, and
+              anyone holding an order — which the reader of this page is, by
+              construction. The ORDER survives a withdrawal, which is also why
               `listing_title` is resolved without a `deleted_at` filter.
             */}
             <Link

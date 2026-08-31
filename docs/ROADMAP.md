@@ -134,21 +134,24 @@ checked, and exercised against Postgres — they need pages, not plumbing.
 | `updateListing` | `/coach/offers/[id]/edit` | **done** |
 | `softDeleteListing` / `restoreListing` | withdraw / restore controls | **done** |
 | `listListingRevisions` | edit history on the editor | **done** |
-| `getListingForViewer` | the owner's view of a withdrawn offer | still none |
+| `getListingForViewer` | `/offers/[id]`, the withdrawn tombstone | **done** |
 | `listMyOrders` | `/purchases` | **done** |
 | `listOrdersForCoach` | `/coach/sales` | **done** |
 | `getOrder` | `/orders/[id]` | **done** |
 | `createReview` | the review form on `/orders/[id]` | **done** |
 
-**Nine of the ten have a UI**, and `setListingAsset` — added with instant
-delivery — shipped with its own controls on the editor and the composer. The
-tenth, `getListingForViewer`, is still the only method in the whole interface
-that nothing in `src/app` calls. Its `ListingDetail` union exists so that a
-withdrawn offer renders as a TOMBSTONE for the owner, an admin and anyone
-holding an order for it, instead of a 404 — and today `/offers/[id]` uses
-`getListing`, which 404s for everybody. Nothing currently LINKS a buyer to a
-withdrawn offer's page, so the gap is invisible rather than broken; it becomes
-visible the moment anything does. The loop closes: a
+**All ten now have a UI**, and `setListingAsset` — added with instant delivery —
+shipped with its own controls on the editor and the composer.
+
+The last one, `getListingForViewer`, turned out not to be a dormant gap at all.
+`/offers/[id]` used `getListing`, which 404s a withdrawn offer for everybody —
+while `/purchases` rendered an **unconditional** "View the offer" link under a
+comment claiming it was "only rendered when there is somewhere to go". It was
+not. A buyer whose coach withdrew an offer followed their own purchase history
+into the not-found page, which is precisely the dead end the `ListingDetail`
+union was written to prevent and never wired up to. `/offers/[id]` now asks the
+viewer-aware read and renders the tombstone for the owner, an admin and anyone
+holding an order; everyone else still gets the 404. The loop closes: a
 coach publishes and manages offers in either delivery mode, a learner claims one
 and either downloads it immediately or exchanges files against that order, and
 the buyer reviews it. What is left in §1 is the money.

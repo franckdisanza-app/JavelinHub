@@ -101,9 +101,23 @@ function SaleRow({ order }: { order: OrderWithListing }) {
           }
         />
         <CardBody>
-          <Link href={`/orders/${order.id}`} className={linkButtonClass({ size: 'sm' })}>
-            Open<span className="sr-only"> {order.listing_title}</span>
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <Link href={`/orders/${order.id}`} className={linkButtonClass({ size: 'sm' })}>
+              Open<span className="sr-only"> {order.listing_title}</span>
+            </Link>
+            {/*
+              Safe for a coach whatever state the offer is in: they own it, so
+              `getListingForViewer` gives them the published page or the
+              tombstone, never a 404. Before that method was wired up this link
+              could not have been rendered here at all.
+            */}
+            <Link
+              href={`/offers/${order.listing_id}`}
+              className={linkButtonClass({ variant: 'secondary', size: 'sm' })}
+            >
+              View the offer<span className="sr-only"> {order.listing_title}</span>
+            </Link>
+          </div>
         </CardBody>
       </Card>
     </li>
