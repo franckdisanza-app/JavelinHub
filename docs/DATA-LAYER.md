@@ -1021,6 +1021,21 @@ line. It is `null` when the backend could not produce one, and a caller must
 render that absence rather than printing `0`: "no offers" and "we did not count"
 are different sentences.
 
+**PostgREST does not do this for free, and the two backends disagreed about it
+for a while.** `count=exact` counts the query *as filtered*, and the keyset is a
+filter — so on page two Supabase reported "2" where the mock reported "26".
+Nothing could see it while the live database was empty: an empty table answers
+`[]` and `0` from both. It surfaced the first time a real coach profile held more
+than a page of offers, as a heading reading "2 offers" above a list of
+twenty-six.
+
+`runPaged` in `supabaseClient.ts` is the fix: the filters are passed as a
+closure and built twice — once with the keyset for the rows, once without it for
+the count — and **the second request is only made when there is a cursor**,
+because on page one the count beside the rows is already right. `verify:authz`
+pins the contract on the mock; `verify:supabase` pins PostgREST's actual
+behaviour, so the reason for the extra request cannot quietly stop being true.
+
 ### Five reads exist because a scan would now be wrong
 
 Pagination turned a class of quiet inefficiency into a class of quiet bug: a page

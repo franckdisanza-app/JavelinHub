@@ -628,19 +628,89 @@ function oneRow<T>(data: unknown, whenMissing: string): T {
  * names an exact row — then points into a list that has reshuffled underneath
  * it. That is the bug that shows up as one duplicated row every few pages.
  */
-function seek<
-  Q extends {
-    or(filter: string): Q;
-    order(column: string, options: { ascending: boolean }): Q;
-    limit(count: number): Q;
-  },
->(query: Q, spec: KeysetSpec, cursor: Keyset | null, limit: number): Q {
+interface SeekableQuery<Q> {
+  or(filter: string): Q;
+  order(column: string, options: { ascending: boolean }): Q;
+  limit(count: number): Q;
+}
+
+/** What PostgREST hands back on failure. Structural, so no client type is imported. */
+interface PostgrestErrorLike {
+  code?: string;
+  message: string;
+}
+
+function seek<Q extends SeekableQuery<Q>>(
+  query: Q,
+  spec: KeysetSpec,
+  cursor: Keyset | null,
+  limit: number,
+): Q {
   const seeked = cursor ? query.or(supabaseKeysetFilter(spec, cursor)) : query;
   const ascending = supabaseAscending(spec);
   return seeked
     .order(spec.column, { ascending })
     .order(tieBreakColumn(spec), { ascending })
     .limit(limit + 1);
+}
+
+/**
+ * The options every paginated `.select()` takes, so `runPaged` can build the
+ * same query twice — once for rows, once for a count with no rows attached.
+ */
+type CountOptions = { count: 'exact'; head?: boolean };
+
+/**
+ * One page of rows, plus a count of the WHOLE list.
+ *
+ * =============================================================================
+ * WHY THIS TAKES A BUILDER RATHER THAN A BUILT QUERY
+ * =============================================================================
+ * PostgREST's `count=exact` counts the query AS FILTERED, and the keyset is a
+ * filter. So on page two `count` comes back as "rows after the cursor" — 2,
+ * where the mock says 26 — while `Page.total` is documented as ignoring the
+ * cursor, which is what the pager's "24 of 40" and every queue's tab count
+ * depend on.
+ *
+ * THE TWO BACKENDS DISAGREED FOR EXACTLY AS LONG AS THE LIVE DATABASE WAS
+ * EMPTY. An empty table answers `[]` and `0` from both, so no mock suite and no
+ * assertion against an empty project could see it. It surfaced the first time a
+ * real coach profile held more than a page of offers, as a heading reading
+ * "2 offers" above a list of twenty-six.
+ *
+ * So the filters arrive as a CLOSURE and are built twice: once with the keyset
+ * for the rows, once without it for the count.
+ *
+ * **The second request is only made when there IS a cursor.** On page one the
+ * keyset adds no predicate, so the count that came back beside the rows is
+ * already the whole-list count — the common case, and it costs nothing. Later
+ * pages pay one extra round trip, as a `head` request: PostgREST answers with a
+ * count in a header and no body at all.
+ */
+type PagedResult = { data: unknown; error: PostgrestErrorLike | null; count: number | null };
+
+async function runPaged<Q extends SeekableQuery<Q>>(
+  build: (options: CountOptions) => Q,
+  spec: KeysetSpec,
+  cursor: Keyset | null,
+  limit: number,
+): Promise<PagedResult> {
+  const rows = (await seek(build({ count: 'exact' }), spec, cursor, limit)) as unknown as PagedResult;
+
+  // Page one, or a failed read: the count beside the rows is already right, and
+  // a second request would only produce a second error to swallow.
+  if (cursor === null || rows.error) {
+    return { data: rows.data, error: rows.error, count: rows.count ?? null };
+  }
+
+  const counted = (await build({ count: 'exact', head: true })) as unknown as PagedResult;
+  return {
+    data: rows.data,
+    error: rows.error,
+    // A failed COUNT is not a failed READ. `Page.total` is nullable exactly so
+    // that "we could not count" has somewhere to go other than a wrong number.
+    count: counted.error ? null : (counted.count ?? null),
+  };
 }
 
 /**
@@ -962,22 +1032,23 @@ export class SupabaseDataClient implements DataClient {
 
     // The approval predicate lives INSIDE public_coaches, so there is nothing
     // to filter on here and no way for a caller to widen the result.
-    let query = ctx.supabase
-      .from('public_coaches')
-      .select(`${PUBLIC_COACH_COLUMNS}, created_at`, { count: 'exact' });
-    if (q !== '') {
-      const pattern = likePattern(q);
-      // Unrepresentable term (it contains `*`). Return NOTHING rather than
-      // dropping the filter — an unexpressible search must not become a
-      // broader one. See `escapeLike`.
-      if (pattern === null) return emptyPage();
-      query = query.ilike('full_name', pattern);
-    }
+    // Unrepresentable term (it contains `*`). Return NOTHING rather than
+    // dropping the filter — an unexpressible search must not become a broader
+    // one. See `escapeLike`.
+    const namePattern = q === '' ? null : likePattern(q);
+    if (q !== '' && namePattern === null) return emptyPage();
+
+    const build = (opts: CountOptions) => {
+      const query = ctx.supabase
+        .from('public_coaches')
+        .select(`${PUBLIC_COACH_COLUMNS}, created_at`, opts);
+      return namePattern === null ? query : query.ilike('full_name', namePattern);
+    };
 
     // `created_at` exists on the view for this ordering only (0003). It is now
     // SELECTED as well as ordered on, because the cursor is built from it — and
     // then dropped again below, so `PublicCoach` stays exactly its five columns.
-    const { data, error, count } = await seek(query, KEYSETS.coaches, cursor, limit);
+    const { data, error, count } = await runPaged(build, KEYSETS.coaches, cursor, limit);
     if (error) throwDataError(error, ctx.userId !== null);
 
     const rows = (data ?? []) as (PublicCoach & { created_at: string })[];
@@ -1244,33 +1315,38 @@ export class SupabaseDataClient implements DataClient {
     const cursor = decodeCursor(spec, page?.cursor);
 
     const ctx = await openContext();
-    let query = ctx.supabase
-      .from('listings')
-      .select(LISTING_COLUMNS, { count: 'exact' })
-      .is('deleted_at', null);
 
-    if (category) query = query.eq('category', category);
-    // Inclusive bounds. An inverted pair matches nothing rather than being
-    // silently swapped — somebody who typed them the wrong way round should see
-    // that, not results for a question they did not ask.
-    if (typeof filter?.minPriceCents === 'number' && Number.isFinite(filter.minPriceCents)) {
-      query = query.gte('price_cents', Math.max(0, Math.floor(filter.minPriceCents)));
-    }
-    if (typeof filter?.maxPriceCents === 'number' && Number.isFinite(filter.maxPriceCents)) {
-      query = query.lte('price_cents', Math.max(0, Math.floor(filter.maxPriceCents)));
-    }
-    if (q !== '') {
-      // Title + description only, matching the trigram indexes in 0001 and the
-      // mock. Never the coach name: that would make the offer search an
-      // enumerator for people.
-      const escaped = likePattern(q);
-      // Unrepresentable term — see `escapeLike`. Narrow to nothing.
-      if (escaped === null) return emptyPage();
-      const pattern = quoteForOr(escaped);
-      query = query.or(`title.ilike.${pattern},description.ilike.${pattern}`);
-    }
+    // Assembled once as a closure so `runPaged` can run the same filters twice —
+    // with the keyset for the rows, without it for the count. See `runPaged`.
+    const searchPattern = q === '' ? null : likePattern(q);
+    // Unrepresentable term — see `escapeLike`. Narrow to nothing.
+    if (q !== '' && searchPattern === null) return emptyPage();
 
-    const { data, error, count } = await seek(query, spec, cursor, limit);
+    const build = (opts: CountOptions) => {
+      let query = ctx.supabase.from('listings').select(LISTING_COLUMNS, opts).is('deleted_at', null);
+
+      if (category) query = query.eq('category', category);
+      // Inclusive bounds. An inverted pair matches nothing rather than being
+      // silently swapped — somebody who typed them the wrong way round should
+      // see that, not results for a question they did not ask.
+      if (typeof filter?.minPriceCents === 'number' && Number.isFinite(filter.minPriceCents)) {
+        query = query.gte('price_cents', Math.max(0, Math.floor(filter.minPriceCents)));
+      }
+      if (typeof filter?.maxPriceCents === 'number' && Number.isFinite(filter.maxPriceCents)) {
+        query = query.lte('price_cents', Math.max(0, Math.floor(filter.maxPriceCents)));
+      }
+      if (searchPattern !== null) {
+        // Title + description only, matching the trigram indexes in 0001 and
+        // the mock. Never the coach name: that would make the offer search an
+        // enumerator for people.
+        const pattern = quoteForOr(searchPattern);
+        query = query.or(`title.ilike.${pattern},description.ilike.${pattern}`);
+      }
+
+      return query;
+    };
+
+    const { data, error, count } = await runPaged(build, spec, cursor, limit);
     if (error) throwDataError(error, ctx.userId !== null);
 
     const window = windowOf(
@@ -1326,10 +1402,10 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.adminListings, page?.cursor);
 
-    const { data, error, count } = await seek(
-      ctx.supabase
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase
         .from('listings')
-        .select(LISTING_COLUMNS, { count: 'exact' })
+        .select(LISTING_COLUMNS, opts)
         .eq('coach_id', coachId),
       KEYSETS.adminListings,
       cursor,
@@ -1411,10 +1487,10 @@ export class SupabaseDataClient implements DataClient {
     const cursor = decodeCursor(KEYSETS.coachListings, page?.cursor);
     const ctx = await openContext();
 
-    const { data, error, count } = await seek(
-      ctx.supabase
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase
         .from('listings')
-        .select(LISTING_COLUMNS, { count: 'exact' })
+        .select(LISTING_COLUMNS, opts)
         .eq('coach_id', coachId)
         .is('deleted_at', null),
       KEYSETS.coachListings,
@@ -1444,8 +1520,8 @@ export class SupabaseDataClient implements DataClient {
     // `public.owned_listings` (0003) is scoped to `auth.uid()` inside the view
     // and carries the derived `withdrawn_by_admin`. WITHDRAWN OFFERS INCLUDED —
     // this is the dashboard, and restoring one is the point.
-    const { data, error, count } = await seek(
-      ctx.supabase.from('owned_listings').select(OWNED_LISTING_COLUMNS, { count: 'exact' }),
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase.from('owned_listings').select(OWNED_LISTING_COLUMNS, opts),
       KEYSETS.myListings,
       cursor,
       limit,
@@ -1758,13 +1834,12 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.revisions, page?.cursor);
 
-    const { data, error, count } = await seek(
-      ctx.supabase
-        .from('listing_revisions')
-        .select('id, listing_id, title, description, price_cents, category, created_at', {
-          count: 'exact',
-        })
-        .eq('listing_id', id),
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) =>
+        ctx.supabase
+          .from('listing_revisions')
+          .select('id, listing_id, title, description, price_cents, category, created_at', opts)
+          .eq('listing_id', id),
       KEYSETS.revisions,
       cursor,
       limit,
@@ -1921,10 +1996,10 @@ export class SupabaseDataClient implements DataClient {
     const cursor = decodeCursor(KEYSETS.listingReviews, page?.cursor);
     const ctx = await openContext();
 
-    const { data, error, count } = await seek(
-      ctx.supabase
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase
         .from('public_listing_reviews')
-        .select(PUBLIC_REVIEW_COLUMNS, { count: 'exact' })
+        .select(PUBLIC_REVIEW_COLUMNS, opts)
         .eq('listing_id', listingId),
       KEYSETS.listingReviews,
       cursor,
@@ -2040,10 +2115,10 @@ export class SupabaseDataClient implements DataClient {
     // `listing_published` is projected by the view (0026) rather than worked out
     // here by intersecting with the coach's offer list — that intersection is
     // wrong once both lists are pages. See the migration.
-    const { data, error, count } = await seek(
-      ctx.supabase
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase
         .from('public_coach_reviews')
-        .select(`${PUBLIC_REVIEW_COLUMNS}, listing_title, listing_published`, { count: 'exact' })
+        .select(`${PUBLIC_REVIEW_COLUMNS}, listing_title, listing_published`, opts)
         .eq('coach_id', coachId),
       KEYSETS.coachReviews,
       cursor,
@@ -2102,8 +2177,8 @@ export class SupabaseDataClient implements DataClient {
     // The learner id is DERIVED from the actor, never a parameter, so this
     // cannot be pointed at anyone else. The cursor does not change that: it
     // carries a position, never a scope.
-    const { data, error, count } = await seek(
-      ctx.supabase.from('orders').select('*', { count: 'exact' }).eq('learner_id', ctx.userId),
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase.from('orders').select('*', opts).eq('learner_id', ctx.userId),
       KEYSETS.myOrders,
       cursor,
       limit,
@@ -2130,8 +2205,8 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.coachOrders, page?.cursor);
 
-    const { data, error, count } = await seek(
-      ctx.supabase.from('orders').select('*', { count: 'exact' }).eq('coach_id', coachId),
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase.from('orders').select('*', opts).eq('coach_id', coachId),
       KEYSETS.coachOrders,
       cursor,
       limit,
@@ -2351,8 +2426,8 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.moderation, page?.cursor);
 
-    const { data, error, count } = await seek(
-      ctx.supabase.from('reviews').select('*', { count: 'exact' }),
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase.from('reviews').select('*', opts),
       KEYSETS.moderation,
       cursor,
       limit,
@@ -2420,8 +2495,8 @@ export class SupabaseDataClient implements DataClient {
 
     // Ordered and keyed on `removed_at` — when it was TAKEN DOWN, not when the
     // review was written. `KEYSETS.removedReviews` names the same column.
-    const { data, error, count } = await seek(
-      ctx.supabase.from('removed_reviews').select('*', { count: 'exact' }),
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase.from('removed_reviews').select('*', opts),
       KEYSETS.removedReviews,
       cursor,
       limit,
@@ -2530,8 +2605,8 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.myReports, page?.cursor);
 
-    const { data, error, count } = await seek(
-      ctx.supabase.from('reports').select('*', { count: 'exact' }).eq('reporter_id', ctx.userId),
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase.from('reports').select('*', opts).eq('reporter_id', ctx.userId),
       KEYSETS.myReports,
       cursor,
       limit,
@@ -2565,11 +2640,13 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.reports, page?.cursor);
 
-    let query = ctx.supabase.from('reports').select('*', { count: 'exact' });
-    if (status) query = query.eq('status', status);
+    const build = (opts: CountOptions) => {
+      const query = ctx.supabase.from('reports').select('*', opts);
+      return status ? query.eq('status', status) : query;
+    };
 
     // `count` is of THIS STATUS, which is what a queue's tab count is.
-    const { data, error, count } = await seek(query, KEYSETS.reports, cursor, limit);
+    const { data, error, count } = await runPaged(build, KEYSETS.reports, cursor, limit);
     if (error) throwDataError(error, true);
 
     const window = windowOf(KEYSETS.reports, (data ?? []) as Report[], limit, byCreatedAt, totalOf(count));
@@ -2729,10 +2806,10 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.adminCoaches, page?.cursor);
 
-    const { data, error, count } = await seek(
-      ctx.supabase
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase
         .from('profiles')
-        .select('*', { count: 'exact' })
+        .select('*', opts)
         .neq('coach_status', 'none')
         .is('deleted_at', null),
       KEYSETS.adminCoaches,
@@ -2753,8 +2830,8 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.adminActions, page?.cursor);
 
-    const { data, error, count } = await seek(
-      ctx.supabase.from('admin_actions').select('*', { count: 'exact' }),
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase.from('admin_actions').select('*', opts),
       KEYSETS.adminActions,
       cursor,
       limit,
@@ -2825,8 +2902,8 @@ export class SupabaseDataClient implements DataClient {
 
     // The tie-break is `code`, not `id` — `public.invites` has no `id` column.
     // `KEYSETS.invites` carries that, and `seek` orders by whatever it names.
-    const { data, error, count } = await seek(
-      ctx.supabase.from('invites').select('*', { count: 'exact' }),
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase.from('invites').select('*', opts),
       KEYSETS.invites,
       cursor,
       limit,
@@ -3009,10 +3086,12 @@ export class SupabaseDataClient implements DataClient {
     const limit = normaliseLimit(page?.limit);
     const cursor = decodeCursor(KEYSETS.applications, page?.cursor);
 
-    let query = ctx.supabase.from('coach_applications').select('*', { count: 'exact' });
-    if (filter?.status) query = query.eq('status', filter.status);
+    const build = (opts: CountOptions) => {
+      const query = ctx.supabase.from('coach_applications').select('*', opts);
+      return filter?.status ? query.eq('status', filter.status) : query;
+    };
 
-    const { data, error, count } = await seek(query, KEYSETS.applications, cursor, limit);
+    const { data, error, count } = await runPaged(build, KEYSETS.applications, cursor, limit);
     if (error) throwDataError(error, true);
 
     const window = windowOf(

@@ -5,7 +5,7 @@ import { ListingCard } from '@/components/listing-card';
 import { Pager } from '@/components/pager';
 import { Alert } from '@/components/ui/alert';
 import { Button, linkButtonClass } from '@/components/ui/button';
-import { Field, fieldDescribedBy } from '@/components/ui/field';
+import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { getDataClient } from '@/lib/data';
@@ -23,6 +23,16 @@ import { firstValue } from '@/lib/search-params';
 export const metadata: Metadata = { title: 'Browse offers' };
 
 const ALL_CATEGORIES = '';
+
+/**
+ * The one hint every filter control points at.
+ *
+ * A shared `aria-describedby` target rather than a hint per `Field`, so that all
+ * five controls are the same height and the row lines up — see the comment on
+ * the form. A screen reader announces the same sentence for each, which is
+ * accurate: it is one sentence about the whole row.
+ */
+const FILTER_HINT_ID = 'offer-filters-hint';
 
 /**
  * Public offer browse + search. Works signed out — nothing here takes an actor.
@@ -172,20 +182,25 @@ export default async function OffersPage({
         after the search param it drives, so the browser builds the query string
         and no JavaScript is involved.
       */}
+      {/*
+        `sm:items-end` aligns five controls of DIFFERENT HEIGHTS, so none of them
+        may carry its own hint: a field with helper text under it is ~20px taller
+        than one without, and the shorter ones then sit visibly lower than the
+        rest. That is what this row looked like when the two price fields landed
+        — Search, Min and Max at one height, Category and Sort dropped below them.
+        So every hint moved to the single line under the form, which all five
+        inputs point at through `aria-describedby`. One sentence instead of three,
+        and a row that lines up.
+      */}
       <form method="get" className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-end">
-        <Field
-          id="q"
-          label="Search"
-          hint="Matches offer titles and descriptions."
-          className="flex-1"
-        >
+        <Field id="q" label="Search" className="flex-1">
           <Input
             id="q"
             name="q"
             type="search"
             defaultValue={q}
             placeholder="e.g. javelin, mobility, video"
-            aria-describedby={fieldDescribedBy('q', { hint: true })}
+            aria-describedby={FILTER_HINT_ID}
           />
         </Field>
 
@@ -211,25 +226,25 @@ export default async function OffersPage({
           </Select>
         </Field>
 
-        <Field id="min" label="Min price" hint="In pounds." className="sm:w-28">
+        <Field id="min" label="Min price" className="sm:w-28">
           <Input
             id="min"
             name="min"
             inputMode="decimal"
             defaultValue={rawMin}
             placeholder="0"
-            aria-describedby={fieldDescribedBy('min', { hint: true })}
+            aria-describedby={FILTER_HINT_ID}
           />
         </Field>
 
-        <Field id="max" label="Max price" hint="In pounds." className="sm:w-28">
+        <Field id="max" label="Max price" className="sm:w-28">
           <Input
             id="max"
             name="max"
             inputMode="decimal"
             defaultValue={rawMax}
             placeholder="Any"
-            aria-describedby={fieldDescribedBy('max', { hint: true })}
+            aria-describedby={FILTER_HINT_ID}
           />
         </Field>
 
@@ -252,6 +267,10 @@ export default async function OffersPage({
           ) : null}
         </div>
       </form>
+
+      <p id={FILTER_HINT_ID} className="mt-2 text-body-15 text-faint">
+        Search matches offer titles and descriptions. Prices are in pounds.
+      </p>
 
       {/*
         Said once, here, rather than beside each field: a bound that could not be

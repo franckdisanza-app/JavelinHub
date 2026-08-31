@@ -313,6 +313,17 @@ them twice is how the two diverge.
   Filters landed with it: price floor, price ceiling, and three sorts on the
   browse page. Each sort has its own keyset scope, so a cursor does not survive
   a change of ordering.
+
+  **And then it was checked against a database with rows in it**, which is where
+  the last bug was. `supabase/demo-seed.sql` fills the live project past every
+  boundary the app has — 40 published offers against a page size of 24, 26 of
+  them on one coach, 28 reviews on one offer — and the first coach profile with
+  more than a page of offers rendered "2 offers" above a list of twenty-six.
+  PostgREST's `count=exact` counts the query AS FILTERED, and the keyset is a
+  filter; the mock counts before it seeks. Nothing could see the divergence while
+  every table was empty, because `[]` and `0` are what both backends answer then.
+  `runPaged` now asks for the count separately when there is a cursor, and both
+  suites pin their half of it.
 * ~~**The full-text index is dead weight.**~~ **Dropped** (0015). The choice was
   stated here as "implement `textSearch` or drop it", and dropping is the only
   option that keeps the two backends honest: full-text is not a faster substring

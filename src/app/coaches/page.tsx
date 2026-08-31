@@ -5,10 +5,16 @@ import { CoachCard } from '@/components/coach-card';
 import { Pager } from '@/components/pager';
 import { Alert } from '@/components/ui/alert';
 import { Button, linkButtonClass } from '@/components/ui/button';
-import { Field, fieldDescribedBy } from '@/components/ui/field';
+import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { getDataClient } from '@/lib/data';
 import { firstValue } from '@/lib/search-params';
+
+/**
+ * The one hint the search field points at. Below the form rather than inside
+ * the field, so the field and the submit button beside it are the same height.
+ */
+const COACH_HINT_ID = 'coach-filters-hint';
 
 export const metadata: Metadata = { title: 'Coaches' };
 
@@ -75,14 +81,18 @@ export default async function CoachesPage({ searchParams }: PageProps<'/coaches'
       </header>
 
       <form method="get" className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-end">
-        <Field id="q" label="Search" hint="Matches coach names." className="flex-1">
+        {/* Hint below the form, not inside the field — same reason as `/offers`:
+            a hint makes a field taller than the submit button beside it, and
+            `items-end` then puts the button level with the helper text instead
+            of with the input. */}
+        <Field id="q" label="Search" className="flex-1">
           <Input
             id="q"
             name="q"
             type="search"
             defaultValue={q}
             placeholder="e.g. Vaughn"
-            aria-describedby={fieldDescribedBy('q', { hint: true })}
+            aria-describedby={COACH_HINT_ID}
           />
         </Field>
 
@@ -97,6 +107,10 @@ export default async function CoachesPage({ searchParams }: PageProps<'/coaches'
           ) : null}
         </div>
       </form>
+
+      <p id={COACH_HINT_ID} className="mt-2 text-body-15 text-faint">
+        Matches coach names.
+      </p>
 
       {/*
         `break-words` is load-bearing: this line echoes the visitor's search

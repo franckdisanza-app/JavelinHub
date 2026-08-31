@@ -5357,6 +5357,40 @@ expectEqual('...over more than one page', pageCount > 1, true);
 const lastPage = await db.listListings(undefined, { cursor: walkCursor, limit: 100 });
 expectEqual('the last page has no next cursor', lastPage.nextCursor, null);
 
+// A price in the middle of the seeded spread, used by the total and filter
+// assertions below. Taken from the data rather than hardcoded, so a change to
+// the fixtures cannot quietly make these vacuous.
+const prices = everyOffer.map((l) => l.price_cents).sort((a, b) => a - b);
+const median = prices[Math.floor(prices.length / 2)]!;
+
+// --- `total` does not move as you page --------------------------------------
+// The contract is "rows matching the filter, IGNORING the cursor", because that
+// is what a pager's "24 of 40" and every queue's tab count read. It held here
+// from the first line — the mock counts before it seeks — and was WRONG on
+// Supabase for as long as the live database was empty: PostgREST's
+// `count=exact` counts the query as filtered, and the keyset is a filter, so
+// page two reported "2 of 2" of twenty-six. See `runPaged`.
+//
+// Asserted on both sides now. This half is cheap and would catch a mock that
+// started counting after the seek; the other half is in `verify:supabase`,
+// where the real PostgREST behaviour is pinned directly.
+const totalPage1 = await db.listListings(undefined, { limit: 2 });
+const totalPage2 = await db.listListings(undefined, { cursor: totalPage1.nextCursor, limit: 2 });
+expectEqual('the total is the whole list on page one', totalPage1.total, everyOffer.length);
+expectEqual('...and the same number on page two', totalPage2.total, everyOffer.length);
+expectEqual(
+  '...even though page two holds fewer rows than it counts',
+  totalPage2.items.length < (totalPage2.total ?? 0),
+  true,
+);
+// And it follows the FILTER, which is the half a fixed number would get wrong.
+const filteredTotal = await db.listListings({ maxPriceCents: median }, { limit: 1 });
+expectEqual(
+  'the total counts the filtered list, not the table',
+  filteredTotal.total,
+  everyOffer.filter((l) => l.price_cents <= median).length,
+);
+
 // --- the limit is clamped, not trusted --------------------------------------
 // Every one of these arrives from a query string in production.
 expectEqual('a zero limit returns one row, not none', (await db.listListings(undefined, { limit: 0 })).items.length, 1);
@@ -5418,9 +5452,6 @@ await refuses('...and an anonymous caller with a real cursor is still refused', 
 );
 
 // --- the browse filters -----------------------------------------------------
-const prices = everyOffer.map((l) => l.price_cents).sort((a, b) => a - b);
-const median = prices[Math.floor(prices.length / 2)]!;
-
 const dearer = await db.listListings({ minPriceCents: median }, { limit: 100 });
 expectEqual('a minimum price is INCLUSIVE', dearer.items.some((l) => l.price_cents === median), true);
 expectEqual(

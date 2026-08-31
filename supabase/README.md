@@ -169,6 +169,37 @@ file. And a path is not a capability either way — the bucket is private, so
 reading the bytes still goes through the storage policy evaluated against the
 reader's own session when the URL is signed.
 
+## Demo data
+
+The live project had five accounts and zero offers, which made every list page
+render an empty state — and an empty state proves nothing about a paginated
+read, because `[]` is what a correct query, a wrong query and a rejected query
+all look like.
+
+```bash
+npx supabase db query --linked -f supabase/demo-seed.sql
+npx supabase db query --linked -f supabase/demo-teardown.sql
+```
+
+The seed creates 36 accounts, 43 offers, 47 orders, 31 reviews and a row in each
+administrator queue. The sizes are chosen to cross the boundaries the app has
+rather than to look plausible: 40 published offers against a page size of 24, 26
+of them owned by one coach, 28 reviews on one offer, prices spread £15–£120.
+
+**Every row it writes carries `is_demo = true`**, on all nine tables that have
+the column (0006, extended by 0027). `select * from public.demo_data_summary
+where rows > 0;` is the check, and the teardown deletes on exactly that
+predicate — neither file has to remember what the other did.
+
+Accounts are `demo.*@javelinhub.dev`. Their password is written in the seed file
+and is therefore a **public fixture credential**: never reuse it, and run the
+teardown before this project is anything but a proof of concept.
+
+Inserting straight into `auth.users` is the only way in from a migration or a
+`db query`: GoTrue validates the address domain on signup and rejects the
+reserved test TLDs, so the route the app itself uses cannot create a fixture
+account at all.
+
 ## What broke on the way in, and why none of it was visible beforehand
 
 Four failures, in order, none of which static review or the mock suites could

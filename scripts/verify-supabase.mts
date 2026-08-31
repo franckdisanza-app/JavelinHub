@@ -153,6 +153,15 @@ interface Result {
   code: string | null;
   message: string;
   body: unknown;
+  /**
+   * The row count from `Content-Range`, when `Prefer: count=exact` asked for
+   * one. PostgREST answers `0-24/137`; the half after the slash is this.
+   *
+   * `null` when it was not requested or came back as `*`, which is what an
+   * unknown count looks like — never 0, because "none" and "not counted" are the
+   * distinction `Page.total` exists to preserve.
+   */
+  count: number | null;
 }
 
 /**
@@ -195,11 +204,16 @@ async function rest(
     parsed = text;
   }
   const asError = parsed as { code?: string; message?: string } | null;
+  // `0-24/137` -> 137. `*/ *` and a missing header both mean "not counted".
+  const range = res.headers.get('content-range') ?? '';
+  const total = Number.parseInt(range.slice(range.indexOf('/') + 1), 10);
+
   return {
     status: res.status,
     code: typeof asError?.code === 'string' ? asError.code : null,
     message: typeof asError?.message === 'string' ? asError.message : '',
     body: parsed,
+    count: Number.isFinite(total) ? total : null,
   };
 }
 
@@ -824,6 +838,60 @@ for (const { spec, from } of KEYSET_PROBES) {
     fail(
       `${spec.scope}: the keyset filter parses against ${from}`,
       `${result.code ?? result.status} ${truncate(result.message)}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// `count=exact` COUNTS THE QUERY AS FILTERED — including the keyset.
+//
+// This is not a bug in PostgREST; it is the only thing it could sensibly mean.
+// It is recorded here because it is the reason `runPaged` issues a SECOND
+// request on every page after the first, and because the app was wrong about it
+// for as long as this project had no rows: an empty table answers 0 either way,
+// so neither mock suite nor an assertion here could tell the two apart. It
+// surfaced as a coach profile heading reading "2 offers" above twenty-six.
+//
+// Skipped rather than guessed at when the table is too small to page — an
+// assertion that cannot fail is worse than no assertion.
+// ---------------------------------------------------------------------------
+const listingCount = await rest('listings?select=id&limit=1', { prefer: 'count=exact' });
+const listingTotal = listingCount.count;
+
+if (typeof listingTotal !== 'number' || listingTotal < 3) {
+  skip(
+    'count=exact counts after the keyset filter',
+    `needs at least 3 published listings; the project has ${listingTotal ?? 'an unknown number'}. Run supabase/demo-seed.sql`,
+  );
+} else {
+  // A cursor positioned just after the newest row, built the way the app builds
+  // one, so this asserts the exact filter shape `seek()` sends.
+  const firstRow = await rest('listings?select=id,created_at&order=created_at.desc,id.desc&limit=1');
+  const first = (firstRow.body as { id: string; created_at: string }[] | null)?.[0];
+
+  if (!first) {
+    fail('count=exact counts after the keyset filter', 'could not read a first row to build a cursor');
+  } else {
+    const cursor = { key: first.created_at, id: first.id };
+    // Built with URLSearchParams, not string concatenation: a timestamptz
+    // carries `+00:00`, and a bare `+` in a query string means SPACE. supabase-js
+    // encodes it; a hand-assembled URL does not, and PostgREST answers 400 with
+    // no Content-Range at all — which reads here as "no count" rather than as a
+    // malformed request.
+    const filter = new URLSearchParams();
+    filter.set('select', 'id');
+    filter.set('or', `(${supabaseKeysetFilter(KEYSETS.listings, cursor)})`);
+    filter.set('limit', '1');
+    const filtered = await rest(`listings?${filter}`, { prefer: 'count=exact' });
+    expectEqual(
+      'count=exact counts AFTER the keyset filter, not the whole list',
+      typeof filtered.count === 'number' && filtered.count < listingTotal,
+      true,
+    );
+    expectEqual(
+      '...which is exactly why runPaged asks a second time on page two',
+      filtered.count,
+      listingTotal - 1,
     );
   }
 }
