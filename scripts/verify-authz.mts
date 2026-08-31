@@ -44,6 +44,9 @@ const { __resetStoreCache, mutateDb } = await import('@/lib/data/mock/store');
 // from here — see the header of that file. Its sibling `password-reset.ts`
 // writes cookies and therefore cannot be.
 const { hashToken, issueResetToken, redeemResetToken } = await import('@/lib/auth/reset-tokens');
+// Free of `next/headers` for the same reason — `clientIp()` lives in its own
+// module precisely so this one can be called from a plain Node script.
+const { LIMITS, consume } = await import('@/lib/rate-limit');
 
 const db = getDataClient();
 
@@ -4179,6 +4182,98 @@ expectEqual(
   '...and the password still works afterwards',
   (await db.signInWithPassword({ email: RESET_EMAIL, password: RESET_NEW_PASSWORD }))?.id,
   resetUser!.id,
+);
+
+// ---------------------------------------------------------------------------
+section('Rate limiting — a speed bump that has to count correctly');
+// ---------------------------------------------------------------------------
+// The mock twin of `consume_rate_limit()` (0013). What is asserted is the
+// arithmetic, because that is what both implementations have to agree on: the
+// Nth call is the last one admitted, the (N+1)th is not, an exhausted bucket
+// STAYS exhausted while it is being hammered, an expired window restarts, and
+// two keys never share a budget.
+//
+// What is NOT asserted here is the fail-open behaviour, which is deliberate and
+// documented rather than tested: forcing the store to error would mean breaking
+// it, and the branch is two lines around a `catch`.
+
+// Distinct keys per assertion, since `consume` is stateful by construction and
+// a shared key would make every assertion depend on the order of the ones above.
+const RL_KEY = (name: string) => `verify-authz-${name}-${Math.random().toString(36).slice(2)}`;
+
+// --- the boundary ----------------------------------------------------------
+// `signupIp` is 5 an hour. The fifth call is admitted and the sixth is not —
+// asserted at BOTH ends, because a limiter that is off by one in the permissive
+// direction looks identical to a correct one until it matters.
+const boundaryKey = RL_KEY('boundary');
+const signupLimit = LIMITS.signupIp.limit;
+let lastAdmitted = true;
+for (let attempt = 1; attempt <= signupLimit; attempt += 1) {
+  lastAdmitted = await consume('signupIp', boundaryKey);
+}
+expectEqual(`the ${signupLimit}th attempt is still admitted`, lastAdmitted, true);
+expectEqual('...and the next one is refused', await consume('signupIp', boundaryKey), false);
+
+// --- hammering keeps it exhausted ------------------------------------------
+// The attempt is counted whether or not it was admitted, so a caller who keeps
+// going does not wait out a window they are still filling.
+for (let attempt = 0; attempt < 20; attempt += 1) await consume('signupIp', boundaryKey);
+expectEqual('an exhausted bucket stays exhausted while it is hammered', await consume('signupIp', boundaryKey), false);
+
+// --- keys are independent --------------------------------------------------
+// The control for every assertion above: if buckets collided, exhausting one
+// would exhaust all of them and the whole section would still pass.
+expectEqual('a DIFFERENT key has its own budget', await consume('signupIp', RL_KEY('other')), true);
+// And so does a different LIMIT with the same key — the bucket is derived from
+// both, so `resetIp:x` and `signupIp:x` are not one counter.
+expectEqual('...and so does a different limit with the same key', await consume('resetIp', boundaryKey), true);
+
+// --- the window restarts ---------------------------------------------------
+// Aged by moving `window_started_at` into the past rather than by waiting an
+// hour. The check reads the stored timestamp, so this is the same code path a
+// genuinely old row takes.
+const windowKey = RL_KEY('window');
+for (let attempt = 0; attempt < signupLimit + 3; attempt += 1) await consume('signupIp', windowKey);
+expectEqual('the aged bucket is exhausted to begin with', await consume('signupIp', windowKey), false);
+// EVERY row is aged, not the one this key owns. The bucket is an HMAC and
+// cannot be recomputed here without reaching into the secret — which is the
+// property the section below asserts, so working around it would be
+// self-defeating. Ageing all of them is unambiguous, and nothing asserted after
+// this point depends on an un-aged row: the control below is built fresh.
+const agedRows = await mutateDb((store) => {
+  const stale = new Date(Date.now() - (LIMITS.signupIp.windowSeconds + 60) * 1000).toISOString();
+  for (const row of store.rate_limits) row.window_started_at = stale;
+  return store.rate_limits.length;
+});
+expectEqual('the fixture aged every row', agedRows > 0, true);
+expectEqual('...and an expired window admits again', await consume('signupIp', windowKey), true);
+// RESTARTED, not trimmed: the fresh window starts at 1, so the full budget is
+// available again rather than one slot.
+expectEqual('...with a full budget, not a single slot', await consume('signupIp', windowKey), true);
+// THE CONTROL, and it is what stops the two assertions above passing for a
+// limiter that simply forgot everything: a bucket exhausted AFTER the ageing is
+// still refused, so it is the elapsed window doing the work rather than the
+// mutation.
+const controlKey = RL_KEY('control');
+for (let attempt = 0; attempt <= signupLimit; attempt += 1) await consume('signupIp', controlKey);
+expectEqual('a bucket exhausted after the ageing is still refused', await consume('signupIp', controlKey), false);
+
+// --- the stored bucket is not the key --------------------------------------
+// The property the SQL side needs: `anon` can call `consume_rate_limit()` with
+// any bucket, so a guessable one would let anybody burn a victim's password
+// reset budget. Asserted against the STORE, which is what a leak would expose.
+const plainKey = RL_KEY('plaintext');
+await consume('resetEmail', plainKey);
+const storedBuckets = await mutateDb((store) => store.rate_limits.map((r) => r.bucket));
+expectEqual(
+  'no stored bucket contains the key in the clear',
+  storedBuckets.some((b) => b.includes(plainKey)),
+  false,
+);
+expectEqual(
+  '...and they are all fixed-width hex, as an HMAC is',
+  storedBuckets.every((b) => /^[0-9a-f]{64}$/.test(b)),
+  true,
 );
 
 // ---------------------------------------------------------------------------

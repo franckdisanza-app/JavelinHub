@@ -24,6 +24,8 @@ import { requestPasswordReset } from '@/lib/auth/password-reset';
 import { createSession, destroySession, getActor, safeNextPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { guessAuthField, toFormState, type FormState } from '@/lib/forms';
+import { clientIp } from '@/lib/client-ip';
+import { consume, consumeBoth, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
 
 /** Where a user lands after signing in or signing up, unless `?next=` says otherwise. */
 const DEFAULT_LANDING = '/offers';
@@ -47,6 +49,19 @@ export async function signUpAction(_prev: FormState, formData: FormData): Promis
 
   if (Object.keys(fieldErrors).length > 0) {
     return { status: 'error', message: 'Please correct the highlighted fields.', fieldErrors, values };
+  }
+
+  /*
+   * Per IP only. There is no address to key on that the caller did not choose
+   * themselves — an attacker minting accounts varies the email by definition —
+   * so the address axis would count one attempt per bucket forever and limit
+   * nothing.
+   *
+   * Consumed AFTER validation, so a typo in the email field does not spend a
+   * budget the person will need when they correct it.
+   */
+  if (!(await consume('signupIp', (await clientIp()) ?? 'no-ip'))) {
+    return { status: 'error', message: TOO_MANY_MESSAGE, values };
   }
 
   let userId: string;
@@ -73,6 +88,20 @@ export async function logInAction(_prev: FormState, formData: FormData): Promise
   if (password === '') fieldErrors.password = 'Enter your password.';
   if (Object.keys(fieldErrors).length > 0) {
     return { status: 'error', message: 'Please correct the highlighted fields.', fieldErrors, values };
+  }
+
+  /*
+   * Both axes. Per address is what makes guessing one account's password
+   * expensive; per IP is what stops a caller working through a list of
+   * addresses at one try each, which the address limit alone never sees.
+   *
+   * The refusal message is the SAME SHAPE as the credentials one and mentions
+   * neither the address nor the limit — "too many attempts for that account"
+   * would confirm the account exists, which is the oracle this form is built
+   * not to be.
+   */
+  if (!(await consumeBoth({ name: 'loginEmail', email }, { name: 'loginIp', ip: await clientIp() }))) {
+    return { status: 'error', message: TOO_MANY_MESSAGE, values };
   }
 
   let userId: string;
@@ -126,6 +155,23 @@ export async function requestPasswordResetAction(
     // A shape check, not an existence check. It says nothing about whether the
     // address is registered — only that what was typed cannot be an address.
     return { status: 'error', message: 'Enter a valid email address.', fieldErrors: { email: 'Enter a valid email address.' }, values };
+  }
+
+  /*
+   * THE LIMIT THIS WHOLE MECHANISM WAS BUILT FOR. Both axes, and the IP one is
+   * the load-bearing half: GoTrue's mail quota is project-wide and shared, so a
+   * caller varying the address can deny password resets to every user without
+   * the per-address limit ever firing.
+   *
+   * Consumed BEFORE the send and counted whether or not an account exists, so
+   * the timing and the outcome are identical for a registered address and an
+   * unregistered one — the enumeration property the rest of this function
+   * exists to preserve would be undone by a limiter that only counted hits.
+   */
+  if (!(await consumeBoth({ name: 'resetEmail', email }, { name: 'resetIp', ip: await clientIp() }))) {
+    // Deliberately NOT the success state. A caller being throttled should be
+    // told to wait rather than told an email is coming that is not.
+    return { status: 'error', message: TOO_MANY_MESSAGE, values };
   }
 
   try {

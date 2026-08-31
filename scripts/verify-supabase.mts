@@ -444,6 +444,73 @@ for (const bucket of ['deliverables', 'offer-assets']) {
 }
 
 // ===========================================================================
+section('Rate limiting — callable by anon, unreadable by anyone');
+// ===========================================================================
+// 0013. The counter has to be reachable without a session, because every form
+// it protects is — and the table behind it has to be reachable by nothing at
+// all, because a bucket is derived from an email address and a readable table
+// would be an "has this person asked for a password reset" oracle.
+//
+// These are writes in the sense that they increment a counter, but they create
+// no user-visible rows and are keyed on a bucket nothing else will ever use, so
+// they run in the read-only tier. The sweep in the function clears them within
+// a day.
+
+expectSqlState(
+  'the rate_limits table is unreadable, with no policy to review',
+  await rest('rate_limits?select=*&limit=1'),
+  '42501',
+);
+expectSqlState(
+  '...and unwritable',
+  await rest('rate_limits', { method: 'POST', body: { bucket: 'x', count: 0 }, prefer: 'return=minimal' }),
+  '42501',
+);
+
+// The function IS callable by anon. A limiter that only applied to signed-in
+// callers would protect none of the forms it exists for.
+const probeBucket = `verify-supabase-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+const first = await rpc('consume_rate_limit', { p_bucket: probeBucket, p_limit: 2, p_window_seconds: 60 });
+expectEqual('anon may consume a rate limit', first.status, 200);
+expectEqual('...and the first attempt is admitted', first.body, true);
+expectEqual(
+  '...the second, at a limit of 2, still is',
+  (await rpc('consume_rate_limit', { p_bucket: probeBucket, p_limit: 2, p_window_seconds: 60 })).body,
+  true,
+);
+expectEqual(
+  '...and the third is refused',
+  (await rpc('consume_rate_limit', { p_bucket: probeBucket, p_limit: 2, p_window_seconds: 60 })).body,
+  false,
+);
+// Counted even when refused, so hammering an exhausted bucket keeps it
+// exhausted rather than letting a caller wait out a window they keep filling.
+await rpc('consume_rate_limit', { p_bucket: probeBucket, p_limit: 2, p_window_seconds: 60 });
+expectEqual(
+  '...and stays refused while it is hammered',
+  (await rpc('consume_rate_limit', { p_bucket: probeBucket, p_limit: 2, p_window_seconds: 60 })).body,
+  false,
+);
+// The control: a different bucket has its own budget, so the refusals above are
+// about this bucket rather than about the function refusing everything.
+expectEqual(
+  'a different bucket has its own budget',
+  (await rpc('consume_rate_limit', { p_bucket: `${probeBucket}-other`, p_limit: 2, p_window_seconds: 60 })).body,
+  true,
+);
+// Degenerate arguments fail CLOSED inside the function. They cannot arrive from
+// the app — the budgets are constants — so the only caller who can send one is
+// somebody probing, and a zero window would otherwise make every row instantly
+// stale and the limiter a no-op that still looks installed.
+for (const [shape, args] of [
+  ['a zero limit', { p_bucket: probeBucket, p_limit: 0, p_window_seconds: 60 }],
+  ['a negative limit', { p_bucket: probeBucket, p_limit: -1, p_window_seconds: 60 }],
+  ['a zero window', { p_bucket: probeBucket, p_limit: 5, p_window_seconds: 0 }],
+] as Array<[string, Record<string, unknown>]>) {
+  expectEqual(`${shape} is refused rather than ignored`, (await rpc('consume_rate_limit', args)).body, false);
+}
+
+// ===========================================================================
 section('The signed-in tier');
 // ===========================================================================
 

@@ -223,20 +223,29 @@ them twice is how the two diverge.
   trigram GIN indexes serve instead. Either implement `textSearch` against the
   tsvector or drop the index — right now it costs write throughput and buys
   nothing.
-* **No rate limiting** on signup, login, password reset, or invite redemption —
-  none of it in our own code. Partially covered in production by accident:
-  GoTrue rate-limits the auth endpoints and, harder, the email ones, so the
-  reset form's practical exposure is that somebody can **exhaust the shared
-  mail quota and deny password resets to everybody**. That is the shape to fix
-  first, and it is a consequence of the reset flow rather than a pre-existing
-  gap.
+* ~~**No rate limiting**~~ **Done** — signup, login, password reset and invite
+  redemption all consume a budget before they do any work. `src/lib/rate-limit.ts`
+  dispatches between a Postgres counter (`consume_rate_limit()`, 0013/0014) and
+  a mock twin, the way `password-reset.ts` does; the budgets are one exported
+  object so they read as a policy rather than as six scattered constants.
+
+  Two properties worth knowing. **The bucket is an HMAC of the key**, because
+  `anon` has to be able to consume a limit and a guessable bucket would let
+  anybody burn a victim's password-reset budget and lock them out of their own
+  recovery. And **it fails open**: a limiter that can take login down is a worse
+  liability than the abuse it prevents, so it is a speed bump and nothing about
+  authorization may ever depend on it. The per-IP half is a speed bump on a
+  speed bump — proxy headers are attacker-controlled unless something in front
+  overwrites them.
+
+  What it does NOT cover: any other Server Action, and the app's own transactional
+  mail once that exists.
 
   **The invite-code half of this was overstated and is corrected here.** An
-  earlier revision said brute-forcing a code is "currently free". Free, yes —
-  nothing throttles the attempt. But `generateInviteCode()` draws 12 characters
-  from a 30-character alphabet, which is 30¹² ≈ 2⁵⁹. That is not a guessing
-  target, and leaving the claim in place dilutes the two limits above, which
-  are real.
+  earlier revision said brute-forcing a code is "currently free". Free, yes, and
+  now throttled — but `generateInviteCode()` draws 12 characters from a
+  30-character alphabet, which is 30¹² ≈ 2⁵⁹. That is not a guessing target, and
+  leaving the claim in place dilutes the limits that were real.
 * **No caching.** Every route renders dynamically (`ƒ` in the build output).
   `/offers` and `/coaches` are public reads and should not be.
 
@@ -288,8 +297,8 @@ decisions, not omissions:
    `http://127.0.0.1:3000`, which has to be the real domain before any email
    flow is built on top of it.
 4. ~~**Storage and delivery.**~~ Done — both modes, both buckets.
-5. ~~**Password reset.**~~ Done — see §4. Transactional email of our own is
-   still open, and so is rate limiting in front of it.
+5. ~~**Password reset, and rate limiting in front of it.**~~ Both done — see §4
+   and §6. Transactional email of our own is still open.
 6. **Bootstrap the live project.** It has the schema and nothing else: no
    profiles, no administrator, and therefore no way to approve a coach. Cheap,
    and it blocks every hands-on check of everything above. See

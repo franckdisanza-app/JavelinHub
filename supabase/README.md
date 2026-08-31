@@ -1,7 +1,7 @@
 # `supabase/` — schema, RLS, and the mock → Postgres swap path
 
 **Applied.** Project ref `trocsdetpwyqcgyfclir`, PostgreSQL 17, migrations
-**0001-0012** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
+**0001-0014** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
 pages off it.
 
 **But the project holds no data and no administrator** — see the warning under
@@ -12,8 +12,8 @@ being usable, and it currently is not.
 somebody re-ran by hand: `npm run verify:supabase`. It asks PostgREST and
 GoTrue directly, with the same anon key a browser gets, and it is READ-ONLY by
 default because it runs against whatever `NEXT_PUBLIC_SUPABASE_URL` names —
-here, the live project. Last run: **43 passed** read-only, **53 passed** with
-the signed-in tier, 0 failed, the coach tier skipped for want of an invite code.
+here, the live project. Last run: **54 passed** read-only, 0 failed, the coach
+tier skipped for want of an invite code.
 
 What the read-only tier covers, and why each one is here rather than in the
 mock suites:
@@ -28,6 +28,16 @@ mock suites:
 | `claim_offer`, `grant_admin`, `redeem_invite_code` anonymously | each returns its OWN authored sentence, which is the half of `errors.ts` that preserves rather than replaces |
 | every `ListingCategory` and `FulfilmentMode` accepted by the cast | the TypeScript unions are hand-written; a member added to one and not the other is invisible until a write fails |
 | `deliverables` / `offer-assets` list nothing for anon | 0008 makes one bucket public and 0011 makes these two private; a bucket that silently flipped would serve every delivered file |
+| `rate_limits` unreadable and unwritable; `consume_rate_limit()` callable by anon and counting correctly | the function is SECURITY DEFINER and unreachable from the mock — **this is the check that caught 0013's missing grant**, which both mock suites were green through |
+
+**The suite has already paid for itself.** 0013 shipped a SECURITY DEFINER
+function whose own table it had no privilege on, and no policy admitting it —
+`42501 permission denied for table rate_limits` on every call. `verify:authz`
+and `verify:pages` were green throughout, because the mock twin has neither
+grants nor RLS to get wrong. 0014 supplies both; the lesson is recorded in its
+header, and it is worth repeating here: **SECURITY DEFINER does not bypass RLS.**
+It changes which role the statement runs as, and the policies are then evaluated
+for that role like anyone else.
 
 **Email confirmation is confirmed OFF**, which is what the swap path asks for
 and what password reset depends on — the signed-in tier's account came back
@@ -44,7 +54,7 @@ and every PostgREST request arrives as `authenticator`, service-role included.
 The suite confirms that rather than assuming it — `grant_admin` anonymously
 answers `42501 Only an administrator can grant administrator access.`
 
-The mock remains the code twin and is still what `npm run verify:authz` (850
+The mock remains the code twin and is still what `npm run verify:authz` (862
 assertions) and `npm run verify:pages` (247) exercise — both hard-set
 `DATA_BACKEND=mock`, so **neither of those two covers `SupabaseDataClient`.**
 
@@ -69,6 +79,8 @@ therefore an account on somebody's domain — see "Before trusting this" below.
 | `migrations/0010_claim_offer_policies.sql` | the policy work that call needs; there is still no client `INSERT` on `orders` |
 | `migrations/0011_delivery.sql` | the two fulfilment modes, `deliverables`, the private `deliverables` and `offer-assets` buckets, and the claim refusal for an instant offer with no file |
 | `migrations/0012_instant_delivery_reads.sql` | the two row-level reads instant delivery needs — `asset_path` on `owned_listings`, and `entitled_offer_assets` |
+| `migrations/0013_rate_limits.sql` | the `rate_limits` counter and `consume_rate_limit()` — **incomplete as applied**, see 0014 |
+| `migrations/0014_rate_limits_privileged.sql` | the grant and the policy 0013 forgot, without which the function could not touch its own table |
 | `seed.sql` | demo fixtures — the SQL mirror of `seedDatabase()` in `src/lib/data/mock/store.ts`. **Fabricated purchases and reviews; do not load into a project real users will see.** Flags everything it inserts as `is_demo` |
 
 ### Finding fabricated data

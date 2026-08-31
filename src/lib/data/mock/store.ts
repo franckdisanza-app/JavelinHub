@@ -88,6 +88,23 @@ export interface PasswordReset {
   used_at: string | null;
 }
 
+/**
+ * A fixed-window request counter. **MOCK ONLY**, mirroring
+ * `public.rate_limits` (0013) row for row.
+ *
+ * `bucket` is an opaque HMAC computed by `src/lib/rate-limit.ts`, never an
+ * address in the clear — the SQL side needs that property because `anon` can
+ * call `consume_rate_limit()` and a guessable bucket would let anyone exhaust
+ * a victim's password-reset budget. The mock has no such exposure (nothing
+ * outside the process can call it) but keeps the shape, so the two are the same
+ * mechanism rather than two mechanisms that agree by luck.
+ */
+export interface RateLimit {
+  bucket: string;
+  count: number;
+  window_started_at: string;
+}
+
 export interface MockDb {
   /** Bumped when the on-disk shape changes; a mismatch triggers a reseed. */
   version: number;
@@ -104,6 +121,8 @@ export interface MockDb {
   deliverables: Deliverable[];
   /** Pending password resets. Mock only — GoTrue owns this on Supabase. */
   password_resets: PasswordReset[];
+  /** Fixed-window request counters. Mirrors `public.rate_limits` (0013). */
+  rate_limits: RateLimit[];
 }
 
 const DB_VERSION = 1;
@@ -121,6 +140,7 @@ function emptyDb(): MockDb {
     reviews: [],
     deliverables: [],
     password_resets: [],
+    rate_limits: [],
   };
 }
 
@@ -686,6 +706,11 @@ export function seedDatabase(db: MockDb): void {
   // trade than repairing it on load. Nothing is seeded into it — a pending
   // reset is not a fixture, it is a live credential.
   if (!Array.isArray(db.password_resets)) db.password_resets = [];
+
+  // Same backfill, same reasoning. Nothing is seeded into it either: a rate
+  // limit is a fact about live traffic, and a fixture in it would silently
+  // pre-spend somebody's budget on a fresh store.
+  if (!Array.isArray(db.rate_limits)) db.rate_limits = [];
 
   // The three coach columns arrived after the first stores were written, so a
   // real `data/db.json` is holding profile rows with no such keys at all.

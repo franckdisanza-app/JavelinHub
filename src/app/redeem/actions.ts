@@ -7,6 +7,8 @@ import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { isDataError } from '@/lib/data/types';
 import type { FormState } from '@/lib/forms';
+import { clientIp } from '@/lib/client-ip';
+import { consume, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
 
 /**
  * Redeems an invite code for the signed-in user.
@@ -26,6 +28,26 @@ export async function redeemInviteAction(_prev: FormState, formData: FormData): 
       status: 'error',
       message: 'Please correct the highlighted fields.',
       fieldErrors: { code: 'Enter your invite code.' },
+    };
+  }
+
+  /*
+   * Per IP. NOT because a code is guessable — `generateInviteCode()` draws 12
+   * characters from a 30-character alphabet, about 2⁵⁹, and arithmetic is what
+   * makes guessing hopeless. This is here so that trying is not free, and
+   * because an endpoint that promotes its caller to approved coach is a
+   * convenient thing to hammer whatever the odds.
+   *
+   * Keyed on IP rather than on the actor: a signed-in user id would let one
+   * account be the whole budget while an attacker cycles accounts, and the
+   * codes are not account-specific anyway.
+   */
+  if (!(await consume('redeemIp', (await clientIp()) ?? 'no-ip'))) {
+    return {
+      status: 'error',
+      message: TOO_MANY_MESSAGE,
+      fieldErrors: { code: TOO_MANY_MESSAGE },
+      values: { code },
     };
   }
 
