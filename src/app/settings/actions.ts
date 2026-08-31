@@ -128,6 +128,62 @@ export async function updateAvatarAction(_prev: FormState, formData: FormData): 
 }
 
 /**
+ * Starts a change of the sign-in address.
+ *
+ * NOTHING HAS CHANGED WHEN THIS RETURNS on Supabase, and the copy has to say so:
+ * GoTrue mails the current address and the new one, and applies the change only
+ * when both are confirmed. Telling somebody their address is updated when it is
+ * not would send them to sign in with an address that does not work yet.
+ *
+ * The mock has no mail and changes it immediately, so the two arms of
+ * `EmailChangeResult` get two different messages rather than one hedged one.
+ *
+ * RATE-LIMITED ON THE ACCOUNT, and this is the form where it matters most: each
+ * attempt asks GoTrue to send TWO emails, against a project-wide quota that is
+ * measured in a handful an hour. A loop here does not merely spam one person, it
+ * takes password reset down for every user — the exact denial of service
+ * `rate-limit.ts` was built for.
+ */
+export async function changeEmailAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const email = String(formData.get('email') ?? '').trim();
+  const values = { email };
+
+  if (email === '') return fieldError({ email: 'Enter the new email address.' }, values);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return fieldError({ email: 'Enter a valid email address.' }, values);
+  }
+
+  const actor = await getActor();
+  if (!actor) redirect(loginPath(SETTINGS_PATH));
+
+  if (!(await consume('resetEmail', `change-email:${actor.userId}`))) {
+    return { status: 'error', message: TOO_MANY_MESSAGE, values };
+  }
+
+  let sent = false;
+  try {
+    const result = await getDataClient().requestEmailChange(actor, email);
+    sent = result.status === 'confirm_email';
+  } catch (error) {
+    if (!isDataError(error)) throw error;
+    // `conflict` is "another account has that address", which belongs beside
+    // the field rather than at form level.
+    if (error.code === 'conflict' || error.code === 'invalid') {
+      return { status: 'error', message: error.message, fieldErrors: { email: error.message }, values };
+    }
+    return toFormState(error, { values });
+  }
+
+  // The address is rendered in the header on neither backend, but `profiles`
+  // is read by the layout and a mock change lands immediately.
+  revalidatePath('/', 'layout');
+
+  // The two arms carry different truths, so the form is told which one happened
+  // rather than being left to guess from the backend.
+  return { status: 'success', values: { email, pending: sent ? 'yes' : 'no' } };
+}
+
+/**
  * Changes the password of somebody who is signed in and knows the old one.
  *
  * NOT the reset flow. `resetPasswordAction` asks for no current password

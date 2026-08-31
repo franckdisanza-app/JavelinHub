@@ -197,9 +197,23 @@ the buyer reviews it. What is left in §1 is the money.
   the link from configuration and never from the request's `Host` header,
   precisely so that a crafted request cannot make us email a valid reset link
   pointing somewhere else.
-* **No email change and no account deletion** — the two things `/settings` says
-  plainly it cannot do yet, rather than leaving a reader to hunt for them. Name,
-  picture and password now live there for everyone.
+* ~~**No email change**~~ **done**, and **no account deletion** — the one thing
+  `/settings` still says plainly it cannot do, rather than leaving a reader to
+  hunt for it. Name, picture, email and password all live there now, for
+  everyone.
+
+  The email change needed `0017` before it needed any UI. `profiles.email` is a
+  copy of `auth.users.email` written ONCE by an `AFTER INSERT` trigger, and
+  pinned against every client write by `guard_profile_privilege_columns` — so a
+  successful GoTrue change would have left the copy holding the old address
+  permanently, with no code path able to correct it. A trigger rather than an
+  application write because the moment the change lands is not a moment the app
+  is present for: with "Secure email change" on it needs BOTH addresses to
+  confirm, hours apart, in whatever browser.
+
+  That two-address confirmation is the security property worth having — a
+  single-step change is exactly how somebody holding a borrowed session moves an
+  account to their own inbox.
 
   Deletion is not optional under GDPR, and the foreign-key graph makes the naive
   version either impossible or destructive: `listings.coach_id` cascades while

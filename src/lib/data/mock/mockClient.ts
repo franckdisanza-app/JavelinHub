@@ -27,6 +27,7 @@ import type {
   DataClient,
   ListingFilter,
   SignInInput,
+  EmailChangeResult,
   SignUpInput,
   SignUpResult,
   UpdateListingInput,
@@ -788,6 +789,57 @@ export class MockDataClient implements DataClient {
       // `updated_at` on the PROFILE is deliberately untouched: nothing public
       // changed, and moving it would reorder the coach directory on a password
       // change. Same reasoning as updateMyPassword.
+    });
+  }
+
+  /**
+   * Changes the address immediately. **The mock has no mail, so there is
+   * nothing to confirm** — the same split as `signUp` and password reset, where
+   * GoTrue owns a mechanism this backend cannot have.
+   *
+   * Writes BOTH `auth_users.email` (the credential, which `signInWithPassword`
+   * matches on) and `profiles.email` (the copy). In Postgres those are two
+   * statements in two places — GoTrue writes the first and the `0017` trigger
+   * writes the second — and here they are one `mutateDb`, which is the mock's
+   * transaction. Writing only one would leave an account that can no longer
+   * sign in, or a profile that names an address nobody can reach.
+   */
+  async requestEmailChange(actor: Actor, newEmail: string): Promise<EmailChangeResult> {
+    const email = requireEmail(newEmail);
+
+    return mutateDb((db) => {
+      const profile = resolveProfile(db, actor);
+
+      const user = db.auth_users.find((u) => u.id === profile.id);
+      if (!user) {
+        throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
+      }
+
+      if (user.email === email) {
+        throw new DataError('invalid', 'That is already your email address.');
+      }
+
+      // Mirrors the unique constraint on `auth.users.email`. Checked against the
+      // CREDENTIAL table and not against `profiles`, whose email column
+      // deliberately carries no unique constraint — the same reasoning `signUp`
+      // uses.
+      //
+      // This DOES tell a caller that some other account holds the address, and
+      // that is a real trade: the alternative is silently doing nothing and
+      // leaving somebody staring at an inbox forever. A signed-in user probing
+      // one address at a time through a rate-limited form is a far weaker oracle
+      // than the signup page would be, which is why THAT one stays silent.
+      if (db.auth_users.some((u) => u.email === email && u.id !== profile.id)) {
+        throw new DataError('conflict', 'Another account already uses that email address.');
+      }
+
+      user.email = email;
+      // The copy. In Postgres this is the 0017 trigger's job, and no client role
+      // may write it at all.
+      profile.email = email;
+      profile.updated_at = nowIso();
+
+      return { status: 'changed', profile: copy(profile) };
     });
   }
 

@@ -2,7 +2,12 @@
 
 import { useActionState } from 'react';
 
-import { changePasswordAction, updateAvatarAction, updateNameAction } from '@/app/settings/actions';
+import {
+  changeEmailAction,
+  changePasswordAction,
+  updateAvatarAction,
+  updateNameAction,
+} from '@/app/settings/actions';
 import { InitialsAvatar } from '@/components/initials-avatar';
 import { Alert } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -11,9 +16,9 @@ import { Input } from '@/components/ui/input';
 import { idleFormState } from '@/lib/forms';
 
 /**
- * The three account forms.
+ * The four account forms.
  *
- * THREE FORMS AND THREE ACTIONS, not one of each. They fail independently and
+ * FOUR FORMS AND FOUR ACTIONS, not one of each. They fail independently and
  * for unrelated reasons — a rejected picture must not discard a name the user
  * just typed, and a wrong current password must not make them re-pick a
  * picture. It is the same reasoning `AvatarForm` used when it was split out of
@@ -148,6 +153,80 @@ export function AvatarForm({ name, currentUrl, currentPath, available }: AvatarF
         </Alert>
       )}
     </div>
+  );
+}
+
+/**
+ * Change the sign-in address.
+ *
+ * THE CONFIRMATION COPY IS THE FEATURE. On Supabase nothing has changed when
+ * this succeeds — GoTrue mails BOTH the current address and the new one, and
+ * applies the change only when both are confirmed, so that somebody holding a
+ * borrowed session cannot move an account to their own inbox in one click.
+ * Telling the user "your email is updated" would send them off to sign in with
+ * an address that does not work yet.
+ *
+ * The mock has no mail and changes it immediately, so the action reports which
+ * of the two happened rather than making this component guess from the backend.
+ */
+export function EmailForm({ currentEmail }: { currentEmail: string }) {
+  const [state, formAction, pending] = useActionState(changeEmailAction, idleFormState);
+  const errors = state.fieldErrors ?? {};
+  const pendingConfirmation = state.values?.pending === 'yes';
+
+  if (state.status === 'success') {
+    return pendingConfirmation ? (
+      <Alert tone="success" title="Check both inboxes.">
+        <p>
+          We have sent a link to <strong>{currentEmail}</strong> and to{' '}
+          <strong>{state.values?.email}</strong>. Both have to be confirmed before the change takes
+          effect — that is what stops somebody moving an account to their own address.
+        </p>
+        <p className="mt-3">
+          Until then, keep signing in with <strong>{currentEmail}</strong>.
+        </p>
+      </Alert>
+    ) : (
+      <Alert tone="success" title="Your email is changed.">
+        Sign in with <strong>{state.values?.email}</strong> from now on.
+      </Alert>
+    );
+  }
+
+  return (
+    <form action={formAction} className="flex flex-col gap-4">
+      {state.status === 'error' && state.message && !errors.email ? (
+        <Alert tone="error">{state.message}</Alert>
+      ) : null}
+
+      <p className="text-sm leading-relaxed text-muted">
+        You sign in with <strong className="font-medium text-ink">{currentEmail}</strong>.
+      </p>
+
+      <Field
+        id="email"
+        label="New email"
+        hint="Both your current address and the new one get a link, and both have to be confirmed."
+        error={errors.email}
+      >
+        <Input
+          id="email"
+          name="email"
+          type="email"
+          autoComplete="email"
+          required
+          defaultValue={state.values?.email ?? ''}
+          invalid={Boolean(errors.email)}
+          aria-describedby={fieldDescribedBy('email', { hint: true, error: errors.email })}
+        />
+      </Field>
+
+      <div>
+        <Button type="submit" variant="secondary" disabled={pending}>
+          {pending ? 'Sending…' : 'Change email'}
+        </Button>
+      </div>
+    </form>
   );
 }
 

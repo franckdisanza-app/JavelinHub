@@ -211,6 +211,27 @@ export type SignUpResult =
    */
   | { status: 'confirm_email'; email: string };
 
+/**
+ * What {@link DataClient.requestEmailChange} produced.
+ *
+ * A union for the same reason {@link SignUpResult} is one, and the two arms are
+ * a genuine difference in what happened rather than a difference in wording:
+ *
+ *   `confirm_email`  nothing has changed yet. GoTrue has sent a link — to BOTH
+ *                    addresses, with "Secure email change" on — and the change
+ *                    lands only when they are confirmed. This is the Supabase
+ *                    answer, always.
+ *   `changed`        the address is already different. This is the mock, which
+ *                    has no mail and therefore nothing to confirm.
+ *
+ * A caller that assumed one shape would either tell a Supabase user their
+ * address had changed when it had not, or send a mock user to check an inbox
+ * that will stay empty.
+ */
+export type EmailChangeResult =
+  | { status: 'confirm_email'; email: string }
+  | { status: 'changed'; profile: Profile };
+
 /** Input to {@link DataClient.signInWithPassword}. */
 export interface SignInInput {
   email: string;
@@ -588,6 +609,31 @@ export interface DataClient {
    * so a wrong-password loop is expensive on both.
    */
   changeMyPassword(actor: Actor, currentPassword: string, newPassword: string): Promise<void>;
+
+  /**
+   * Starts a change of the address the actor signs in with.
+   *
+   * **THE ADDRESS IS ON `auth.users`, and `profiles.email` is a copy of it.**
+   * That copy is written once at signup and pinned against every client write
+   * by `guard_profile_privilege_columns` — so nothing in this interface writes
+   * it, and nothing should. `0017` adds the `AFTER UPDATE OF email` trigger
+   * that keeps the two in step, which is the only writer after signup.
+   *
+   * On Supabase this returns `confirm_email` and NOTHING HAS CHANGED YET: with
+   * "Secure email change" on, GoTrue mails both the old and the new address and
+   * applies the change only when both confirm. That is deliberate — an attacker
+   * holding a borrowed session should not be able to move an account to their
+   * own inbox in one click, which is exactly what a single-step change is.
+   *
+   * The mock has no mail and returns `changed`.
+   *
+   * Refuses an address that is already registered, on the mock. Supabase's
+   * answer for that case is GoTrue's, which with email-enumeration protection
+   * on may report success and simply send nothing — see the note in the
+   * implementation. Neither backend confirms to a caller that some other
+   * account holds an address.
+   */
+  requestEmailChange(actor: Actor, newEmail: string): Promise<EmailChangeResult>;
 
 
   // ---------------------------------------------------------------------------

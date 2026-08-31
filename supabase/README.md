@@ -1,7 +1,7 @@
 # `supabase/` — schema, RLS, and the mock → Postgres swap path
 
 **Applied.** Project ref `trocsdetpwyqcgyfclir`, PostgreSQL 17, migrations
-**0001-0016** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
+**0001-0017** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
 pages off it.
 
 **Bootstrapped.** An administrator exists, minted an invite code, and that code
@@ -15,8 +15,9 @@ been run, so there is no fabricated data.
 somebody re-ran by hand: `npm run verify:supabase`. It asks PostgREST and
 GoTrue directly, with the same anon key a browser gets, and it is READ-ONLY by
 default because it runs against whatever `NEXT_PUBLIC_SUPABASE_URL` names —
-here, the live project. Last full run — every tier, nothing skipped —
-**88 passed, 0 failed, 0 skipped.**
+here, the live project. Last run: **61 passed, 0 failed**, with the write tiers
+skipped — see below, they can no longer provision fixtures against a project
+that validates email domains.
 
 What the read-only tier covers, and why each one is here rather than in the
 mock suites:
@@ -71,8 +72,8 @@ PostgREST request arrives as `authenticator`, service-role included. The suite
 confirms that rather than assuming it — `grant_admin` anonymously answers
 `42501 Only an administrator can grant administrator access.`
 
-The mock remains the code twin and is still what `npm run verify:authz` (930
-assertions) and `npm run verify:pages` (261) exercise — both hard-set
+The mock remains the code twin and is still what `npm run verify:authz` (967
+assertions) and `npm run verify:pages` (299) exercise — both hard-set
 `DATA_BACKEND=mock`, so **neither of those two covers `SupabaseDataClient`.**
 
 The app itself was separately checked serving real pages off this project:
@@ -104,6 +105,7 @@ MAIL has not.
 | `migrations/0014_rate_limits_privileged.sql` | the grant and the policy 0013 forgot, without which the function could not touch its own table |
 | `migrations/0015_drop_dead_search_index.sql` | drops `listings_search_tsv_idx`, which no query has ever used — see its header for why implementing the full-text variant was the wrong fix |
 | `migrations/0016_review_moderation.sql` | `removed_reviews`, `remove_review()`, and the DROP of `reviews_update_admin` and `reviews_delete_admin` — both were routes around the audited one |
+| `migrations/0017_sync_profile_email.sql` | the `AFTER UPDATE OF email` trigger on `auth.users` — the only writer of `profiles.email` after signup, and without it an email change desyncs the copy forever |
 | `seed.sql` | demo fixtures — the SQL mirror of `seedDatabase()` in `src/lib/data/mock/store.ts`. **Fabricated purchases and reviews; do not load into a project real users will see.** Flags everything it inserts as `is_demo` |
 
 ### Finding fabricated data
@@ -760,6 +762,7 @@ error you get*, or about capabilities that exist on only one side.
 | Validation messages | The mock validates lengths (title ≤ 140, bio ≥ 20 chars, …) before touching the store; SQL only has `price_cents >= 0` and NOT NULL. Field-level messages therefore come from application code in both backends — the `SupabaseDataClient` must keep the same validation helpers or the UI copy changes on swap. |
 | `invites.created_by` is `ON DELETE RESTRICT` | Deliberate: an invite is the audit record of who granted somebody coach status, and an author that has silently become NULL is worth little. The documented cost is that an admin who has minted invites cannot be hard-deleted until those invites are reassigned or removed. `redeemed_by` and `reviewed_by` are `ON DELETE SET NULL`, so they never block a deletion. The mock does not model deletion at all. |
 | Password storage | The mock uses `scrypt` in `store.ts`; Supabase uses its own `auth.users`. `signUp`, `signInWithPassword` and `updateMyPassword` are the methods whose internals differ completely. All three share `requirePassword()` so the length rule and its wording are identical, and none of them TRIMS — a password is stored exactly as typed, which `requireText` would not do and which a regression test in `verify-authz.mts` pins. GoTrue applies its own minimum on top, a project setting, so Supabase can be stricter. |
+| Changing an email address | **The mock changes it immediately; Supabase cannot.** With "Secure email change" on, GoTrue mails BOTH the current address and the new one and applies the change only when both confirm — so `requestEmailChange` returns `confirm_email` there and `changed` here, which is a genuine difference in what happened rather than in wording. The mock also REPORTS a taken address as `conflict`, which Supabase cannot: with email-enumeration protection on, GoTrue succeeds and silently sends nothing, and distinguishing the two would rebuild the oracle that protection exists to prevent. |
 | Password RESET | **The mechanism exists on only one side.** GoTrue owns minting, storing, emailing, expiring and redeeming a recovery token; the mock has no mail transport and no GoTrue, so `src/lib/auth/reset-tokens.ts` implements the equivalent against the JSON store (32 random bytes, SHA-256 at rest, one hour, single use, superseded by any newer request) and prints the link to the SERVER console. `password-reset.ts` dispatches between them, and neither half is on `DataClient` — the same reasoning that keeps object storage off it. What IS shared is the write that follows, `updateMyPassword`, because by then a session exists. |
 | Changing a password does not revoke OTHER sessions | True in both backends and worth knowing. The mock session is a self-contained signed cookie with no revocation list, so a copy taken earlier survives a password change until its own 30-day expiry. On Supabase, `auth.updateUser` rotates the calling session's tokens and leaves other refresh tokens alone unless the project is configured otherwise. Neither is what a user assumes "I changed my password" means. Closing it needs a session table on the mock side and `signOut({ scope: 'others' })` on the Supabase side — deliberately not faked in one backend only. |
 | `createReview` error granularity | The mock distinguishes `not_found` (no such order) from `forbidden` (somebody else's order). In Postgres both are one failed `with check` → 42501, so the `SupabaseDataClient` must re-`select` the order to reproduce the distinction, or accept a single `forbidden`. Same shape as the `revokeInvite` row above. The distinction is not an enumeration oracle: order ids are random v4 UUIDs, so "does this id exist" cannot be asked usefully. |

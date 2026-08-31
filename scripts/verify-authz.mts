@@ -4348,6 +4348,75 @@ expectEqual(
   COACH!.userId,
 );
 
+// --- changing the sign-in address -----------------------------------------
+// The mock changes it immediately (no mail to confirm), so what is asserted is
+// the pair of writes: the CREDENTIAL row that signInWithPassword matches on,
+// and the profile COPY. In Postgres those are two statements in two places —
+// GoTrue writes one, the 0017 trigger writes the other — and writing only one
+// leaves either an account that cannot sign in or a profile naming an address
+// nobody can reach.
+
+await refuses('an anonymous caller cannot change an address', 'unauthorized', () =>
+  db.requestEmailChange(null, 'nobody@javelin.test'),
+);
+for (const [shape, value] of [
+  ['an empty address', '   '],
+  ['a string with no @', 'not-an-address'],
+] as Array<[string, string]>) {
+  await refuses(`requestEmailChange rejects ${shape}`, 'invalid', () =>
+    db.requestEmailChange(SETTINGS_ACTOR, value),
+  );
+}
+await refuses('...and the address it already has', 'invalid', () =>
+  db.requestEmailChange(SETTINGS_ACTOR, 'settings@javelin.test'),
+);
+// Mirrors the unique constraint on `auth.users.email`, checked against the
+// CREDENTIAL table — `profiles.email` deliberately carries no unique
+// constraint, the same reasoning `signUp` uses.
+await refuses('...and one another account already holds', 'conflict', () =>
+  db.requestEmailChange(SETTINGS_ACTOR, 'coach@javelin.test'),
+);
+
+const changedEmail = await allows(
+  'the actor may change their OWN address',
+  () => db.requestEmailChange(SETTINGS_ACTOR, '  Settings.New@Javelin.TEST  '),
+  (r) => r.status,
+);
+expectEqual('...reporting the mock arm, because there is no mail to confirm', changedEmail?.status, 'changed');
+// Normalised the way every other address in this app is: `requireEmail` trims
+// and lowercases, so a user who capitalises their own address is not locked out
+// by it.
+expectEqual(
+  '...with the address normalised',
+  changedEmail?.status === 'changed' ? changedEmail.profile.email : null,
+  'settings.new@javelin.test',
+);
+
+// BOTH WRITES, asserted separately. The profile copy:
+expectEqual(
+  'the profile copy moved',
+  (await db.getProfile(SETTINGS_ACTOR, settingsUser!.id))?.email,
+  'settings.new@javelin.test',
+);
+// And the credential, which is the one that decides whether they can get back in:
+expectEqual(
+  'the new address signs in',
+  (await db.signInWithPassword({ email: 'settings.new@javelin.test', password: 'settings-second-password' }))?.id,
+  settingsUser!.id,
+);
+expectEqual(
+  '...and the old one no longer does',
+  await db.signInWithPassword({ email: 'settings@javelin.test', password: 'settings-second-password' }),
+  null,
+);
+// The control: nobody else's address moved, which is what a subject parameter
+// would have made possible.
+expectEqual(
+  'no other account’s address moved',
+  (await db.getProfile(ADMIN, COACH!.userId))?.email,
+  'coach@javelin.test',
+);
+
 // --- the avatar is EVERYONE's, which is why it moved to /settings ----------
 // `setMyAvatar` was always open to any signed-in user and only the UI was
 // coach-facing. Asserted for a plain learner, since that is the case the old

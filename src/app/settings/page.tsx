@@ -3,10 +3,11 @@ import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
-import { AvatarForm, NameForm, PasswordForm } from '@/app/settings/settings-forms';
+import { AvatarForm, EmailForm, NameForm, PasswordForm } from '@/app/settings/settings-forms';
 import { Alert } from '@/components/ui/alert';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { requireUser } from '@/lib/auth/session';
+import { firstValue } from '@/lib/search-params';
 import { avatarCacheBuster, avatarPublicUrl, avatarStorageAvailable } from '@/lib/storage/avatars';
 
 export const metadata: Metadata = { title: 'Account settings' };
@@ -34,9 +35,22 @@ const SETTINGS_PATH = '/settings';
  * title into the 404, while this page exists for every signed-in user and hides
  * nothing.
  */
-export default async function SettingsPage() {
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
   // Anonymous visitors land on /login?next=/settings and come straight back.
   const profile = await requireUser(SETTINGS_PATH);
+
+  /*
+   * Set by `/auth/callback` when an email-change link is redeemed — the
+   * `emailRedirectTo` GoTrue was given points here. Trusted only to show a
+   * message: the address rendered below comes from the PROFILE, so if the flag
+   * were forged the page would congratulate somebody on a change that had not
+   * happened and then show them their unchanged address two lines down.
+   */
+  const emailJustChanged = firstValue((await searchParams).email) === 'changed';
 
   /*
    * `avatarCacheBuster` appends the profile's `updated_at`, because the public
@@ -47,6 +61,13 @@ export default async function SettingsPage() {
 
   return (
     <Shell>
+      {emailJustChanged ? (
+        <Alert tone="success" title="Your email is confirmed.">
+          You now sign in with <strong className="font-medium">{profile.email}</strong>. If that is still
+          the old address, the other confirmation link has not been followed yet — both have to be.
+        </Alert>
+      ) : null}
+
       <Card tone="raised">
         <CardHeader
           title="Your name"
@@ -97,6 +118,16 @@ export default async function SettingsPage() {
 
       <Card tone="raised">
         <CardHeader
+          title="Your email"
+          description="The address you sign in with. Changing it needs both addresses to confirm."
+        />
+        <CardBody>
+          <EmailForm currentEmail={profile.email} />
+        </CardBody>
+      </Card>
+
+      <Card tone="raised">
+        <CardHeader
           title="Your password"
           description="You need your current one. If you have forgotten it, sign out and use the reset link instead."
         />
@@ -106,15 +137,15 @@ export default async function SettingsPage() {
       </Card>
 
       {/*
-        Said plainly rather than left to be discovered. Both are real gaps with
-        real consequences — one of them is a legal obligation — and a settings
-        page that silently lacks them reads as a page where they are hidden
-        somewhere.
+        Still said plainly rather than left to be discovered. Deletion is a legal
+        obligation, and a settings page that silently lacks it reads as a page
+        where it is hidden somewhere.
       */}
-      <Alert tone="info" title="Not here yet: changing your email, and deleting your account.">
+      <Alert tone="info" title="Not here yet: deleting your account.">
         <p>
-          Your sign-in address cannot be changed from here, and there is no self-service way to delete an
-          account. Both are being built. Until then, ask an administrator.
+          There is no self-service way to delete an account. It is being built, and it will anonymise your
+          profile rather than erase your purchases — deleting those would rewrite other people&rsquo;s
+          sales and ratings. Until then, ask an administrator.
         </p>
       </Alert>
     </Shell>
@@ -128,7 +159,7 @@ function Shell({ children }: { children: ReactNode }) {
     <div className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6 sm:py-14">
       <h1 className="text-2xl font-bold tracking-tight text-ink sm:text-3xl">Account settings</h1>
       <p className="mt-1.5 text-sm leading-relaxed text-muted">
-        Your name, your picture and your password. Everyone has this page.
+        Your name, your picture, your email and your password. Everyone has this page.
       </p>
       <div className="mt-8 flex flex-col gap-6">{children}</div>
     </div>

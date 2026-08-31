@@ -598,6 +598,43 @@ expectEqual(
 );
 
 // ===========================================================================
+section('The email sync trigger (0017)');
+// ===========================================================================
+// `profiles.email` is a copy of `auth.users.email` written ONCE, by an
+// AFTER INSERT trigger, and pinned against every client write by
+// `guard_profile_privilege_columns`. Without 0017 a successful GoTrue email
+// change would leave the copy holding the old address permanently, with no code
+// path able to correct it.
+//
+// The trigger itself cannot be fired from here — it needs a real email change,
+// which needs two confirmed links — so what is asserted is the boundary that
+// makes the trigger the ONLY writer: no client role can move the column.
+
+/*
+ * ADMITTED AND MATCHING NOTHING, not refused — the same distinction
+ * `owned_listings` makes above, and worth getting right rather than asserting
+ * the more dramatic answer. `profiles_update_own` is `using (id = auth.uid())`,
+ * and `auth.uid()` is NULL for anon, so the statement is allowed to run and
+ * reaches no row. PostgREST reports that as 204, or as an empty array when
+ * asked for the rows it changed.
+ *
+ * `return=representation` is what makes this an assertion rather than a shrug:
+ * a 204 alone cannot tell "changed nothing" from "changed something quietly".
+ */
+const emailWrite = await rest('profiles?id=eq.00000000-0000-4000-8000-000000000002&select=id', {
+  method: 'PATCH',
+  body: { email: 'moved@example.com' },
+  prefer: 'return=representation',
+});
+expectEqual('anon is admitted to the statement', emailWrite.status, 200);
+expectEqual('...and changes no row at all', rows(emailWrite).length, 0);
+
+// The guard behind it, reached only by somebody whose row the policy DOES
+// admit. That path needs a session, so it is asserted in `verify:authz`
+// against the mock twin — recorded here so the gap is deliberate rather than
+// forgotten.
+
+// ===========================================================================
 section('The signed-in tier');
 // ===========================================================================
 

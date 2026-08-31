@@ -66,6 +66,7 @@ import type {
   DataClient,
   ListingFilter,
   SignInInput,
+  EmailChangeResult,
   SignUpInput,
   SignUpResult,
   UpdateListingInput,
@@ -922,6 +923,64 @@ export class SupabaseDataClient implements DataClient {
       // and is worth showing; the mock raises the same refusal in its own words.
       throw new DataError('invalid', authMessage(error as AuthLikeError, 'Your password could not be changed.'));
     }
+  }
+
+  /**
+   * Asks GoTrue to start an email change. **Nothing has changed when this
+   * returns**, which is why the result is a union and not a `Profile`.
+   *
+   * With "Secure email change" on — the default, and the configuration this
+   * project runs — GoTrue mails BOTH the current address and the new one, and
+   * applies the change only when both links are followed. That is the property
+   * worth having: a single-step change is exactly how somebody holding a
+   * borrowed session moves an account to their own inbox, and the old address
+   * getting a say is what stops it.
+   *
+   * `emailRedirectTo` points both links at `/auth/callback`, for the same reason
+   * `signUp` does: without it GoTrue uses the project Site URL, where nothing
+   * exchanges the code and the link signs nobody in.
+   *
+   * **`profiles.email` is NOT written here, and must not be.**
+   * `guard_profile_privilege_columns` refuses it from any API session; the
+   * `0017` trigger copies it across when GoTrue eventually applies the change,
+   * which is the only moment it is true. Writing it optimistically here would
+   * name an address the account cannot yet sign in with.
+   */
+  async requestEmailChange(actor: Actor, newEmail: string): Promise<EmailChangeResult> {
+    const email = requireEmail(newEmail);
+    const ctx = await openAuthedContext(actor);
+    const profile = await resolveProfile(ctx);
+
+    if (profile.email === email) {
+      throw new DataError('invalid', 'That is already your email address.');
+    }
+
+    const { error } = await ctx.supabase.auth.updateUser(
+      { email },
+      { emailRedirectTo: `${siteUrl()}${AUTH_CALLBACK_PATH}?next=${encodeURIComponent('/settings?email=changed')}` },
+    );
+
+    if (error) {
+      const authError = error as AuthLikeError;
+      if (isAlreadyRegistered(authError)) {
+        throw new DataError('conflict', 'Another account already uses that email address.');
+      }
+      throw new DataError('invalid', authMessage(authError, 'That address could not be used.'));
+    }
+
+    /*
+     * ALWAYS `confirm_email`, even though GoTrue may have quietly done nothing.
+     *
+     * With email-enumeration protection on, asking to move to an address that
+     * already belongs to somebody else succeeds here and simply sends no mail —
+     * so this method cannot tell "a link is on its way" from "that address is
+     * taken" without becoming the oracle that protection exists to prevent. The
+     * mock CAN tell, and does, because its check is local; the divergence is
+     * recorded in `supabase/README.md`.
+     *
+     * The honest answer to the user is the same either way: check both inboxes.
+     */
+    return { status: 'confirm_email', email };
   }
 
   async setMyAvatar(actor: Actor, path: string | null): Promise<Profile> {

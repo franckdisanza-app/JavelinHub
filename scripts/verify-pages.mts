@@ -1642,7 +1642,12 @@ try {
   check('a learner gets the page', learnerSettings.status, 200);
   check('...with the name form', learnerSettings.html.includes('name="fullName"'), true);
   check('...the picture card', learnerSettings.text.includes('Your picture'), true);
+  check('...the email form', learnerSettings.html.includes('name="email"'), true);
   check('...and the password form', learnerSettings.html.includes('name="current"'), true);
+  // The address is rendered so a user knows which one they are replacing —
+  // and it is their OWN, from the profile, never a parameter.
+  check('...naming the address they sign in with',
+    learnerSettings.text.includes('learner@javelin.test'), true);
   check('...prefilled with their own name',
     inputValue(learnerSettings.html, 'fullName'), 'Lena Park');
 
@@ -1663,6 +1668,23 @@ try {
    */
   check('the page says what it cannot do yet',
     learnerSettings.text.includes('deleting your account'), true);
+  // ...and no longer claims email is missing, now that it is not.
+  check('...and no longer lists the email change as missing',
+    /Not here yet:[^.]*email/i.test(learnerSettings.text), false);
+
+  /*
+   * THE CONFIRMATION LANDING. `/auth/callback` sends an email-change link here
+   * with `?email=changed`, and the flag is trusted only to show a message — the
+   * address beside it comes from the profile, so a forged flag congratulates
+   * somebody and then shows them their unchanged address two lines down.
+   */
+  const confirmed = await getAs('/settings?email=changed', LEARNER);
+  check('the email-confirmed landing renders', confirmed.status, 200);
+  check('...with the confirmation', confirmed.text.includes('Your email is confirmed'), true);
+  check('...and the address read from the profile, not the URL',
+    confirmed.text.includes('learner@javelin.test'), true);
+  check('control: without the flag there is no confirmation',
+    learnerSettings.text.includes('Your email is confirmed'), false);
 
   // The coach profile no longer carries the upload, and says where it went.
   const coachProfile = await getAs('/coach/profile', COACH);
