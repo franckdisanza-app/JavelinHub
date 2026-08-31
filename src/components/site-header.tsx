@@ -1,6 +1,7 @@
 import { NavBar, type NavLink } from '@/components/nav-bar';
 import { getCurrentProfile } from '@/lib/auth/session';
 import type { Profile } from '@/lib/data/types';
+import { avatarCacheBuster, avatarPublicUrl } from '@/lib/storage/avatars';
 
 /**
  * Resolves the signed-in user on every request and hands the Client Component
@@ -14,7 +15,24 @@ import type { Profile } from '@/lib/data/types';
 export async function SiteHeader() {
   const profile = await getCurrentProfile();
   return (
-    <NavBar links={navLinksFor(profile)} userName={profile?.full_name ?? null} roleLabel={roleLabelFor(profile)} />
+    <NavBar
+      links={navLinksFor(profile)}
+      userName={profile?.full_name ?? null}
+      roleLabel={roleLabelFor(profile)}
+      /*
+       * The one place a picture is visible to everybody who has one. Reviews
+       * carry `author_name` and no avatar — `PublicReview` projects the name
+       * alone — so without this a learner's picture would render nowhere but
+       * the settings page that uploaded it.
+       *
+       * Cache-busted on `updated_at` for the same reason the profile page does
+       * it: the public URL is a pure function of the path, so replacing a
+       * picture would otherwise keep serving the CDN's copy of the old one.
+       */
+      avatarUrl={
+        profile ? avatarCacheBuster(avatarPublicUrl(profile.avatar_path), profile.updated_at) : null
+      }
+    />
   );
 }
 
@@ -68,6 +86,11 @@ function navLinksFor(profile: Profile | null): NavLink[] {
     links.push({ href: '/coach/apply', label: 'Become a coach' });
     links.push({ href: '/redeem', label: 'Redeem invite' });
   }
+
+  // EVERYONE gets settings, which is the whole point of the page: name,
+  // picture and password belong to the account rather than to a role. Last of
+  // the non-admin items so the row reads places-then-account.
+  links.push({ href: '/settings', label: 'Settings' });
 
   if (profile.role === 'admin') {
     links.push({ href: '/admin/invites', label: 'Admin' });

@@ -31,6 +31,7 @@ import type {
   SignUpResult,
   UpdateListingInput,
   UpdateMyCoachProfileInput,
+  UpdateMyProfileInput,
 } from '../client';
 import type {
   Actor,
@@ -718,6 +719,77 @@ export class MockDataClient implements DataClient {
   // =========================================================================
   // Listings
   // =========================================================================
+
+  /**
+   * Mirrors: policy `profiles_update_own` — `using (id = auth.uid())` — and the
+   * DELIBERATE ABSENCE of `full_name` from `guard_profile_privilege_columns`,
+   * which states in its own comment that the column is "profile CONTENT with no
+   * privilege attached".
+   *
+   * So there is nothing here mirroring a guard, because there is no guard to
+   * mirror. What there IS to mirror is the length rule, which `profiles` carries
+   * no CHECK for — meaning `requireText` in application code is the ONLY thing
+   * bounding it on either backend. Same bounds as `signUp`, or an account could
+   * be renamed to something the sign-up form would have refused.
+   */
+  async updateMyProfile(actor: Actor, input: UpdateMyProfileInput): Promise<Profile> {
+    const fullName = requireText(input?.full_name, 'Full name', 120, 2);
+
+    return mutateDb((db) => {
+      // The subject is the RESOLVED actor, never a parameter — the same
+      // construction as updateMyCoachProfile and setMyAvatar, and the reason
+      // none of the three can be pointed at somebody else.
+      const profile = resolveProfile(db, actor);
+      profile.full_name = fullName;
+      // This one DOES move `updated_at`: the name is published on the coach
+      // directory card and on every review, so it is a content change, unlike a
+      // password.
+      profile.updated_at = nowIso();
+      return copy(profile);
+    });
+  }
+
+  /**
+   * Verifies the current password before writing the new one.
+   *
+   * `verifyPassword` is a constant-time comparison over a scrypt hash, so a
+   * wrong guess costs a full derivation — which is what makes a loop expensive
+   * here as well as on Supabase, where the equivalent is a sign-in round trip.
+   */
+  async changeMyPassword(actor: Actor, currentPassword: string, newPassword: string): Promise<void> {
+    // Validated BEFORE the store is opened, so a bad new password is `invalid`
+    // whoever sent it — and before the current one is checked, so the two
+    // failures cannot be told apart by timing.
+    const next = requirePassword(newPassword);
+
+    return mutateDb((db) => {
+      const profile = resolveProfile(db, actor);
+      const user = db.auth_users.find((u) => u.id === profile.id);
+      if (!user) {
+        throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
+      }
+
+      if (typeof currentPassword !== 'string' || !verifyPassword(currentPassword, user.password_hash, user.password_salt)) {
+        // NOT `unauthorized`: the session is fine, the claim about the old
+        // password is not. `unauthorized` would send them to the login page,
+        // which is the wrong advice for somebody already signed in.
+        throw new DataError('forbidden', 'That is not your current password.');
+      }
+
+      // GoTrue refuses this too ("New password should be different from the old
+      // password"), and the mock must not be the more permissive of the two.
+      if (next === currentPassword) {
+        throw new DataError('invalid', 'Choose a password different from your current one.');
+      }
+
+      const { hash, salt } = hashPassword(next);
+      user.password_hash = hash;
+      user.password_salt = salt;
+      // `updated_at` on the PROFILE is deliberately untouched: nothing public
+      // changed, and moving it would reorder the coach directory on a password
+      // change. Same reasoning as updateMyPassword.
+    });
+  }
 
   async setMyAvatar(actor: Actor, path: string | null): Promise<Profile> {
     const next = optionalAvatarPath(path);

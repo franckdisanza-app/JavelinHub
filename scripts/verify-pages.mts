@@ -1269,22 +1269,17 @@ try {
   );
 
   /*
-   * THE AVATAR CARD, on the MOCK backend.
+   * THE PICTURE MOVED TO `/settings`, so this page now shows a PREVIEW and a
+   * link rather than an uploader — see the settings section above, which is
+   * where the degraded-mock behaviour is asserted.
    *
-   * These suites run with DATA_BACKEND=mock, which has no file storage at all —
-   * so this is the degraded path, and asserting it is the point. The page must
-   * still render, still edit the three text columns, and say plainly why the
-   * uploader is missing rather than showing a control that cannot work.
-   * `avatarStorageAvailable()` is what decides, and it is false here.
+   * What stays here is the preview and the fact that none of it disturbs the
+   * text editor, which is this page's actual job.
    */
   const coachAvatarPage = await getAs('/coach/profile', COACH);
-  check('the picture card renders', coachAvatarPage.text.includes('Your picture'), true);
-  check('...with no uploader, because the mock has no storage',
+  check('the picture preview renders', coachAvatarPage.text.includes('Your picture and name'), true);
+  check('...with no uploader, which lives in settings now',
     coachAvatarPage.html.includes('type="file"'), false);
-  check('...and says so instead of failing silently',
-    coachAvatarPage.text.includes('Picture uploads are not available here'), true);
-  check('...while still describing initials as the normal state, not a fallback',
-    coachAvatarPage.text.includes('No picture yet'), true);
   check('no avatar image is rendered anywhere without a stored path',
     /<img[^>]*avatars/.test(coachAvatarPage.html), false);
   check('the text editor is unaffected by any of that',
@@ -1630,6 +1625,70 @@ try {
   // asserted has "Nothing has been sent yet".
   check('a personalised order still has no download section',
     buyerOrder.text.includes('Your download'), false);
+
+  // -------------------------------------------------------------------------
+  section('/settings — everyone has one');
+
+  check('anonymous -> log in and back',
+    await redirectTarget('/settings'), '/login?next=%2Fsettings');
+
+  /*
+   * THE POINT OF THE PAGE: a plain learner gets the same three forms a coach
+   * does. `setMyAvatar` was always open to any signed-in user and only the UI
+   * was coach-facing, so before this page an athlete could not set a picture or
+   * change their name at all.
+   */
+  const learnerSettings = await getAs('/settings', LEARNER);
+  check('a learner gets the page', learnerSettings.status, 200);
+  check('...with the name form', learnerSettings.html.includes('name="fullName"'), true);
+  check('...the picture card', learnerSettings.text.includes('Your picture'), true);
+  check('...and the password form', learnerSettings.html.includes('name="current"'), true);
+  check('...prefilled with their own name',
+    inputValue(learnerSettings.html, 'fullName'), 'Lena Park');
+
+  const coachSettings = await getAs('/settings', COACH);
+  check('a coach gets the same page', coachSettings.status, 200);
+  check('...prefilled with THEIR name', inputValue(coachSettings.html, 'fullName'), 'Cory Vaughn');
+  // The one thing that differs, and it is copy rather than capability: a coach
+  // is told the picture is public, a learner is told where it is not yet.
+  check('a coach is pointed at their public profile',
+    coachSettings.html.includes('href="/coach/profile"'), true);
+  check('a learner is told the picture is not public yet',
+    learnerSettings.text.includes('It goes public if you become a coach'), true);
+
+  /*
+   * HONEST ABOUT WHAT IS MISSING. Email change and account deletion are real
+   * gaps — one of them is a legal obligation — and a settings page that simply
+   * lacked them would read as a page where they are hidden somewhere.
+   */
+  check('the page says what it cannot do yet',
+    learnerSettings.text.includes('deleting your account'), true);
+
+  // The coach profile no longer carries the upload, and says where it went.
+  const coachProfile = await getAs('/coach/profile', COACH);
+  check('the coach profile no longer has the upload control',
+    coachProfile.html.includes('name="avatar"'), false);
+  check('...and links to settings instead', coachProfile.html.includes('href="/settings"'), true);
+  /*
+   * THE UPLOADER ON THE MOCK BACKEND, which is the degraded path and the one
+   * worth asserting: these suites run with DATA_BACKEND=mock, which has no file
+   * storage at all. The card must still render, and must say plainly why the
+   * control is missing rather than showing one that cannot work.
+   * `avatarStorageAvailable()` is what decides, and it is false here — which is
+   * also why "the upload moved off /coach/profile" cannot be controlled by
+   * finding it on /settings. It is nowhere, on purpose, on this backend.
+   */
+  check('no uploader anywhere on the mock', learnerSettings.html.includes('type="file"'), false);
+  check('...and settings says why instead of failing silently',
+    learnerSettings.text.includes('Picture uploads are not available here'), true);
+  check('...while still describing initials as the normal state, not a fallback',
+    learnerSettings.text.includes('No picture yet'), true);
+
+  // Reachable, or nobody finds it.
+  check('the nav links to settings for a learner',
+    learnerSettings.html.includes('href="/settings"'), true);
+  check('...and for a signed-out visitor it does not',
+    (await get('/offers')).html.includes('href="/settings"'), false);
 
   // -------------------------------------------------------------------------
   section('/offers/[id] — the tombstone, and the dead link it replaces');

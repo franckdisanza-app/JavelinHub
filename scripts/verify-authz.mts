@@ -4243,6 +4243,126 @@ expectEqual(
 );
 
 // ---------------------------------------------------------------------------
+section('Account settings — everyone owns their own row and only their own');
+// ---------------------------------------------------------------------------
+// `updateMyProfile` and `changeMyPassword` take no subject id, which is the
+// property that makes `/settings` a plain `requireUser()` page rather than a
+// role check. Asserted here rather than assumed: "there is no parameter" is a
+// claim about a signature that a later edit could break.
+
+const settingsUser = await allows(
+  'a fixture account for the settings section',
+  () => signUpProfile({ email: 'settings@javelin.test', password: 'settings-first-password', fullName: 'Sam Setting' }),
+  (p) => p.full_name,
+);
+const SETTINGS_ACTOR: Actor = { userId: settingsUser!.id };
+
+// --- renaming --------------------------------------------------------------
+await refuses('an anonymous caller cannot rename anybody', 'unauthorized', () =>
+  db.updateMyProfile(null, { full_name: 'Anonymous Rename' }),
+);
+for (const [shape, value] of [
+  ['an empty name', '   '],
+  ['a one-character name', 'A'],
+  ['a name past the cap', 'x'.repeat(121)],
+] as Array<[string, string]>) {
+  await refuses(`updateMyProfile rejects ${shape}`, 'invalid', () =>
+    db.updateMyProfile(SETTINGS_ACTOR, { full_name: value }),
+  );
+}
+const renamed = await allows(
+  'the actor may rename THEMSELVES',
+  () => db.updateMyProfile(SETTINGS_ACTOR, { full_name: '  Samantha Setting  ' }),
+  (p) => p.full_name,
+);
+expectEqual('...and the name is trimmed', renamed?.full_name, 'Samantha Setting');
+expectShape('...returning the full profile row', renamed, PROFILE_COLUMNS);
+// A LEARNER, not a coach. Renaming must not be a privilege path — the guard in
+// SQL leaves `full_name` alone precisely because it carries none, so the
+// method itself must not carry one either.
+expectEqual('...still a learner', renamed?.role, 'learner');
+expectEqual('...with no coach status', renamed?.coach_status, 'none');
+// THE CONTROL. If the subject were a parameter rather than the resolved actor,
+// this is what would have changed.
+expectEqual(
+  'nobody else was renamed',
+  (await db.getProfile(ADMIN, COACH!.userId))?.full_name,
+  'Cory Vaughn',
+);
+// The name is published on every review its author has written, so a rename is
+// a content change and must reach them.
+const renamedReviews = await db.listReviewsForCoach(COACH!.userId);
+expectEqual(
+  'a rename is not retroactively stamped onto other people’s reviews',
+  renamedReviews.some((r) => r.author_name === 'Samantha Setting'),
+  false,
+);
+
+// --- changing a password ---------------------------------------------------
+await refuses('an anonymous caller cannot change a password', 'unauthorized', () =>
+  db.changeMyPassword(null, 'settings-first-password', 'settings-second-password'),
+);
+await refuses('a WRONG current password is refused', 'forbidden', () =>
+  db.changeMyPassword(SETTINGS_ACTOR, 'not-the-password', 'settings-second-password'),
+);
+// `forbidden`, deliberately not `unauthorized`: the session is fine, the claim
+// about the old password is not, and `unauthorized` would send somebody who is
+// already signed in to the login page.
+await refuses('an EMPTY current password is refused the same way', 'forbidden', () =>
+  db.changeMyPassword(SETTINGS_ACTOR, '', 'settings-second-password'),
+);
+await refuses('a short NEW password is invalid', 'invalid', () =>
+  db.changeMyPassword(SETTINGS_ACTOR, 'settings-first-password', 'short'),
+);
+// GoTrue refuses this too, so the mock must not be the more permissive of the
+// two backends.
+await refuses('reusing the current password is refused', 'invalid', () =>
+  db.changeMyPassword(SETTINGS_ACTOR, 'settings-first-password', 'settings-first-password'),
+);
+expectEqual(
+  'no refused attempt changed anything',
+  (await db.signInWithPassword({ email: 'settings@javelin.test', password: 'settings-first-password' }))?.id,
+  settingsUser!.id,
+);
+
+await allows(
+  'the actor may change their OWN password',
+  () => db.changeMyPassword(SETTINGS_ACTOR, 'settings-first-password', 'settings-second-password'),
+  () => 'changed',
+);
+expectEqual(
+  'the new password signs in',
+  (await db.signInWithPassword({ email: 'settings@javelin.test', password: 'settings-second-password' }))?.id,
+  settingsUser!.id,
+);
+expectEqual(
+  '...and the old one no longer does',
+  await db.signInWithPassword({ email: 'settings@javelin.test', password: 'settings-first-password' }),
+  null,
+);
+// The control that matters most: a method with no subject parameter cannot
+// have touched anybody else's credentials.
+expectEqual(
+  'no other account’s password moved',
+  (await db.signInWithPassword({ email: 'coach@javelin.test', password: 'coach1234' }))?.id,
+  COACH!.userId,
+);
+
+// --- the avatar is EVERYONE's, which is why it moved to /settings ----------
+// `setMyAvatar` was always open to any signed-in user and only the UI was
+// coach-facing. Asserted for a plain learner, since that is the case the old
+// placement made unreachable.
+const learnerAvatar = await allows(
+  'a LEARNER may set a picture, not only a coach',
+  () => db.setMyAvatar(SETTINGS_ACTOR, `${settingsUser!.id}/portrait.png`),
+  (p) => String(p.avatar_path),
+);
+expectEqual('...stored under their own id', learnerAvatar?.avatar_path, `${settingsUser!.id}/portrait.png`);
+await refuses("...but never under somebody else's", 'forbidden', () =>
+  db.setMyAvatar(SETTINGS_ACTOR, `${COACH!.userId}/portrait.png`),
+);
+
+// ---------------------------------------------------------------------------
 section('Review moderation — admin only, and the row really goes');
 // ---------------------------------------------------------------------------
 // A purpose-built fixture rather than a seeded review, so the aggregates are

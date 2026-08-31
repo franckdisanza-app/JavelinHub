@@ -3,14 +3,13 @@ import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
-import { AvatarForm } from '@/app/coach/profile/avatar-form';
 import { CoachProfileForm } from '@/app/coach/profile/profile-form';
 import { InitialsAvatar } from '@/components/initials-avatar';
 import { Alert } from '@/components/ui/alert';
 import { linkButtonClass } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { requireUser } from '@/lib/auth/session';
-import { avatarCacheBuster, avatarPublicUrl, avatarStorageAvailable } from '@/lib/storage/avatars';
+import { avatarCacheBuster, avatarPublicUrl } from '@/lib/storage/avatars';
 
 export const metadata: Metadata = { title: 'Your coach profile' };
 
@@ -61,18 +60,36 @@ export default async function CoachProfilePage({
         </Alert>
       ) : null}
 
+      {/*
+        THE PICTURE MOVED TO `/settings`, and so did the name. Both belong to the
+        account rather than to the coach profile — `setMyAvatar` was always open
+        to any signed-in user and only this page was coach-facing, which meant an
+        athlete could not set a picture at all.
+        
+        A preview stays, because this page is where a coach checks how their card
+        looks, and sending them somewhere else to see it would be worse than the
+        one link.
+      */}
       <Card tone="raised">
         <CardHeader
-          title="Your picture"
-          description="Shown beside your name in the directory and on your own page."
+          title="Your picture and name"
+          description="Shown beside each other in the directory and on your own page."
         />
-        <CardBody>
-          <AvatarForm
+        <CardBody className="flex items-center gap-4">
+          <InitialsAvatar
             name={profile.full_name}
-            currentUrl={avatarCacheBuster(avatarPublicUrl(profile.avatar_path), profile.updated_at)}
-            currentPath={profile.avatar_path}
-            available={avatarStorageAvailable()}
+            src={avatarCacheBuster(avatarPublicUrl(profile.avatar_path), profile.updated_at)}
+            size="lg"
           />
+          <p className="text-sm leading-relaxed text-muted">
+            <span className="font-medium text-ink">{profile.full_name}</span>
+            <br />
+            Both are edited in{' '}
+            <Link href="/settings" className="font-medium text-brand underline underline-offset-2">
+              account settings
+            </Link>
+            , because everyone has them — not only coaches.
+          </p>
         </CardBody>
       </Card>
 

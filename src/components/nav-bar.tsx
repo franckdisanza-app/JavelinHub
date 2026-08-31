@@ -19,6 +19,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
+import { InitialsAvatar } from '@/components/initials-avatar';
 import { Badge } from '@/components/ui/badge';
 import { Button, linkButtonClass } from '@/components/ui/button';
 import { cn } from '@/components/ui/cn';
@@ -36,6 +37,14 @@ export interface NavBarProps {
   userName: string | null;
   /** "Admin" / "Coach", or `null` for a plain learner. */
   roleLabel: string | null;
+  /**
+   * The signed-in user's picture, already cache-busted, or `null` for initials.
+   *
+   * The ONE place an avatar is visible to everybody who has one: a review
+   * carries `author_name` and no picture, so without this a learner's upload
+   * would render nowhere outside the form that made it.
+   */
+  avatarUrl?: string | null;
 }
 
 const MENU_ID = 'primary-navigation';
@@ -131,7 +140,7 @@ const NAV_LINK =
 const NAV_LINK_CURRENT = 'border-brand text-brand';
 const NAV_LINK_REST = 'border-transparent text-muted hover:bg-surface-2 hover:text-ink';
 
-export function NavBar({ links, userName, roleLabel }: NavBarProps) {
+export function NavBar({ links, userName, roleLabel, avatarUrl = null }: NavBarProps) {
   const pathname = usePathname();
 
   // The panel is open *for a particular route*. Storing the pathname rather
@@ -219,6 +228,7 @@ export function NavBar({ links, userName, roleLabel }: NavBarProps) {
           {userName ? (
             <>
               <span className="flex items-center gap-2 text-body-15">
+                <InitialsAvatar name={userName} src={avatarUrl} size="sm" />
                 <span className="max-w-[14ch] truncate font-medium text-ink" title={userName}>
                   {userName}
                 </span>

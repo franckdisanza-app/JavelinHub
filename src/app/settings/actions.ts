@@ -1,0 +1,190 @@
+'use server';
+
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+
+import { getActor, loginPath } from '@/lib/auth/session';
+import { getDataClient } from '@/lib/data';
+import { isDataError } from '@/lib/data/types';
+import { fieldError, formError, toFormState, type FormState } from '@/lib/forms';
+import { consume, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
+import { checkAvatarFile, deleteAvatar, uploadAvatar } from '@/lib/storage/avatars';
+
+const SETTINGS_PATH = '/settings';
+
+/**
+ * Account settings, for EVERYONE — coach, athlete or administrator.
+ *
+ * The counterpart to `coach/profile/actions.ts`, which edits the three columns
+ * published through `public_coaches` and says of itself: "WHAT THIS PAGE IS NOT:
+ * an account page. `full_name` and `email` live on `auth.users` / the
+ * privilege-guarded part of `profiles`, and changing either is a different job."
+ * This is that job.
+ *
+ * Every action here is gated by the data layer on the RESOLVED actor and takes
+ * no subject id, so none of them can be pointed at another account — which is
+ * the property that lets the page itself be a plain `requireUser()` rather than
+ * a role check.
+ */
+
+/**
+ * Renames the signed-in user.
+ *
+ * The name is published: it is on their card in the coach directory if they
+ * have one, and on every review they have ever written. So this is a content
+ * change and it revalidates the whole layout — the header renders it too.
+ */
+export async function updateNameAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const fullName = String(formData.get('fullName') ?? '').trim();
+  const values = { fullName };
+
+  // Cheap, friendly, field-level first. The data layer checks all of it again
+  // with the same bounds — these exist to put a message beside the right input.
+  if (fullName === '') return fieldError({ fullName: 'Enter your name.' }, values);
+  if (fullName.length < 2) return fieldError({ fullName: 'Names are at least 2 characters.' }, values);
+  if (fullName.length > 120) {
+    return fieldError({ fullName: `Keep this to 120 characters or fewer — ${fullName.length} so far.` }, values);
+  }
+
+  const actor = await getActor();
+
+  let needsLogin = false;
+  try {
+    await getDataClient().updateMyProfile(actor, { full_name: fullName });
+  } catch (error) {
+    if (!isDataError(error)) throw error;
+    if (error.code === 'unauthorized') needsLogin = true;
+    else return toFormState(error, { values });
+  }
+
+  if (needsLogin) redirect(loginPath(SETTINGS_PATH));
+
+  // Not confined to this page: the header, the coach directory card and every
+  // review this person has written all render the name.
+  revalidatePath('/', 'layout');
+  return { status: 'success', values };
+}
+
+/**
+ * Sets or clears the profile picture.
+ *
+ * MOVED HERE FROM `/coach/profile`, where it was reachable only by approved
+ * coaches — although `setMyAvatar` has always been open to any signed-in user,
+ * and its own doc comment said so: "`profiles` is everyone's row, and the SQL
+ * agrees. Only the UI is coach-facing today." This is that sentence being
+ * fixed.
+ *
+ * ORDER MATTERS IN BOTH DIRECTIONS, unchanged from the version this replaces:
+ *
+ *   setting   upload FIRST, then write the column. A failed upload leaves the
+ *             column untouched and the old picture still rendering.
+ *   clearing  write the column FIRST, then delete the object. A failed delete
+ *             leaves an orphan that is invisible, which is why `deleteAvatar`
+ *             does not throw.
+ */
+export async function updateAvatarAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const intent = String(formData.get('intent') ?? 'set');
+  const actor = await getActor();
+
+  let needsLogin = false;
+  try {
+    const db = getDataClient();
+
+    if (intent === 'clear') {
+      await db.setMyAvatar(actor, null);
+      const previous = String(formData.get('current') ?? '').trim();
+      if (previous !== '') await deleteAvatar(previous);
+    } else {
+      const file = formData.get('avatar');
+      if (!(file instanceof File) || file.size === 0) return formError('Choose a picture to upload.');
+
+      const check = checkAvatarFile(file);
+      if (!check.ok) return formError(check.message ?? 'That picture could not be used.');
+
+      // `getActor()` is a claim; the id the file is stored under must be the
+      // RESOLVED one, because the first path segment is the ownership assertion
+      // that every avatars storage policy checks.
+      const me = await db.getProfile(actor, actor?.userId ?? '');
+      if (!me) return formError('Your profile could not be found.');
+
+      const path = await uploadAvatar(me.id, file);
+      const previous = String(formData.get('current') ?? '').trim();
+      await db.setMyAvatar(actor, path);
+      // Only now is the old object unreachable through the product.
+      if (previous !== '' && previous !== path) await deleteAvatar(previous);
+    }
+  } catch (error) {
+    if (!isDataError(error)) throw error;
+    if (error.code === 'unauthorized') needsLogin = true;
+    else return toFormState(error);
+  }
+
+  if (needsLogin) redirect(loginPath(SETTINGS_PATH));
+
+  // The picture is on the coach directory card and the coach profile page, so
+  // this is not confined to settings either.
+  revalidatePath('/', 'layout');
+  return { status: 'success' };
+}
+
+/**
+ * Changes the password of somebody who is signed in and knows the old one.
+ *
+ * NOT the reset flow. `resetPasswordAction` asks for no current password
+ * because its user has just proved control of their inbox precisely to say that
+ * they do not have one. Here a session alone is a weaker claim — a borrowed
+ * laptop should not be enough to lock the owner out — so the old password is
+ * the second factor.
+ *
+ * RATE-LIMITED ON THE ACCOUNT, not the IP. Verifying the current password costs
+ * a scrypt derivation on the mock and a full sign-in round trip on Supabase, so
+ * a wrong-password loop is expensive for us; and on Supabase it also consumes
+ * GoTrue's own auth limit, which would eventually lock the account out of
+ * ordinary sign-in as a side effect of guessing at this form.
+ */
+export async function changePasswordAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const current = String(formData.get('current') ?? '');
+  const next = String(formData.get('password') ?? '');
+  const confirm = String(formData.get('confirm') ?? '');
+  // No `values`: never echo a password back into rendered HTML.
+
+  const fieldErrors: Record<string, string> = {};
+  if (current === '') fieldErrors.current = 'Enter your current password.';
+  if (next === '') fieldErrors.password = 'Choose a new password.';
+  else if (next.length < 8) fieldErrors.password = 'Passwords must be at least 8 characters.';
+  else if (confirm !== next) fieldErrors.confirm = 'The two passwords do not match.';
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return { status: 'error', message: 'Please correct the highlighted fields.', fieldErrors };
+  }
+
+  const actor = await getActor();
+  if (!actor) redirect(loginPath(SETTINGS_PATH));
+
+  /*
+   * Keyed on the user id rather than the address: this form belongs to a
+   * session, so the account is the thing being attacked and the thing worth
+   * protecting. It is not an enumeration risk either — the caller already knows
+   * whose account they are signed in to.
+   */
+  if (!(await consume('loginEmail', `change-password:${actor.userId}`))) {
+    return { status: 'error', message: TOO_MANY_MESSAGE };
+  }
+
+  try {
+    await getDataClient().changeMyPassword(actor, current, next);
+  } catch (error) {
+    if (!isDataError(error)) throw error;
+    // `forbidden` here means "that is not your current password", which belongs
+    // beside that field rather than at form level.
+    if (error.code === 'forbidden') {
+      return { status: 'error', message: error.message, fieldErrors: { current: error.message } };
+    }
+    return toFormState(error);
+  }
+
+  // GoTrue rotates the session's tokens as part of the change, and the layout
+  // re-render is how the new pair reaches the browser.
+  revalidatePath('/', 'layout');
+  return { status: 'success' };
+}

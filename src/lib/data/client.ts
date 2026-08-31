@@ -277,6 +277,24 @@ export interface UpdateListingInput {
   fulfilment?: FulfilmentMode;
 }
 
+/**
+ * Input to {@link DataClient.updateMyProfile}.
+ *
+ * ONE COLUMN, and the shape is the point: `full_name` is the only thing on
+ * `profiles` that its owner may edit and that is not either a privilege or an
+ * identity. `role` and `coach_status` are privileges, `id` and `email` are
+ * identity, and `guard_profile_privilege_columns` refuses all four from an API
+ * session. The three coach columns are content too, but they belong to
+ * {@link DataClient.updateMyCoachProfile} because only an approved coach may
+ * write them.
+ *
+ * A named input rather than a bare string so the shape has somewhere to grow —
+ * a pronoun field, a locale — without another method.
+ */
+export interface UpdateMyProfileInput {
+  full_name: string;
+}
+
 /** Input to {@link DataClient.createInvite}. */
 export interface CreateInviteInput {
   note?: string;
@@ -528,6 +546,49 @@ export interface DataClient {
    * everyone's row, and the SQL agrees. Only the UI is coach-facing today.
    */
   setMyAvatar(actor: Actor, path: string | null): Promise<Profile>;
+
+  /**
+   * Renames the signed-in actor. Available to EVERYONE, coach or not.
+   *
+   * `full_name` had no write path at all before this: it was taken from the
+   * signup form (or from the local part of the email) and never editable again,
+   * for any role. It is also the name attached to every review that person has
+   * written, and to their card in the coach directory if they have one, so
+   * "never editable" was not a small gap.
+   *
+   * Deliberately NOT guarded in SQL, and `guard_profile_privilege_columns` says
+   * so in as many words: it is "profile CONTENT with no privilege attached",
+   * bounded by the column constraints rather than by the guard. That is what
+   * makes this an ordinary column write — and it is also why the LENGTH rules
+   * live here in application code, shared by both backends, since
+   * `profiles.full_name` carries no CHECK of its own.
+   *
+   * The subject is the resolved actor and is never a parameter, so there is no
+   * shape of this call that renames somebody else.
+   */
+  updateMyProfile(actor: Actor, input: UpdateMyProfileInput): Promise<Profile>;
+
+  /**
+   * Changes the signed-in actor's password, having first proved they know the
+   * current one.
+   *
+   * THE SIBLING OF {@link updateMyPassword}, and the difference is the whole
+   * reason both exist. That one takes no current password because its caller is
+   * the reset flow, where the user has just proved control of their inbox
+   * precisely to say that they do not have one. This one is for a person who IS
+   * signed in, where a session alone is a weaker claim: a borrowed laptop or a
+   * stolen cookie should not be enough to lock the owner out of their own
+   * account.
+   *
+   * Refuses when the new password equals the current one — GoTrue refuses it
+   * too, and the mock must not be the more permissive of the two.
+   *
+   * Rate-limited by the caller rather than here: verifying the current password
+   * costs a scrypt hash on the mock and a full sign-in round trip on Supabase,
+   * so a wrong-password loop is expensive on both.
+   */
+  changeMyPassword(actor: Actor, currentPassword: string, newPassword: string): Promise<void>;
+
 
   // ---------------------------------------------------------------------------
   // Listings

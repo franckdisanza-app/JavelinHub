@@ -807,6 +807,8 @@ and the coach's dashboard flags it as *Needs a file*.
 | `listListingRevisions` | the offer's owner, or an admin |
 | `getOfferStats`, `listOfferStats`, `getCoachStats`, `listCoachStats`, `listReviewsForListing`, `listReviewsForCoach` | none — public (aggregates and reviews only) |
 | `updateMyCoachProfile` | the actor themselves, whose stored `coach_status` is `'approved'` — **never an admin**, the same asymmetry `updateListing` carries |
+| `updateMyProfile`, `setMyAvatar` | the actor themselves, ANY signed-in user. Name and picture belong to the account rather than to a role — `guard_profile_privilege_columns` leaves `full_name` alone precisely because it carries no privilege |
+| `changeMyPassword` | the actor themselves, **and only with the current password**. Its sibling `updateMyPassword` takes none, because that caller is the reset flow where the user cannot supply one |
 | `getProfile` | the actor is the subject, or is an admin |
 | `getOrder` | the buyer, the coach who sold it, or an admin |
 | `listOrdersForCoach` | that coach, or an admin |

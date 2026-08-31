@@ -107,18 +107,31 @@ state machine is what makes the money movement safe to automate.
 
 ---
 
-## 2. Coaches cannot fill in their own profiles
+## 2. ~~Coaches cannot fill in their own profiles~~ — done, twice over
 
-`updateMyCoachProfile` exists in the data layer, is enforced by
-`profiles_update_own` plus `guard_profile_privilege_columns`, was verified
-against Postgres — **and has no page.**
+**Stale for several rounds and finally corrected.** This section claimed
+`updateMyCoachProfile` "has no page" while §3 listed `/coach/profile` as done
+and the page had existed all along. The two disagreed inside one document; §3
+was right.
 
-So `coach_headline`, `coach_bio` and `coach_years_coaching` are `null` for every
-coach who did not arrive through an approved application (approval copies the
-application bio across once; an invite-code coach gets nothing). The public
-directory renders name-only cards by construction.
+It is now done twice over, because the split it implied was missing a half.
+`/coach/profile` edits the three columns published through `public_coaches` and
+says of itself that it is *not* an account page. Nothing was the account page,
+so three things had no home:
 
-Cheapest high-impact item on this list.
+* **`full_name` had no write path at all**, for anybody. Taken from the signup
+  form (or the local part of the email) and never editable again — and it is the
+  name on every review its author has written.
+* **the picture was coach-only in the UI**, though `setMyAvatar` has always been
+  open to any signed-in user and its own doc comment said so: *"`profiles` is
+  everyone's row, and the SQL agrees. Only the UI is coach-facing today."*
+* **no way to change a password while signed in.** The only path was the reset
+  flow, which asks for no current password on purpose — the wrong trade for
+  somebody signed in on a borrowed laptop.
+
+`/settings` closes all three, for everyone. The picture also renders in the
+header now, so a learner's upload is visible somewhere rather than only in the
+form that made it: reviews carry `author_name` and no avatar.
 
 ---
 
@@ -184,11 +197,20 @@ the buyer reviews it. What is left in §1 is the money.
   the link from configuration and never from the request's `Host` header,
   precisely so that a crafted request cannot make us email a valid reset link
   pointing somewhere else.
-* **No email change and no account deletion.** Deletion is not optional under
-  GDPR, and `invites.created_by` is `ON DELETE RESTRICT`, so deleting an admin
-  who has ever minted an invite fails until those rows are dealt with —
-  documented in `supabase/README.md`, and a real obstacle to writing the
-  feature.
+* **No email change and no account deletion** — the two things `/settings` says
+  plainly it cannot do yet, rather than leaving a reader to hunt for them. Name,
+  picture and password now live there for everyone.
+
+  Deletion is not optional under GDPR, and the foreign-key graph makes the naive
+  version either impossible or destructive: `listings.coach_id` cascades while
+  `orders.listing_id` is `ON DELETE RESTRICT`, so **a coach who has ever sold
+  anything cannot be deleted at all**, and a learner who deletes silently reduces
+  some coach's sales count and rating. `invites.created_by` is `ON DELETE
+  RESTRICT` too, so an admin who has minted a code is undeletable — accepted, and
+  administrators are removed by another administrator.
+
+  The plan is to anonymise rather than erase, and to BAN the GoTrue user rather
+  than delete it: deleting it cascades `profiles` and undoes the whole point.
 * ~~**Email confirmation is off.**~~ **On, and supported.** The reason it was off
   — nothing implemented a callback — ended when `/auth/callback` shipped with
   password reset. `signUp` now points GoTrue at that route and returns a

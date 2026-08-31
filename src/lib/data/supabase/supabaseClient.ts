@@ -70,6 +70,7 @@ import type {
   SignUpResult,
   UpdateListingInput,
   UpdateMyCoachProfileInput,
+  UpdateMyProfileInput,
 } from '../client';
 import { AUTH_CALLBACK_PATH } from '@/lib/auth/paths';
 import { siteUrl } from '@/lib/env';
@@ -856,6 +857,72 @@ export class SupabaseDataClient implements DataClient {
   // -------------------------------------------------------------------------
   // Listings
   // -------------------------------------------------------------------------
+
+  /**
+   * Renames the actor. `profiles_update_own` is the policy; there is no guard to
+   * satisfy, because `guard_profile_privilege_columns` deliberately leaves
+   * `full_name` alone as content rather than privilege.
+   *
+   * `.eq('id', ctx.userId)` and not an id from input: the policy would refuse
+   * anything else, and writing it this way means the refusal is never reached.
+   */
+  async updateMyProfile(actor: Actor, input: UpdateMyProfileInput): Promise<Profile> {
+    const fullName = requireText(input?.full_name, 'Full name', 120, 2);
+    const ctx = await openAuthedContext(actor);
+
+    const { data, error } = await ctx.supabase
+      .from('profiles')
+      .update({ full_name: fullName })
+      .eq('id', ctx.userId)
+      .select('*')
+      .maybeSingle();
+    if (error) throwDataError(error, true);
+    if (!data) throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
+    return data as Profile;
+  }
+
+  /**
+   * Verifies the current password, then writes the new one.
+   *
+   * GOTRUE HAS NO "CHECK THIS PASSWORD" ENDPOINT, so the verification is a real
+   * `signInWithPassword` for the same address. Two consequences worth knowing:
+   * it rotates this session's tokens before `updateUser` rotates them again,
+   * which is harmless because it is the same user; and it consumes GoTrue's own
+   * auth rate limit, which is a second reason the caller limits this before it
+   * gets here.
+   *
+   * The address comes from the RESOLVED PROFILE, never from input — otherwise
+   * this method would be a password oracle for any address a caller cared to
+   * name.
+   */
+  async changeMyPassword(actor: Actor, currentPassword: string, newPassword: string): Promise<void> {
+    const next = requirePassword(newPassword);
+    const ctx = await openAuthedContext(actor);
+    const profile = await resolveProfile(ctx);
+
+    if (typeof currentPassword !== 'string' || currentPassword === '') {
+      throw new DataError('forbidden', 'That is not your current password.');
+    }
+
+    const { error: signInError } = await ctx.supabase.auth.signInWithPassword({
+      email: profile.email,
+      password: currentPassword,
+    });
+    if (signInError) {
+      const authError = signInError as AuthLikeError;
+      if (isInvalidCredentials(authError) || authError.status === 400) {
+        throw new DataError('forbidden', 'That is not your current password.');
+      }
+      throw new DataError('invalid', authMessage(authError, 'Your password could not be changed.'));
+    }
+
+    const { error } = await ctx.supabase.auth.updateUser({ password: next });
+    if (error) {
+      // "New password should be different from the old password." arrives here
+      // and is worth showing; the mock raises the same refusal in its own words.
+      throw new DataError('invalid', authMessage(error as AuthLikeError, 'Your password could not be changed.'));
+    }
+  }
 
   async setMyAvatar(actor: Actor, path: string | null): Promise<Profile> {
     const next = optionalAvatarPath(path);
