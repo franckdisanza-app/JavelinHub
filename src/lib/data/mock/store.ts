@@ -31,6 +31,7 @@ import type {
   ListingRevision,
   Order,
   Profile,
+  RemovedReview,
   Review,
 } from '../types';
 
@@ -123,6 +124,16 @@ export interface MockDb {
   password_resets: PasswordReset[];
   /** Fixed-window request counters. Mirrors `public.rate_limits` (0013). */
   rate_limits: RateLimit[];
+  /**
+   * Reviews an administrator took down, copied verbatim before deletion.
+   * Mirrors `public.removed_reviews` (0016).
+   *
+   * A removal DELETES from `reviews` and appends here, so the two collections
+   * are disjoint by construction — exactly as they are in Postgres, and for the
+   * same reason: every aggregate over `reviews` is then correct with no filter
+   * to forget.
+   */
+  removed_reviews: RemovedReview[];
 }
 
 const DB_VERSION = 1;
@@ -141,6 +152,7 @@ function emptyDb(): MockDb {
     deliverables: [],
     password_resets: [],
     rate_limits: [],
+    removed_reviews: [],
   };
 }
 
@@ -711,6 +723,11 @@ export function seedDatabase(db: MockDb): void {
   // limit is a fact about live traffic, and a fixture in it would silently
   // pre-spend somebody's budget on a fresh store.
   if (!Array.isArray(db.rate_limits)) db.rate_limits = [];
+
+  // Same backfill, same reasoning. Seeded empty and never populated by a
+  // fixture: a moderation log entry asserts that an administrator took an
+  // action, and inventing one would be inventing an accusation.
+  if (!Array.isArray(db.removed_reviews)) db.removed_reviews = [];
 
   // The three coach columns arrived after the first stores were written, so a
   // real `data/db.json` is holding profile rows with no such keys at all.

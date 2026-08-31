@@ -218,11 +218,15 @@ them twice is how the two diverge.
 * **No pagination anywhere.** `docs/DATA-LAYER.md` flags it: `listListings`
   returns *everything*, newest first. `listReviewsForCoach` has the same
   property and will hit it sooner. Add cursors before launch, not after.
-* **The full-text index is dead weight.** `0001_init.sql` creates
-  `listings_search_tsv_idx`, but the client issues `ilike '%q%'`, which the
-  trigram GIN indexes serve instead. Either implement `textSearch` against the
-  tsvector or drop the index — right now it costs write throughput and buys
-  nothing.
+* ~~**The full-text index is dead weight.**~~ **Dropped** (0015). The choice was
+  stated here as "implement `textSearch` or drop it", and dropping is the only
+  option that keeps the two backends honest: full-text is not a faster substring
+  search but a DIFFERENT one — it stems and drops stop words — and the mock has
+  no tsvector, no stemmer and no dictionary, so the same query would return
+  different offers on each backend. `supabaseClient.ts` already refused that
+  trade once, about the `*` wildcard: *"Narrowed rather than widened so the
+  backend swap cannot change search results."* The two trigram indexes that
+  actually serve `ilike` stay.
 * ~~**No rate limiting**~~ **Done** — signup, login, password reset and invite
   redemption all consume a budget before they do any work. `src/lib/rate-limit.ts`
   dispatches between a Postgres counter (`consume_rate_limit()`, 0013/0014) and
@@ -253,16 +257,52 @@ them twice is how the two diverge.
 
 ## 7. Trust, safety, operations
 
-* **No moderation UI.** `0002_rls.sql` carries `reviews_update_admin` and
-  `reviews_delete_admin` for exactly this, and no page calls either. Admin can
-  approve coaches and mint invites; that is the whole admin surface.
+* ~~**No moderation UI.**~~ **Done for reviews** (0016, `/admin/reviews`) — the
+  third instance of the same pattern this document keeps finding: policies
+  written when the schema landed, and no code path in the two years of app built
+  on top of them.
+
+  Removal ARCHIVES then DELETES, rather than soft-deleting the way a listing
+  does, and the inconsistency is deliberate. Nothing points at a review — it is a
+  leaf — while a soft delete would have to be filtered out of `public_reviews`,
+  `public_listing_reviews`, `public_coach_reviews`, `offer_stats` AND
+  `coach_stats`, where forgetting one leaves a removed review still counting
+  towards a rating, invisibly. Moving the row to `removed_reviews` makes all five
+  correct with no filter at all.
+
+  **Both of the old policies were dropped rather than wired up**, and that is the
+  more interesting half. `reviews_update_admin` would let an administrator
+  rewrite an opinion published under a named person's identity — the argument
+  0002 already makes about a coach's listing copy, and stronger here.
+  `reviews_delete_admin` would let one delete a review with no archive row, an
+  unaudited route beside the audited one. `remove_review()` is now the only way a
+  review can cease to exist.
+
+  Still missing: reviews cannot be REPORTED, so the queue is every review on the
+  site rather than a queue. That is fine at this size and is not fine later.
 * **No way to suspend or demote a coach** through the app. `coach_status` can go
   to `rejected` only through application review.
-* **No audit log.** `grant_admin()` and application decisions leave nothing
-  behind but the mutated row.
-* **No observability.** No error reporting, no structured logging. A `DataError`
-  that escapes to `error.tsx` in production will be reported by a user, if at
-  all.
+* **No audit log**, still — with one exception. `removed_reviews` (0016) records
+  who took a review down, when, why, and the whole text, because destroying user
+  content with no trace is not a thing to ship. `grant_admin()` and application
+  decisions still leave nothing behind but the mutated row.
+* **Observability: the seam exists, the provider does not.**
+  `src/instrumentation.ts` binds Next's `onRequestError`, which fires for every
+  server error — renders, route handlers, Server Actions, the proxy — and
+  `src/lib/observability.ts` emits one line of structured JSON per incident.
+  Vercel captures stderr, and a JSON line is searchable where a multi-line stack
+  dump is not.
+
+  Deliberately NOT logged: request headers (they carry the session cookie, which
+  on Supabase is a live access token), user ids, email addresses, and query
+  strings. Deliberately not REPORTED: `DataError`, `NEXT_REDIRECT` and
+  `NEXT_NOT_FOUND` — a refusal is not an incident, and reporting them buries the
+  real failures.
+
+  What is left is the destination. Adding Sentry is a change to `report()` and
+  nowhere else, because every call site already passes structured context rather
+  than a formatted string. It needs an account and a DSN, which is a decision
+  rather than a task.
 * **No legal pages.** Terms, privacy policy, refund policy. Stripe will ask for
   these during onboarding, so they are on the critical path to payments rather
   than beside it.
@@ -279,9 +319,11 @@ decisions, not omissions:
 * **`listing_revisions` is append-only.** No client role holds `INSERT`; the
   trigger writes it as `javelin_privileged`, so a coach cannot rewrite the
   history of their own offer.
-* **Review authors get no edit or delete path.** An `UPDATE` grant would let
-  them rewrite `order_id` / `listing_id` / `price_epoch`; pinning those needs
-  another guard trigger, and moderation is admin-only by design.
+* **Review authors get no edit or delete path**, and since 0016 neither do
+  administrators — an `UPDATE` grant would let an author rewrite `order_id` /
+  `listing_id` / `price_epoch`, and would let an administrator rewrite somebody
+  else's opinion under their name. Removal is admin-only, archives before it
+  deletes, and is the only route: see §7.
 * **`getOrder` answers `null` where the mock throws `forbidden`.** RLS renders
   "absent" and "not yours" identically and telling them apart needs a read that
   bypasses the policies. See the divergence table in `supabase/README.md`.

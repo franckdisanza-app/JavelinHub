@@ -1,0 +1,56 @@
+-- ===========================================================================
+-- 0015_drop_dead_search_index.sql — an index nothing has ever used.
+-- ===========================================================================
+--
+-- `0001_init.sql` creates three indexes for offer search:
+--
+--   listings_title_trgm_idx        gin (title gin_trgm_ops)
+--   listings_description_trgm_idx  gin (description gin_trgm_ops)
+--   listings_search_tsv_idx        gin (to_tsvector('english', title || description))
+--
+-- and its own comment says the third is "there for the full-text variant of the
+-- same query". That variant was never written. `listListings` issues
+-- `ilike '%q%'` against title and description — see `likePattern()` in
+-- `supabaseClient.ts` — which the two TRIGRAM indexes serve and the tsvector one
+-- cannot. It has never been consulted by any query this application makes.
+--
+-- A GIN index that serves nothing is not free: it is rebuilt on every INSERT and
+-- on every UPDATE that touches title or description, which is every publish and
+-- every edit. `docs/ROADMAP.md` §6 has flagged it since that document was
+-- written, with the choice stated as "either implement `textSearch` against the
+-- tsvector or drop the index".
+--
+-- -----------------------------------------------------------------------------
+-- WHY DROP RATHER THAN IMPLEMENT
+-- -----------------------------------------------------------------------------
+-- Because the other option would make the two backends return DIFFERENT SEARCH
+-- RESULTS, and this project has already refused that trade once for the same
+-- reason.
+--
+-- Full-text search is not a faster substring search, it is a different search.
+-- `to_tsvector('english', …)` stems and drops stop words, so `textSearch` finds
+-- "throwing" for the query "throw" and does NOT find "throwers" for the query
+-- "row" — while `ilike '%row%'` does the opposite on both counts. The mock
+-- backend does substring matching over a JSON array and has no tsvector, no
+-- stemmer and no English dictionary; there is no honest way for it to agree.
+--
+-- `supabaseClient.ts` already documents the precedent, about the `*` wildcard:
+-- *"Narrowed rather than widened so the backend swap cannot change search
+-- results."* Implementing `textSearch` on one side only would change them on
+-- exactly the axis that comment protects.
+--
+-- So the trigram indexes stay — they are what the query actually uses — and the
+-- dead one goes. If full-text search is wanted later it is a product decision
+-- with a mock story attached, not an index that happens to already exist; and
+-- re-creating it is one statement, recorded here.
+--
+-- The two indexes that ARE used, restated so a reader of this file knows what is
+-- left rather than having to go and look:
+--
+--     listings_title_trgm_idx        serves ilike on title
+--     listings_description_trgm_idx  serves ilike on description
+--
+-- `profiles_full_name_trgm_idx` (0001) is the coach-directory equivalent and is
+-- likewise in use, by `listCoaches`.
+
+drop index if exists public.listings_search_tsv_idx;

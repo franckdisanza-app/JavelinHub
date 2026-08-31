@@ -38,7 +38,7 @@ process.env.SEED_ADMIN_PASSWORD = 'verify-authz-throwaway-password';
 process.env.SESSION_SECRET = 'verify-authz-throwaway-session-secret';
 
 const { getDataClient } = await import('@/lib/data');
-const { isDataError } = await import('@/lib/data/types');
+const { DataError, isDataError } = await import('@/lib/data/types');
 const { __resetStoreCache, mutateDb } = await import('@/lib/data/mock/store');
 // Mock-only, and deliberately free of any framework import so it can be called
 // from here — see the header of that file. Its sibling `password-reset.ts`
@@ -242,6 +242,47 @@ const LISTING_REVISION_COLUMNS = [
 const PUBLIC_REVIEW_COLUMNS = ['id', 'listing_id', 'rating', 'body', 'created_at', 'author_name'] as const;
 /** Plus the offer title, on the coach-profile list. Still nothing more. */
 const PUBLIC_REVIEW_WITH_LISTING_COLUMNS = [...PUBLIC_REVIEW_COLUMNS, 'listing_title'] as const;
+/**
+ * A review row in FULL, as only an administrator sees it — the deliberate
+ * opposite of `PUBLIC_REVIEW_COLUMNS`.
+ *
+ * `author_id`, `order_id` and `price_epoch` are all present, and each is one of
+ * the omissions the public shape exists to make. Asserting the two side by side
+ * is what makes the difference a property of the code rather than a convention:
+ * if `listReviewsForModeration` ever fed a public page, this list is what would
+ * be leaking.
+ */
+const MODERATABLE_REVIEW_COLUMNS = [
+  'id',
+  'order_id',
+  'listing_id',
+  'author_id',
+  'rating',
+  'body',
+  'price_epoch',
+  'created_at',
+  'updated_at',
+  'author_name',
+  'listing_title',
+] as const;
+/** The archive row, plus the three names a log has to read without them. */
+const REMOVED_REVIEW_COLUMNS = [
+  'id',
+  'review_id',
+  'listing_id',
+  'author_id',
+  'order_id',
+  'rating',
+  'body',
+  'price_epoch',
+  'review_created_at',
+  'removed_by',
+  'removed_at',
+  'reason',
+  'author_name',
+  'listing_title',
+  'removed_by_name',
+] as const;
 /** An order as its buyer, its seller or an admin sees it. No buyer NAME, ever. */
 const ORDER_COLUMNS = [
   'id',
@@ -4185,6 +4226,162 @@ expectEqual(
 );
 
 // ---------------------------------------------------------------------------
+section('Review moderation — admin only, and the row really goes');
+// ---------------------------------------------------------------------------
+// A purpose-built fixture rather than a seeded review, so the aggregates are
+// known exactly: ONE offer, ONE sale, ONE review, at price epoch 1. Removing a
+// seeded review would work, but the offer rollup filters on the current epoch
+// and several seeded reviews sit at an older one — so a delta of zero would be
+// correct and would prove nothing.
+
+const modOffer = await allows(
+  'a fixture offer for the moderation section',
+  () =>
+    db.createListing(COACH, {
+      title: 'Moderation fixture offer',
+      description: 'Published so a review can be written about it and then taken down again.',
+      price_cents: 3300,
+      category: 'training_plan',
+    }),
+  (r) => r.id,
+);
+await allows('...claimed by a learner', () => db.createOrder(AISHA, modOffer!.id), (o) => o.id);
+const modOrder = (await db.listMyOrders(AISHA)).find((o) => o.listing_id === modOffer!.id);
+const modReview = await allows(
+  '...and reviewed',
+  () => db.createReview(AISHA, { order_id: modOrder!.id, rating: 2, body: 'A review written to be removed.' }),
+  (r) => `${r.rating}★ ${r.id}`,
+);
+
+// --- who may look ----------------------------------------------------------
+for (const [who, actor] of [
+  ['an anonymous caller', null],
+  ['a learner', MARCUS],
+  ['an approved coach', COACH],
+  ['another coach', NILS],
+] as Array<[string, Actor]>) {
+  await refuses(`${who} cannot read the moderation queue`, actor === null ? 'unauthorized' : 'forbidden', () =>
+    db.listReviewsForModeration(actor),
+  );
+  await refuses(`${who} cannot read the removal log`, actor === null ? 'unauthorized' : 'forbidden', () =>
+    db.listRemovedReviews(actor),
+  );
+  await refuses(`${who} cannot remove a review`, actor === null ? 'unauthorized' : 'forbidden', () =>
+    db.removeReview(actor, modReview!.id),
+  );
+}
+// THE CONTROL for all of that: the coach who was refused above owns the offer
+// this review is about, and is still refused. Moderation is not an owner power.
+expectEqual('...and the refused coach really does own the offer', modOffer?.coach_id, COACH!.userId);
+expectEqual(
+  'no refused removal reached the store',
+  (await db.listReviewsForListing(modOffer!.id)).length,
+  1,
+);
+
+// --- the admin's view ------------------------------------------------------
+const modQueue = await allows(
+  'an ADMIN can read the queue',
+  () => db.listReviewsForModeration(ADMIN),
+  (rows) => `${rows.length} review(s)`,
+);
+const queued = modQueue?.find((row) => row.id === modReview!.id);
+expectEqual('...and the new review is in it', Boolean(queued), true);
+// The opposite projection to PublicReview, which is the point of the shape:
+// a moderator needs the author and the purchase, a visitor must have neither.
+expectShape('...with the full row plus the two joined names', queued, MODERATABLE_REVIEW_COLUMNS);
+expectEqual('...naming the author', queued?.author_name, 'Aisha Bello');
+expectEqual('...and the offer', queued?.listing_title, 'Moderation fixture offer');
+
+// --- the numbers before ----------------------------------------------------
+const statsBefore = await db.getOfferStats(modOffer!.id);
+expectEqual('the offer counts the review before removal', statsBefore?.review_count, 1);
+expectEqual('...at the rating that was written', statsBefore?.rating_average, 2);
+expectEqual('...and counts the sale', statsBefore?.sales_count, 1);
+const modCoachBefore = await db.getCoachStats(COACH!.userId);
+
+// --- removal ---------------------------------------------------------------
+await allows(
+  'an ADMIN removes it',
+  () => db.removeReview(ADMIN, modReview!.id, '  Fixture removal, with a reason.  '),
+  () => 'removed',
+);
+
+// THE ASSERTION THIS DESIGN EXISTS FOR. The row is deleted rather than flagged,
+// so every aggregate is correct with no filter anywhere. A soft delete would
+// need one in five separate views, and the failure mode of forgetting one is a
+// removed review still counting towards a rating, invisibly.
+const statsAfter = await db.getOfferStats(modOffer!.id);
+expectEqual('the offer no longer counts it', statsAfter?.review_count, 0);
+// `null`, not 0 — "unrated" and "rated zero" must never be confusable.
+expectEqual('...and reads as unrated rather than as zero', statsAfter?.rating_average, null);
+// THE SALE SURVIVES. Removing a review must not un-sell anything: the order is
+// a separate row and the money (one day) was real.
+expectEqual('...while the sale is untouched', statsAfter?.sales_count, 1);
+const modCoachAfter = await db.getCoachStats(COACH!.userId);
+expectEqual(
+  'the coach account rating drops the review too',
+  modCoachBefore.review_count - modCoachAfter.review_count,
+  1,
+);
+expectEqual('...and keeps the sale', modCoachAfter.sales_count, modCoachBefore.sales_count);
+
+// Gone from every public read, not merely from the rollup.
+expectEqual('the review is gone from the offer page read', (await db.listReviewsForListing(modOffer!.id)).length, 0);
+expectEqual(
+  '...and from the coach profile read',
+  (await db.listReviewsForCoach(COACH!.userId)).some((r) => r.body === 'A review written to be removed.'),
+  false,
+);
+expectEqual(
+  '...and from the moderation queue itself',
+  (await db.listReviewsForModeration(ADMIN)).some((r) => r.id === modReview!.id),
+  false,
+);
+
+// --- the archive -----------------------------------------------------------
+const log = await allows(
+  'the removal is in the log',
+  () => db.listRemovedReviews(ADMIN),
+  (rows) => `${rows.length} entr(y|ies)`,
+);
+const logged = log?.find((row) => row.review_id === modReview!.id);
+expectEqual('...as an entry naming the deleted review', Boolean(logged), true);
+expectShape('...with the archived shape', logged, REMOVED_REVIEW_COLUMNS);
+// The evidence: the whole review, verbatim, so somebody can be shown what was
+// taken down.
+expectEqual('...carrying the body verbatim', logged?.body, 'A review written to be removed.');
+expectEqual('...and the rating', logged?.rating, 2);
+expectEqual('...and who removed it', logged?.removed_by, ADMIN!.userId);
+// Trimmed, and `null` when blank — "no reason given" is a different fact from
+// "the reason is an empty string".
+expectEqual('...and the reason, trimmed', logged?.reason, 'Fixture removal, with a reason.');
+expectEqual('...and when the review was WRITTEN, not when it went', logged?.review_created_at, modReview?.created_at);
+
+// --- removing it again -----------------------------------------------------
+await refuses('the same review cannot be removed twice', 'not_found', () =>
+  db.removeReview(ADMIN, modReview!.id),
+);
+await refuses('an unknown id is not_found', 'not_found', () =>
+  db.removeReview(ADMIN, '00000000-0000-4000-8000-0000000000ff'),
+);
+expectEqual('...and neither attempt added a second log entry', log?.length, (await db.listRemovedReviews(ADMIN)).length);
+
+// A removal with no reason records null rather than an empty string.
+const secondOrder = await allows(
+  'a second reviewable purchase',
+  async () => {
+    await db.createOrder(MARCUS, modOffer!.id);
+    const order = (await db.listMyOrders(MARCUS)).find((o) => o.listing_id === modOffer!.id);
+    return db.createReview(MARCUS, { order_id: order!.id, rating: 5, body: 'Removed with no reason given.' });
+  },
+  (r) => r.id,
+);
+await allows('...removed with a blank reason', () => db.removeReview(ADMIN, secondOrder!.id, '   '), () => 'removed');
+const blank = (await db.listRemovedReviews(ADMIN)).find((row) => row.review_id === secondOrder!.id);
+expectEqual('a whitespace-only reason is stored as null', blank?.reason, null);
+
+// ---------------------------------------------------------------------------
 section('Rate limiting — a speed bump that has to count correctly');
 // ---------------------------------------------------------------------------
 // The mock twin of `consume_rate_limit()` (0013). What is asserted is the
@@ -4275,6 +4472,93 @@ expectEqual(
   storedBuckets.every((b) => /^[0-9a-f]{64}$/.test(b)),
   true,
 );
+
+// ---------------------------------------------------------------------------
+section('Error reporting — one line, and nothing sensitive in it');
+// ---------------------------------------------------------------------------
+// `reportError` is the seam a provider plugs into later. What is asserted here
+// is the contract every call site depends on: one JSON line per report, the
+// expected errors dropped, and no credential or address in the payload.
+//
+// WHAT IS NOT ASSERTED, stated rather than left to be assumed: the binding in
+// `src/instrumentation.ts`. `onRequestError` is called by the Next runtime,
+// which is not running here, so its wiring is covered by the type signature and
+// the build and by nothing else.
+
+const { reportError } = await import('@/lib/observability');
+
+/** Captures whatever `reportError` writes, without letting it reach the run's output. */
+function captureReport(fn: () => void): string[] {
+  const original = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map((a) => String(a)).join(' '));
+  };
+  try {
+    fn();
+  } finally {
+    console.error = original;
+  }
+  return lines;
+}
+
+const reported = captureReport(() => {
+  reportError(new TypeError('a genuine bug'), {
+    source: 'request',
+    route: '/orders/[id]',
+    kind: 'render',
+    digest: '1234567890',
+  });
+});
+expectEqual('an unexpected error produces exactly one line', reported.length, 1);
+const payload = JSON.parse(reported[0] ?? '{}') as Record<string, unknown>;
+expectEqual('...which is valid JSON', typeof payload, 'object');
+expectEqual('...naming the error CLASS, which is what groups incidents', payload.name, 'TypeError');
+expectEqual('...and the message', payload.message, 'a genuine bug');
+expectEqual('...and the route FILE, not one visitor’s URL', payload.route, '/orders/[id]');
+expectEqual('...and the digest the user is shown', payload.digest, '1234567890');
+expectEqual('...with a stack, which is the point of the exercise', typeof payload.stack, 'string');
+
+// THE FILTER. A `DataError` is the app refusing something on purpose — a
+// `forbidden` means the policies worked — and reporting those would bury real
+// failures under a stream of correct behaviour.
+for (const [shape, value] of [
+  ['a DataError', new DataError('forbidden', 'You cannot do that.')],
+  ['a redirect', Object.assign(new Error('x'), { digest: 'NEXT_REDIRECT;replace;/login;307;' })],
+  ['a not-found', Object.assign(new Error('x'), { digest: 'NEXT_NOT_FOUND' })],
+] as Array<[string, unknown]>) {
+  expectEqual(
+    `${shape} is not reported at all`,
+    captureReport(() => reportError(value, { source: 'request' })).length,
+    0,
+  );
+}
+
+// THE REDACTION. The query string is where `?next=` and `?q=` live, which is
+// whatever a visitor typed.
+const stripped = captureReport(() => {
+  reportError(new Error('boom'), { source: 'request', route: '/login?next=%2Fsecret&q=alice%40example.com' });
+});
+const strippedPayload = JSON.parse(stripped[0] ?? '{}') as Record<string, unknown>;
+expectEqual('a query string is stripped from the route', strippedPayload.route, '/login');
+expectEqual(
+  '...so nothing a visitor typed reaches the log',
+  stripped[0]?.includes('alice%40example.com'),
+  false,
+);
+
+// A circular value in `extra` must not throw inside the reporter — a reporter
+// that can fail the request it is reporting on is worse than no reporter.
+const circular: Record<string, unknown> = {};
+circular.self = circular;
+const survived = captureReport(() => {
+  reportError(new Error('boom'), {
+    source: 'background',
+    extra: circular as unknown as Record<string, string>,
+  });
+});
+expectEqual('an unserialisable payload still produces one line', survived.length, 1);
+expectEqual('...and does not throw', true, true);
 
 // ---------------------------------------------------------------------------
 section('Store invariants');

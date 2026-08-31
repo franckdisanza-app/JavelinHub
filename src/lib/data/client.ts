@@ -97,6 +97,11 @@
  *   listMyOrders                                 the actor's own purchases
  *   listOrdersForCoach                           that coach, or an admin
  *   createReview                                 owner of an unreviewed order
+ *   listReviewsForModeration / removeReview / listRemovedReviews
+ *                                                stored role === 'admin'. Removal
+ *                                                DELETES the row after archiving
+ *                                                it, and there is deliberately no
+ *                                                method that EDITS a review
  *   getProfile                                   self, or an admin actor
  *   createListing                                stored coach_status === 'approved'
  *   createInvite / listInvites / revokeInvite    stored role === 'admin'
@@ -160,6 +165,7 @@ import type {
   ListingDetail,
   ListingRevision,
   ListingWithCoach,
+  ModeratableReview,
   OfferStats,
   OwnedListing,
   Deliverable,
@@ -170,6 +176,7 @@ import type {
   PublicProfile,
   PublicReview,
   PublicReviewWithListing,
+  RemovedReviewWithNames,
   Review,
 } from './types';
 
@@ -910,6 +917,57 @@ export interface DataClient {
   removeDeliverable(actor: Actor, deliverableId: string): Promise<void>;
 
   createReview(actor: Actor, input: CreateReviewInput): Promise<Review>;
+
+  // ---------------------------------------------------------------------------
+  // Moderation — administrators only, all three
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Every review on the site, newest first, with the author's name and the
+   * offer's title attached.
+   *
+   * ADMIN ONLY, and this is the read `PublicReview` exists to prevent for
+   * everyone else — {@link ModeratableReview} keeps `author_id`, `order_id` and
+   * `price_epoch`, which a visitor must never see. Mirrors
+   * `reviews_select_admin`, the only policy that admits reading the raw table.
+   *
+   * Not paginated, like every other list on this interface. `docs/ROADMAP.md`
+   * §6 has the standing note about that, and it applies here sooner than most:
+   * a moderation queue grows monotonically.
+   */
+  listReviewsForModeration(actor: Actor): Promise<ModeratableReview[]>;
+
+  /**
+   * Takes a review down: copies it to `removed_reviews`, then deletes it.
+   *
+   * ADMIN ONLY. **The only path that removes a review** — `0016` drops the
+   * admin `DELETE` policy on `reviews` precisely so an unaudited route does not
+   * exist beside this one. Both halves happen in one transaction, so there is no
+   * interleaving in which the review is gone and the archive row is not.
+   *
+   * DELETES, NEVER EDITS, and there is deliberately no method to edit one. A
+   * review is an opinion published under a named person's identity; an
+   * administrator who could rewrite it would be fabricating an opinion and
+   * attributing it to a real reader. `0002_rls.sql` makes the same argument
+   * about a coach's listing copy, and it is stronger here.
+   *
+   * `reason` is free text for the archive and is optional: a reason nobody can
+   * be bothered to write becomes a copy-pasted one, which is worse than blank.
+   *
+   * The offer's rating and the coach's rating both move as a result, because the
+   * row is genuinely gone rather than flagged — no aggregate has a filter to
+   * forget. See {@link RemovedReview}.
+   */
+  removeReview(actor: Actor, reviewId: string, reason?: string | null): Promise<void>;
+
+  /**
+   * The moderation log: what has been taken down, by whom, and why.
+   *
+   * ADMIN ONLY. Newest first. `removed_by_name` and `author_name` are `null`-safe
+   * — both underlying columns are `ON DELETE SET NULL`, so a log entry outlives
+   * the accounts it names.
+   */
+  listRemovedReviews(actor: Actor): Promise<RemovedReviewWithNames[]>;
 
   // ---------------------------------------------------------------------------
   // Invites (admin-minted, one-shot coach fast-track codes)

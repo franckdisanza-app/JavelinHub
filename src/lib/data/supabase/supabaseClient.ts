@@ -88,6 +88,7 @@ import {
   type ListingDetail,
   type ListingRevision,
   type ListingWithCoach,
+  type ModeratableReview,
   type OfferStats,
   type Order,
   type OrderWithListing,
@@ -97,6 +98,8 @@ import {
   type PublicProfile,
   type PublicReview,
   type PublicReviewWithListing,
+  type RemovedReview,
+  type RemovedReviewWithNames,
   type Review,
 } from '../types';
 import {
@@ -394,17 +397,22 @@ async function requireApprovedCoachProfile(ctx: AuthedCtx): Promise<Profile> {
 // ---------------------------------------------------------------------------
 // Joins.
 //
-// PostgREST resource embedding is deliberately NOT used to attach coach names.
-// Embedding `profiles` would apply that table's RLS, which has no anon policy
-// at all, so every visitor would see "Unknown coach" on every card; embedding
-// the `public_profiles` VIEW depends on PostgREST inferring a foreign key
-// through a view, which is version-dependent behaviour to hang a public page
-// on. Two explicit queries and a Map are boring, predictable, and read the same
-// view the SQL mapping table says they should.
+// PostgREST resource embedding is deliberately NOT used to attach display
+// names. Embedding `profiles` would apply that table's RLS, which has no anon
+// policy at all, so every visitor would see "Unknown coach" on every card;
+// embedding the `public_profiles` VIEW depends on PostgREST inferring a foreign
+// key through a view, which is version-dependent behaviour to hang a public
+// page on. Two explicit queries and a Map are boring, predictable, and read the
+// same view the SQL mapping table says they should.
+//
+// `displayNamesFor` was `coachNamesFor` until the moderation reads needed it:
+// it resolves ANY user id through `public_profiles`, and review authors are
+// learners. The name was describing its first caller rather than its job, which
+// is how a reader ends up assuming a coach-only scope that was never there.
 // ---------------------------------------------------------------------------
 
-async function coachNamesFor(ctx: Ctx, coachIds: readonly string[]): Promise<Map<string, string>> {
-  const unique = [...new Set(coachIds)].filter((id) => typeof id === 'string' && id !== '');
+async function displayNamesFor(ctx: Ctx, userIds: readonly string[]): Promise<Map<string, string>> {
+  const unique = [...new Set(userIds)].filter((id) => typeof id === 'string' && id !== '');
   if (unique.length === 0) return new Map();
 
   const { data, error } = await ctx.supabase.from('public_profiles').select('id, full_name').in('id', unique);
@@ -435,7 +443,7 @@ function toListingWithCoach(row: ListingRow, names: Map<string, string>): Listin
 }
 
 async function withCoachNames(ctx: Ctx, rows: readonly ListingRow[]): Promise<ListingWithCoach[]> {
-  const names = await coachNamesFor(ctx, rows.map((row) => row.coach_id));
+  const names = await displayNamesFor(ctx, rows.map((row) => row.coach_id));
   return rows.map((row) => toListingWithCoach(row, names));
 }
 
@@ -514,6 +522,26 @@ interface ListingTitleRow {
   id: string;
   title: string;
   fulfilment: FulfilmentMode;
+}
+
+/**
+ * Offer titles by id, for the moderation reads.
+ *
+ * NO `deleted_at` FILTER, the same rule `withListingTitles` follows and for the
+ * same reason: a withdrawn offer's reviews still exist, and a moderator who
+ * could not see one could not act on it. An admin reads past the public policy
+ * through `listings_select_admin` anyway.
+ */
+async function listingTitlesFor(ctx: Ctx, listingIds: readonly string[]): Promise<Map<string, string>> {
+  const unique = [...new Set(listingIds)].filter((id) => typeof id === 'string' && id !== '');
+  if (unique.length === 0) return new Map();
+
+  const { data, error } = await ctx.supabase.from('listings').select('id, title').in('id', unique);
+  if (error) throwDataError(error, ctx.userId !== null);
+
+  const titles = new Map<string, string>();
+  for (const row of (data ?? []) as { id: string; title: string }[]) titles.set(row.id, row.title);
+  return titles;
 }
 
 // ---------------------------------------------------------------------------
@@ -952,7 +980,7 @@ export class SupabaseDataClient implements DataClient {
     if (error) throwDataError(error, true);
 
     const rows = (data ?? []) as OwnedListingRow[];
-    const names = await coachNamesFor(ctx, rows.map((row) => row.coach_id));
+    const names = await displayNamesFor(ctx, rows.map((row) => row.coach_id));
     return rows.map((row) => ({
       ...toListingWithCoach(row, names),
       withdrawn_by_admin: row.withdrawn_by_admin === true,
@@ -1130,7 +1158,7 @@ export class SupabaseDataClient implements DataClient {
     if (!data) throw new DataError('not_found', 'That offer could not be found.');
 
     const row = data as OwnedListingRow;
-    const names = await coachNamesFor(ctx, [row.coach_id]);
+    const names = await displayNamesFor(ctx, [row.coach_id]);
     return {
       ...toListingWithCoach(row, names),
       withdrawn_by_admin: row.withdrawn_by_admin === true,
@@ -1660,6 +1688,115 @@ export class SupabaseDataClient implements DataClient {
     }
     if (!data) throw new DataError('invalid', 'That review could not be saved.');
     return data as Review;
+  }
+
+  // -------------------------------------------------------------------------
+  // Moderation
+  // -------------------------------------------------------------------------
+
+  /**
+   * Every review, for the moderation queue.
+   *
+   * `reviews_select_admin` is the boundary and it renders a refusal as ZERO
+   * ROWS — so `requireAdminProfile` runs first, or a coach asking for this
+   * would get an empty list ("there are no reviews") rather than a refusal
+   * ("this is not yours to see"). Same construction, same reason, as
+   * `listOrdersForCoach`.
+   *
+   * The author's name comes from `public_profiles` rather than `profiles`,
+   * which carries email — the invariant the interface header states first.
+   * Titles come from `listings` with NO `deleted_at` filter: a review of a
+   * withdrawn offer is still a review, and one a moderator could not see is one
+   * they could not take down.
+   */
+  async listReviewsForModeration(actor: Actor): Promise<ModeratableReview[]> {
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    const { data, error } = await ctx.supabase
+      .from('reviews')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) throwDataError(error, true);
+
+    const reviews = (data ?? []) as Review[];
+    if (reviews.length === 0) return [];
+
+    const [names, titles] = await Promise.all([
+      displayNamesFor(ctx, reviews.map((r) => r.author_id)),
+      listingTitlesFor(ctx, reviews.map((r) => r.listing_id)),
+    ]);
+
+    return reviews.map((review) => ({
+      ...review,
+      author_name: names.get(review.author_id) ?? 'Unknown',
+      listing_title: titles.get(review.listing_id) ?? UNKNOWN_LISTING,
+    }));
+  }
+
+  /**
+   * Takes a review down through `public.remove_review()`.
+   *
+   * AN RPC AND NOT A DELETE, because there is no longer a DELETE policy to use:
+   * `0016` drops `reviews_delete_admin` precisely so that no route exists which
+   * removes a review without writing the archive row. The function does both in
+   * one transaction, and it re-checks `is_admin()` itself — the pre-check here
+   * exists only to produce the same sentence the mock produces for a non-admin,
+   * before a round trip.
+   */
+  async removeReview(actor: Actor, reviewId: string, reason?: string | null): Promise<void> {
+    const id = requireText(reviewId, 'Review', 200);
+    const note = optionalText(reason, 'Reason', 1000);
+
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    const { error } = await ctx.supabase.rpc('remove_review', {
+      p_review_id: id,
+      p_reason: note,
+    });
+    if (error) {
+      // A malformed id never reaches the function body — it fails at the uuid
+      // cast — and the mock answers `not_found` for the same input.
+      if (isMalformedId(error)) throw new DataError('not_found', 'That review could not be found.');
+      throwDataError(error, true);
+    }
+  }
+
+  /** The moderation log. `removed_reviews_select_admin` is the policy. */
+  async listRemovedReviews(actor: Actor): Promise<RemovedReviewWithNames[]> {
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    const { data, error } = await ctx.supabase
+      .from('removed_reviews')
+      .select('*')
+      .order('removed_at', { ascending: false });
+    if (error) throwDataError(error, true);
+
+    const rows = (data ?? []) as RemovedReview[];
+    if (rows.length === 0) return [];
+
+    // Both id columns are ON DELETE SET NULL, so either can be absent. The
+    // nulls are filtered before the lookup and reinstated after it.
+    const people = [
+      ...rows.map((r) => r.author_id),
+      ...rows.map((r) => r.removed_by),
+    ].filter((id): id is string => typeof id === 'string');
+
+    const [names, titles] = await Promise.all([
+      displayNamesFor(ctx, people),
+      listingTitlesFor(ctx, rows.map((r) => r.listing_id)),
+    ]);
+
+    return rows.map((row) => ({
+      ...row,
+      author_name: (row.author_id && names.get(row.author_id)) || 'Unknown',
+      listing_title: titles.get(row.listing_id) ?? UNKNOWN_LISTING,
+      // `null` rather than a placeholder: the account is gone, and saying so is
+      // more useful to whoever reads the log than inventing an actor.
+      removed_by_name: (row.removed_by && names.get(row.removed_by)) || null,
+    }));
   }
 
   // -------------------------------------------------------------------------

@@ -511,6 +511,61 @@ for (const [shape, args] of [
 }
 
 // ===========================================================================
+section('Moderation — the archive, and the routes that were closed');
+// ===========================================================================
+// 0016 adds `removed_reviews` and `remove_review()`, and DROPS two policies
+// that 0002 had carried unused since the schema landed. Both drops are the
+// interesting half: each was a way around the audited path.
+//
+//   reviews_update_admin  would let an administrator rewrite a review in place
+//   reviews_delete_admin  would let one delete a review with no archive row
+//
+// A dropped policy cannot be asserted directly — there is no "this policy is
+// absent" endpoint — so what is asserted is the CONSEQUENCE: an anonymous
+// caller is refused, which was already true, and the write paths below refuse
+// everyone. The signed-in admin case needs an admin session, which this suite
+// cannot mint; it is covered in `verify:authz` against the mock instead.
+
+// REFUSED OUTRIGHT, not admitted-and-empty — and the difference from
+// `owned_listings` above is deliberate. That is a VIEW whose `auth.uid()`
+// predicate is the boundary, so 0007 reasoned that leaving anon's default grant
+// alone kept the security property in one place. This is a TABLE, anon has no
+// business reaching it under any predicate, and 0016 revokes the grant. A 42501
+// here is the stronger answer.
+expectSqlState(
+  'removed_reviews is refused outright for anon',
+  await rest('removed_reviews?select=id&limit=1'),
+  '42501',
+);
+expectSqlState(
+  'anon cannot INSERT into removed_reviews — the archive is written by the RPC alone',
+  await rest('removed_reviews', { method: 'POST', body: {}, prefer: 'return=minimal' }),
+  '42501',
+);
+// No UPDATE policy for any role at all, so an archived row cannot be edited
+// after the fact — a log somebody can rewrite is not a log.
+expectSqlState(
+  'anon cannot UPDATE removed_reviews either',
+  await rest('removed_reviews?id=eq.00000000-0000-4000-8000-0000000000ff', {
+    method: 'PATCH',
+    body: { reason: 'rewritten' },
+    prefer: 'return=minimal',
+  }),
+  '42501',
+);
+
+const removeAnon = await rpc('remove_review', {
+  p_review_id: '00000000-0000-4000-8000-0000000000ff',
+  p_reason: null,
+});
+expectSqlState('remove_review refuses an anonymous caller', removeAnon, '42501');
+expectEqual(
+  '...with the sentence 0016 wrote, not a Postgres one',
+  removeAnon.message.includes('Only an administrator'),
+  true,
+);
+
+// ===========================================================================
 section('The signed-in tier');
 // ===========================================================================
 

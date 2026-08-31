@@ -780,6 +780,73 @@ export interface PublicReviewWithListing extends PublicReview {
 }
 
 /**
+ * A review as an ADMINISTRATOR sees it, for the moderation queue.
+ *
+ * The near-opposite of {@link PublicReview}, and deliberately so: that shape
+ * exists to drop `author_id`, `order_id` and `price_epoch` before a review
+ * reaches a visitor, while this one keeps the whole row. A moderator deciding
+ * whether to take something down needs to know who wrote it and what they
+ * bought; a visitor needs neither and `PublicReview` is what makes that true by
+ * construction.
+ *
+ * So this must never be rendered on a public page. `listReviewsForModeration`
+ * refuses anyone who is not an admin, in both backends and in RLS
+ * (`reviews_select_admin`).
+ */
+export interface ModeratableReview extends Review {
+  /** The reviewer's display name, joined from `public_profiles`. */
+  author_name: string;
+  /** The offer it is about. Present even when that offer has been withdrawn. */
+  listing_title: string;
+}
+
+/**
+ * `public.removed_reviews` — a review an administrator took down, copied
+ * verbatim before the row was deleted.
+ *
+ * THE REVIEW ITSELF IS GONE, not flagged. `0016_review_moderation.sql` explains
+ * the choice at length; the short version is that a soft delete would have to be
+ * filtered out of five separate views and forgetting one leaves a removed review
+ * still counting towards somebody's rating, invisibly. Moving the row here makes
+ * all five correct with no filter at all.
+ *
+ * `removed_by` and `author_id` are both nullable because both are `ON DELETE SET
+ * NULL`: an audit column that blocks account deletion is one somebody will
+ * delete instead — the lesson `invites.created_by` taught the hard way, recorded
+ * in `supabase/README.md`.
+ *
+ * Administrator-readable and administrator-DELETABLE. That second half is the
+ * erasure path: a review is sometimes removed precisely because it contains
+ * something that must not persist, and an archive nobody can purge would keep
+ * the very text the removal existed to take down.
+ */
+export interface RemovedReview {
+  id: string;
+  /** The deleted review's id. Not a foreign key — the row it names is gone. */
+  review_id: string;
+  listing_id: string;
+  author_id: string | null;
+  order_id: string;
+  rating: number;
+  body: string;
+  price_epoch: number;
+  /** When the review was WRITTEN, not when it was removed. */
+  review_created_at: string;
+  removed_by: string | null;
+  removed_at: string;
+  /** Free text from the administrator, or `null`. Optional on purpose. */
+  reason: string | null;
+}
+
+/** A removed review joined to the names a moderation log needs to read. */
+export interface RemovedReviewWithNames extends RemovedReview {
+  author_name: string;
+  listing_title: string;
+  /** The administrator who acted, or `null` if that account is gone. */
+  removed_by_name: string | null;
+}
+
+/**
  * Rating and sales rollup for ONE offer, at its CURRENT `price_epoch`.
  *
  * `rating_average` is `null` — never `0` — when `review_count` is 0. That is

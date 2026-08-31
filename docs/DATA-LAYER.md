@@ -905,15 +905,25 @@ together.
 * No pagination. `listListings` returns everything, newest first. Fine for a POC
   with six fixtures; add a cursor before it is not. `listReviewsForCoach` has
   the same property and will need it sooner.
-* **No purchase path.** There is no `createOrder`, and the SQL grants no client
-  `INSERT` on `orders` — a client-supplied `price_cents_at_purchase` is not
-  something that should ever be insertable. Orders come from the seed. A real
-  checkout gets its own RPC.
-* **No review edit or delete in the interface.** SQL has admin-only
-  `reviews_update_admin` / `reviews_delete_admin` for moderation; authors get no
-  update path at all, for the same reason applicants get none on
-  `coach_applications` — an `UPDATE` grant would let them rewrite `order_id`,
-  `listing_id` or `price_epoch`, and pinning those for a self-update needs an
-  OLD-vs-NEW comparison, i.e. another guard trigger.
+* **No client `INSERT` on `orders`, and there should never be one.** A
+  caller-supplied `price_cents_at_purchase` is not something that should ever be
+  insertable. `createOrder` exists now and is the RPC this bullet predicted:
+  `claim_offer(uuid)` derives the learner from the JWT and the coach, price and
+  epoch from the listing, so nothing about an order is caller-supplied except
+  which offer. Claiming is free; when payment lands it goes IN FRONT of that
+  call, not instead of it.
+* **No review EDIT path for anybody — author or administrator.** Authors get
+  none for the same reason applicants get none on `coach_applications`: an
+  `UPDATE` grant would let them rewrite `order_id`, `listing_id` or
+  `price_epoch`, and pinning those for a self-update needs an OLD-vs-NEW
+  comparison, i.e. another guard trigger.
+
+  Administrators get none because a review is an opinion published under a named
+  person's identity, and rewriting one would be fabricating an opinion and
+  attributing it to a real reader. `0016` DROPS the `reviews_update_admin` policy
+  that would have permitted it. What an administrator does have is
+  `removeReview`, which archives the review to `removed_reviews` and then deletes
+  it — the only path that removes one, since the admin `DELETE` policy was
+  dropped in the same migration so that no unaudited route exists beside it.
 * No session handling. Building an `Actor` from a cookie belongs to the auth
   layer, not here.

@@ -43,6 +43,7 @@ import type {
   ListingDetail,
   ListingRevision,
   ListingWithCoach,
+  ModeratableReview,
   OfferStats,
   OwnedListing,
   Order,
@@ -52,6 +53,7 @@ import type {
   PublicProfile,
   PublicReview,
   PublicReviewWithListing,
+  RemovedReviewWithNames,
   Review,
   Role,
 } from '../types';
@@ -1658,6 +1660,101 @@ export class MockDataClient implements DataClient {
       };
       db.reviews.push(review);
       return copy(review);
+    });
+  }
+
+  // =========================================================================
+  // Moderation
+  // =========================================================================
+
+  /**
+   * Mirrors: policy `reviews_select_admin` — `using (public.is_admin())`, the
+   * only policy that admits reading the raw `reviews` table rather than the
+   * `public_reviews` projection.
+   *
+   * The whole row goes out, `author_id` and `order_id` included, which is the
+   * exact opposite of what `toPublicReview()` does and is why this method is
+   * admin-gated. See {@link ModeratableReview}.
+   */
+  async listReviewsForModeration(actor: Actor): Promise<ModeratableReview[]> {
+    return readDb((db) => {
+      requireAdmin(db, actor);
+      return db.reviews
+        .slice()
+        .sort(byCreatedAtDesc)
+        .map((review) => ({
+          ...copy(review),
+          author_name: db.profiles.find((p) => p.id === review.author_id)?.full_name ?? 'Unknown',
+          // NO `deleted_at` FILTER, the same rule `listingTitle()` follows: a
+          // review of a withdrawn offer is still a review, and a moderator who
+          // could not see it could not take it down.
+          listing_title: listingTitle(db, review.listing_id),
+        }));
+    });
+  }
+
+  /**
+   * Mirrors: `public.remove_review(uuid, text)` (0016), rule for rule and
+   * message for message.
+   *
+   * ARCHIVE THEN DELETE, both inside ONE `mutateDb`, which is the mock's
+   * transaction: there is no interleaving in which the review is gone and the
+   * archive row is not. The SQL function achieves the same with a single
+   * function body and a `for update` lock.
+   */
+  async removeReview(actor: Actor, reviewId: string, reason?: string | null): Promise<void> {
+    const id = requireText(reviewId, 'Review', 200);
+    const note = optionalText(reason, 'Reason', 1000);
+
+    return mutateDb((db) => {
+      const admin = requireAdmin(db, actor);
+
+      const index = db.reviews.findIndex((r) => r.id === id);
+      if (index === -1) throw new DataError('not_found', 'That review could not be found.');
+      const review = db.reviews[index];
+
+      db.removed_reviews.push({
+        id: newId(),
+        // Not a reference — the row it names is about to stop existing.
+        review_id: review.id,
+        listing_id: review.listing_id,
+        author_id: review.author_id,
+        order_id: review.order_id,
+        rating: review.rating,
+        body: review.body,
+        price_epoch: review.price_epoch,
+        // When it was WRITTEN. `removed_at` is when it was taken down.
+        review_created_at: review.created_at,
+        removed_by: admin.id,
+        removed_at: nowIso(),
+        reason: note,
+      });
+
+      // The row genuinely goes. Every aggregate over `db.reviews` — the offer
+      // rollup, the coach rollup, both public review lists — is therefore
+      // correct with no filter added anywhere, which is the entire argument for
+      // archiving rather than flagging. See 0016.
+      db.reviews.splice(index, 1);
+    });
+  }
+
+  /** Mirrors: policy `removed_reviews_select_admin`. Newest first. */
+  async listRemovedReviews(actor: Actor): Promise<RemovedReviewWithNames[]> {
+    return readDb((db) => {
+      requireAdmin(db, actor);
+      return db.removed_reviews
+        .slice()
+        .sort((a, b) => (a.removed_at < b.removed_at ? 1 : a.removed_at > b.removed_at ? -1 : 0))
+        .map((row) => ({
+          ...copy(row),
+          author_name: db.profiles.find((p) => p.id === row.author_id)?.full_name ?? 'Unknown',
+          listing_title: listingTitle(db, row.listing_id),
+          // `null`, not 'Unknown': both columns are ON DELETE SET NULL, so a log
+          // entry outlives the accounts it names and the caller has to render
+          // that honestly rather than inventing an actor.
+          removed_by_name:
+            db.profiles.find((p) => p.id === row.removed_by)?.full_name ?? null,
+        }));
     });
   }
 

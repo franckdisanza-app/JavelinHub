@@ -164,6 +164,7 @@ async function plantFixtures(): Promise<{
   instantBuyerId: string;
   resetUserId: string;
   resetToken: string;
+  adminId: string;
 }> {
   const db = getDataClient();
 
@@ -382,6 +383,7 @@ async function plantFixtures(): Promise<{
     instantBuyerId: otto.id,
     resetUserId: reset.id,
     resetToken,
+    adminId: adminProfile.id,
   };
 }
 
@@ -1599,6 +1601,69 @@ try {
   // asserted has "Nothing has been sent yet".
   check('a personalised order still has no download section',
     buyerOrder.text.includes('Your download'), false);
+
+  // -------------------------------------------------------------------------
+  section('/admin/reviews — moderation, and who is told it exists');
+
+  /*
+   * THE GATE IS A 404, NOT A 403, and that is the same rule every admin page
+   * follows: telling a signed-in learner "you are not allowed here" confirms
+   * there is a `here`. `requireAdmin()` calls `notFound()` for exactly that.
+   */
+  check('anonymous -> log in and back',
+    await redirectTarget('/admin/reviews'), '/login?next=%2Fadmin%2Freviews');
+  check('a learner gets 404, not a refusal',
+    (await getAs('/admin/reviews', LEARNER)).status, 404);
+  check('...and so does an approved coach', (await getAs('/admin/reviews', COACH)).status, 404);
+
+  const moderation = await getAs('/admin/reviews', fixtures.adminId);
+  check('an admin gets the page', moderation.status, 200);
+  // The seed writes eight reviews across the fixture offers, so the queue is
+  // not empty — which is what makes the assertions below mean anything.
+  check('...listing the reviews on the site',
+    moderation.text.includes('Javelin Throw Fundamentals'), true);
+  // Precise on purpose: the string "Remove" also appears in the "Removed (0)"
+  // heading below, so matching it alone would pass with no control rendered at
+  // all. The button carries a screen-reader suffix naming the author.
+  check('...with a removal control per review',
+    moderation.text.includes('the review by'), true);
+  check('...and an empty removal log to start',
+    moderation.text.includes('Nothing has been removed'), true);
+
+  /*
+   * THE TITLE IS THE GATE TOO. `generateMetadata` runs independently of the
+   * page body, so a static `metadata` export would put "Reviews" in the tab
+   * title of the 404 — quietly confirming the page to the person the 404 just
+   * declined to confirm it to.
+   */
+  check('the 404 a learner gets does NOT leak the page title in <title>',
+    /<title>[^<]*Reviews/i.test((await getAs('/admin/reviews', LEARNER)).html), false);
+  check('...while the admin’s page does carry it',
+    /<title>[^<]*Reviews/i.test(moderation.html), true);
+
+  /*
+   * NO EDIT CONTROL, ANYWHERE. `0016` drops the `reviews_update_admin` policy
+   * and the interface has no method for it, so this asserts the third layer:
+   * the page offers nothing that would call one. A textarea named `reason`
+   * belongs to the removal form; one named `body` would be an edit.
+   */
+  check('the page offers no way to EDIT a review',
+    moderation.html.includes('name="body"'), false);
+  /*
+   * The CONTROL for that negative, and it needs one: a page rendering nothing
+   * at all would also contain no `name="body"`. The removal form is the thing
+   * that must be there, and its reason textarea is NOT in the served markup —
+   * `RemoveReviewForm` reveals it only after the first click, which is the
+   * two-step confirmation that exists because this delete is unrecoverable. So
+   * the control is the queue heading and the per-review button above.
+   */
+  check('control: the queue heading is rendered', /Published\s*\(\s*\d+\s*\)/.test(moderation.text), true);
+  check('control: and the log heading', /Removed\s*\(\s*\d+\s*\)/.test(moderation.text), true);
+
+  // The admin nav names it, or nobody finds it.
+  check('the admin nav links to it', moderation.html.includes('href="/admin/reviews"'), true);
+  check('...and a learner’s nav does not',
+    (await getAs('/offers', LEARNER)).html.includes('href="/admin/reviews"'), false);
 
   // -------------------------------------------------------------------------
   section('Password reset — the link, end to end over HTTP');

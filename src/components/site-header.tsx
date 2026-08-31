@@ -72,6 +72,10 @@ function navLinksFor(profile: Profile | null): NavLink[] {
   if (profile.role === 'admin') {
     links.push({ href: '/admin/invites', label: 'Admin' });
     links.push({ href: '/admin/applications', label: 'Applications' });
+    // One word, like the rest of the row. "Reviews" rather than "Moderation"
+    // because it names the thing rather than the activity, which is how every
+    // other item in this list is written.
+    links.push({ href: '/admin/reviews', label: 'Reviews' });
   }
 
   return links;
