@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation';
 import type { NextRequest } from 'next/server';
 
-import { redeemPasswordResetLink, RESET_PASSWORD_PATH } from '@/lib/auth/password-reset';
+import { RESET_PASSWORD_PATH } from '@/lib/auth/paths';
+import { redeemPasswordResetLink } from '@/lib/auth/password-reset';
 import { safeNextPath } from '@/lib/auth/session';
 
 /**

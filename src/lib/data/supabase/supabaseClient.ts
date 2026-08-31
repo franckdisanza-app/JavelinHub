@@ -67,9 +67,12 @@ import type {
   ListingFilter,
   SignInInput,
   SignUpInput,
+  SignUpResult,
   UpdateListingInput,
   UpdateMyCoachProfileInput,
 } from '../client';
+import { AUTH_CALLBACK_PATH } from '@/lib/auth/paths';
+import { siteUrl } from '@/lib/env';
 import { generateInviteCode } from '../invite-code';
 import {
   COACH_BIO_MAX,
@@ -604,7 +607,7 @@ export class SupabaseDataClient implements DataClient {
    * the supported configuration is confirmation off, because nothing in this
    * app implements a confirmation callback route. See `supabase/README.md`.
    */
-  async signUp(input: SignUpInput): Promise<Profile> {
+  async signUp(input: SignUpInput): Promise<SignUpResult> {
     const email = requireEmail(input?.email);
     const fullName = requireText(input?.fullName, 'Full name', 120, 2);
     // NOT requireText: a password is never trimmed — see requirePassword.
@@ -614,7 +617,23 @@ export class SupabaseDataClient implements DataClient {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: { full_name: fullName } },
+      options: {
+        data: { full_name: fullName },
+        /*
+         * WHERE THE CONFIRMATION LINK LANDS. Without this GoTrue uses the
+         * project's Site URL — `https://javelin-hub.vercel.app/` — where
+         * nothing exchanges the code, so the link would sign nobody in.
+         *
+         * Built from `siteUrl()`, never from the request: the same rule the
+         * reset link follows, and for the same reason. A `Host` header must not
+         * decide where a link we email points.
+         *
+         * `next` is explicit rather than relying on the callback's default,
+         * which is `/reset-password` — the right fallback for the flow that
+         * matters most, and the wrong destination for this one.
+         */
+        emailRedirectTo: `${siteUrl()}${AUTH_CALLBACK_PATH}?next=${encodeURIComponent('/offers?welcome=1')}`,
+      },
     });
 
     if (error) {
@@ -640,18 +659,28 @@ export class SupabaseDataClient implements DataClient {
       throw new DataError('invalid', 'That account could not be created.');
     }
 
+    /*
+     * NO SESSION IS A SUCCESS, not a failure, and this used to throw.
+     *
+     * With confirmation on, GoTrue creates the user, sends the mail and returns
+     * no session — which is the whole point of confirmation. Reporting it as
+     * `DataError('invalid')` rendered a red "something went wrong" over a
+     * signup that had entirely worked, and left the user with no idea an email
+     * was on its way.
+     *
+     * There is no profile to return either: the row exists (the
+     * `handle_new_user` trigger wrote it) but reading it needs an authenticated
+     * context, and there is deliberately no session yet.
+     */
     if (!data.session) {
-      throw new DataError(
-        'invalid',
-        'Your account was created. Check your email to confirm the address, then sign in.',
-      );
+      return { status: 'confirm_email', email };
     }
 
     const profile = await this.getProfile({ userId: data.user.id }, data.user.id);
     if (!profile) {
       throw new DataError('invalid', 'That account could not be created.');
     }
-    return profile;
+    return { status: 'signed_in', profile };
   }
 
   /**

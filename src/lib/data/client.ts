@@ -187,6 +187,30 @@ export interface SignUpInput {
   fullName: string;
 }
 
+/**
+ * What {@link DataClient.signUp} produced.
+ *
+ * A DISCRIMINATED UNION rather than a nullable profile, for the same reason
+ * {@link ListingDetail} is one: the caller cannot forget the second case. With
+ * email confirmation ON — which is the supported configuration now that
+ * `/auth/callback` exists — a successful signup returns NO SESSION, and code
+ * that assumed a `Profile` would try to sign the user in with nothing.
+ *
+ * `confirm_email` is a SUCCESS. It was previously reported by throwing
+ * `DataError('invalid', 'Your account was created…')`, which rendered a red
+ * failure alert over a form whose submission had worked — the account existed,
+ * the mail was sent, and the screen said something went wrong.
+ */
+export type SignUpResult =
+  /** A session exists. The caller signs them in and redirects. */
+  | { status: 'signed_in'; profile: Profile }
+  /**
+   * The account exists and GoTrue has emailed a confirmation link. There is no
+   * session and no profile to hand back — the row exists, but reading it needs
+   * an authenticated context this caller does not have.
+   */
+  | { status: 'confirm_email'; email: string };
+
 /** Input to {@link DataClient.signInWithPassword}. */
 export interface SignInInput {
   email: string;
@@ -348,7 +372,18 @@ export interface DataClient {
    * `coach_status: 'none'`) and returns the profile.
    * @throws DataError `invalid` on bad input, `conflict` if the email is taken.
    */
-  signUp(input: SignUpInput): Promise<Profile>;
+  /**
+   * Creates an account.
+   *
+   * Returns a {@link SignUpResult}, NOT a `Profile`: with email confirmation on
+   * there is no session at the end of a successful signup, and the two outcomes
+   * are both successes. See that type.
+   *
+   * The two backends differ completely here, as they do for
+   * `signInWithPassword` and `updateMyPassword` — the mock has no mail and
+   * therefore always returns `signed_in`.
+   */
+  signUp(input: SignUpInput): Promise<SignUpResult>;
 
   /**
    * Verifies a password. Returns the profile on success and `null` on bad

@@ -50,6 +50,23 @@ const { LIMITS, consume } = await import('@/lib/rate-limit');
 
 const db = getDataClient();
 
+/**
+ * `signUp` returns a {@link SignUpResult} union, because on Supabase a
+ * successful signup with email confirmation on yields no session. **The mock
+ * has no mail and must therefore always sign the user in**, and this helper
+ * asserts that invariant on every call rather than trusting it: a mock that
+ * started returning `confirm_email` would strand every fixture below with no
+ * actor, and the failure would look like an authorization bug.
+ */
+async function signUpProfile(input: { email: string; password: string; fullName: string }): Promise<Profile> {
+  const result = await db.signUp(input);
+  if (result.status !== 'signed_in') {
+    throw new Error(`the mock signUp returned "${result.status}" — it has no mail and must always sign in`);
+  }
+  return result.profile;
+}
+
+
 // ---------------------------------------------------------------------------
 // Tiny assertion harness
 // ---------------------------------------------------------------------------
@@ -1204,7 +1221,7 @@ const invitesAfterRedeem = await allows(
 expectEqual('D2: ...and the invite list is not silently empty', (invitesAfterRedeem ?? []).length >= 2, true);
 
 // An admin must not review their own application.
-const selfApprover = await db.signUp({
+const selfApprover = await signUpProfile({
   email: 'selfapprover@javelin.test',
   password: 'password123',
   fullName: 'Sam Selfapprover',
@@ -1233,7 +1250,7 @@ expectEqual('D2: approved admin gained coach status', await coachStatusOf(selfAp
 // ---------------------------------------------------------------------------
 section('Application flow: rejection');
 // ---------------------------------------------------------------------------
-const rejectMe: Profile = await db.signUp({
+const rejectMe: Profile = await signUpProfile({
   email: 'reject@javelin.test',
   password: 'password123',
   fullName: 'Rhea Jekt',
@@ -1255,7 +1272,7 @@ await refuses('rejected applicant createListing', 'forbidden', () => db.createLi
 // ---------------------------------------------------------------------------
 section('Invite redemption');
 // ---------------------------------------------------------------------------
-const redeemer = await db.signUp({ email: 'invitee@javelin.test', password: 'password123', fullName: 'Ivan Vitee' });
+const redeemer = await signUpProfile({ email: 'invitee@javelin.test', password: 'password123', fullName: 'Ivan Vitee' });
 const INVITEE: Actor = { userId: redeemer.id };
 expectEqual('invitee starts as learner', redeemer.coach_status, 'none');
 await refuses('invitee createListing before redeeming', 'forbidden', () => db.createListing(INVITEE, LISTING));
@@ -1274,7 +1291,7 @@ const afterRedeem = await allows(
 );
 expectEqual('...and it is owned by the redeemer', afterRedeem?.coach_id, INVITEE.userId);
 
-const second = await db.signUp({ email: 'second@javelin.test', password: 'password123', fullName: 'Sara Cond' });
+const second = await signUpProfile({ email: 'second@javelin.test', password: 'password123', fullName: 'Sara Cond' });
 await refuses('redeeming the SAME code a second time', 'invalid', () =>
   db.redeemInviteCode({ userId: second.id }, 'JAVELIN-COACH-2026'),
 );
@@ -1292,9 +1309,9 @@ await refuses('redeeming a revoked code', 'invalid', () => db.redeemInviteCode({
 // did) asserts nothing — zero winners is also what code with no concurrency
 // control at all would produce.
 const contested = await db.createInvite(ADMIN, { note: 'contested' });
-const racerA = await db.signUp({ email: 'racer-a@javelin.test', password: 'password123', fullName: 'Ana Race' });
-const racerB = await db.signUp({ email: 'racer-b@javelin.test', password: 'password123', fullName: 'Bo Race' });
-const racerC = await db.signUp({ email: 'racer-c@javelin.test', password: 'password123', fullName: 'Cal Race' });
+const racerA = await signUpProfile({ email: 'racer-a@javelin.test', password: 'password123', fullName: 'Ana Race' });
+const racerB = await signUpProfile({ email: 'racer-b@javelin.test', password: 'password123', fullName: 'Bo Race' });
+const racerC = await signUpProfile({ email: 'racer-c@javelin.test', password: 'password123', fullName: 'Cal Race' });
 
 const racers = await Promise.allSettled([
   db.redeemInviteCode({ userId: racerA.id }, contested.code),
@@ -1390,7 +1407,7 @@ expectEqual(
   true,
 );
 await refuses('signUp with a duplicate email', 'conflict', () =>
-  db.signUp({ email: 'coach@javelin.test', password: 'password123', fullName: 'Impostor' }),
+  signUpProfile({ email: 'coach@javelin.test', password: 'password123', fullName: 'Impostor' }),
 );
 expectEqual(
   'signInWithPassword with a wrong password returns null',
@@ -2903,7 +2920,7 @@ section('Coach directory — APPROVED ONLY, and it cannot be widened');
 // non-approved profile in EVERY non-approved state, which is what makes the
 // absence assertions below able to discriminate: an assertion over a store
 // containing only approved coaches would pass whether the filter existed or not.
-const pendingApplicant = await db.signUp({
+const pendingApplicant = await signUpProfile({
   email: 'pending-directory@javelin.test',
   password: 'password123',
   fullName: 'Pia Pending',
@@ -2933,7 +2950,7 @@ expectEqual('fixture: an ADMIN profile exists', await roleOf(ADMIN!.userId), 'ad
 //
 // So this fixture is an admin who is deliberately NOT an approved coach, which
 // is the only shape that separates the two axes.
-const shadowAdmin = await db.signUp({
+const shadowAdmin = await signUpProfile({
   email: 'shadow-admin@javelin.test',
   password: 'password123',
   fullName: 'Sam Shadow',
@@ -3445,7 +3462,7 @@ section('The public bio is COPIED at approval, and is not a live join');
 // only sanctioned way it becomes public is this one-time copy — so the two
 // things worth pinning are that the copy HAPPENS, and that it is a copy.
 const APPLICANT_BIO = 'COPY-AT-APPROVAL marker bio, written for an administrator to read, twenty-plus characters long.';
-const copyApplicant = await db.signUp({ email: 'copy-me@javelin.test', password: 'password123', fullName: 'Cara Copy' });
+const copyApplicant = await signUpProfile({ email: 'copy-me@javelin.test', password: 'password123', fullName: 'Cara Copy' });
 const COPY: Actor = { userId: copyApplicant.id };
 await db.createCoachApplication(COPY, { ...APPLICATION, bio: APPLICANT_BIO });
 expectEqual('before approval the applicant is not in the directory at all', await db.getPublicCoach(copyApplicant.id), null);
@@ -3477,7 +3494,7 @@ expectEqual(
 
 // The copy is ONLY-WHEN-EMPTY. A coach who already has words of their own must
 // not have them replaced by an old application.
-const keepBioUser = await db.signUp({ email: 'keep-bio@javelin.test', password: 'password123', fullName: 'Kai Keep' });
+const keepBioUser = await signUpProfile({ email: 'keep-bio@javelin.test', password: 'password123', fullName: 'Kai Keep' });
 await db.createCoachApplication({ userId: keepBioUser.id }, { ...APPLICATION, bio: 'APPLICATION BIO that must NOT win, twenty-plus characters long.' });
 await mutateDb((store) => {
   store.profiles.find((p) => p.id === keepBioUser.id)!.coach_bio = 'THE COACH OWN WORDS';
@@ -3492,7 +3509,7 @@ expectEqual(
 
 // Rejection copies nothing — and there is nowhere for it to go anyway, since a
 // rejected applicant has no public coach row.
-const rejectedCopyUser = await db.signUp({ email: 'reject-copy@javelin.test', password: 'password123', fullName: 'Rob Rejected' });
+const rejectedCopyUser = await signUpProfile({ email: 'reject-copy@javelin.test', password: 'password123', fullName: 'Rob Rejected' });
 await db.createCoachApplication({ userId: rejectedCopyUser.id }, { ...APPLICATION, bio: 'REJECTED BIO that must never be published anywhere.' });
 const rejApp = (await db.listCoachApplications(ADMIN, { status: 'pending' })).find((a) => a.user_id === rejectedCopyUser.id)!;
 await db.reviewCoachApplication(ADMIN, rejApp.id, 'rejected', 'Not yet.');
@@ -3522,8 +3539,8 @@ section('E3-F10 pickup — getMyCoachApplication is scoped to the actor');
 // source cannot discriminate, however the assertion is spelled.
 const FIRST_BIO = 'FIRST-FILER private bio, unique to this applicant and to nobody else in the store.';
 const SECOND_BIO = 'SECOND-FILER private bio, unique to this applicant and to nobody else in the store.';
-const firstFiler = await db.signUp({ email: 'first-filer@javelin.test', password: 'password123', fullName: 'Fay First' });
-const secondFiler = await db.signUp({ email: 'second-filer@javelin.test', password: 'password123', fullName: 'Sid Second' });
+const firstFiler = await signUpProfile({ email: 'first-filer@javelin.test', password: 'password123', fullName: 'Fay First' });
+const secondFiler = await signUpProfile({ email: 'second-filer@javelin.test', password: 'password123', fullName: 'Sid Second' });
 const FIRST: Actor = { userId: firstFiler.id };
 const SECOND_ACTOR: Actor = { userId: secondFiler.id };
 await db.createCoachApplication(FIRST, { ...APPLICATION, bio: FIRST_BIO });
@@ -3548,7 +3565,7 @@ expectEqual('F10: the two filers did NOT receive the same row', firstOwn?.id ===
 // caught by an optional-chain comparison is easy to weaken later.
 expectEqual('F10: neither read is null', firstOwn !== null && secondOwn !== null, true);
 // A third user who has never applied must get null, not somebody else's row.
-const neverApplied = await db.signUp({ email: 'never-applied@javelin.test', password: 'password123', fullName: 'Nev Never' });
+const neverApplied = await signUpProfile({ email: 'never-applied@javelin.test', password: 'password123', fullName: 'Nev Never' });
 expectEqual('F10: a user who never applied gets null, not the newest row', await db.getMyCoachApplication({ userId: neverApplied.id }), null);
 await refuses('anon getMyCoachApplication', 'unauthorized', () => db.getMyCoachApplication(ANON));
 
@@ -3689,7 +3706,7 @@ expectEqual(
 // the current one.
 const REAPPLY_OLD = 'F8 FIRST application, the one that was rejected and must NOT be served.';
 const REAPPLY_NEW = 'F8 SECOND application, filed after the rejection, and the current one.';
-const reapplier = await db.signUp({ email: 'reapply@javelin.test', password: 'password123', fullName: 'Ria Reapply' });
+const reapplier = await signUpProfile({ email: 'reapply@javelin.test', password: 'password123', fullName: 'Ria Reapply' });
 const REAPPLY: Actor = { userId: reapplier.id };
 const firstApp = await db.createCoachApplication(REAPPLY, { ...APPLICATION, bio: REAPPLY_OLD });
 await db.reviewCoachApplication(ADMIN, firstApp.id, 'rejected', 'Not yet.');
@@ -3731,7 +3748,7 @@ expectEqual('F13: ...and specifically NOT the rejected one’s', (await db.getPu
 // "   " would suppress the copy for ever and the coach would be published with
 // a blank bio and nothing to explain why.
 const WHITESPACE_APP_BIO = 'F14 application bio, which must win over a whitespace-only profile bio.';
-const blankBioUser = await db.signUp({ email: 'blank-bio@javelin.test', password: 'password123', fullName: 'Wes Whitespace' });
+const blankBioUser = await signUpProfile({ email: 'blank-bio@javelin.test', password: 'password123', fullName: 'Wes Whitespace' });
 await db.createCoachApplication({ userId: blankBioUser.id }, { ...APPLICATION, bio: WHITESPACE_APP_BIO });
 await mutateDb((store) => {
   store.profiles.find((p) => p.id === blankBioUser.id)!.coach_bio = '   \n\t  ';
@@ -4047,7 +4064,7 @@ const RESET_EMAIL = 'reset@javelin.test';
 const RESET_FIRST_PASSWORD = 'reset-first-password';
 const resetUser = await allows(
   'a fixture account for the reset flow',
-  () => db.signUp({ email: RESET_EMAIL, password: RESET_FIRST_PASSWORD, fullName: 'Rosa Setter' }),
+  () => signUpProfile({ email: RESET_EMAIL, password: RESET_FIRST_PASSWORD, fullName: 'Rosa Setter' }),
   (p) => p.id,
 );
 const RESET_ACTOR: Actor = { userId: resetUser!.id };
@@ -4165,7 +4182,7 @@ expectEqual(
 // state that this method can no longer produce.
 const paddedSignUp = await allows(
   'signUp keeps a padded password verbatim too',
-  () => db.signUp({ email: 'padded@javelin.test', password: PADDED_PASSWORD, fullName: 'Pat Padded' }),
+  () => signUpProfile({ email: 'padded@javelin.test', password: PADDED_PASSWORD, fullName: 'Pat Padded' }),
   (p) => p.id,
 );
 expectEqual(
@@ -4471,6 +4488,41 @@ expectEqual(
   '...and they are all fixed-width hex, as an HMAC is',
   storedBuckets.every((b) => /^[0-9a-f]{64}$/.test(b)),
   true,
+);
+
+// ---------------------------------------------------------------------------
+section('signUp reports TWO successes, not a success and a failure');
+// ---------------------------------------------------------------------------
+// The union exists because Supabase with email confirmation on returns no
+// session from a successful signup. The mock has no mail and must therefore
+// always sign the user in — asserted here explicitly as well as on all 21
+// fixture calls through `signUpProfile`, because "it has never returned
+// anything else" is a property of the fixtures rather than of the method.
+
+const signUpShape = await allows(
+  'the mock signs a new account in immediately',
+  () => db.signUp({ email: 'union-probe@javelin.test', password: 'union-probe-password', fullName: 'Uma Union' }),
+  (r) => r.status,
+);
+expectEqual('...reporting the signed_in arm', signUpShape?.status, 'signed_in');
+expectShape('...which carries exactly a status and a profile', signUpShape, ['status', 'profile']);
+expectEqual(
+  '...whose profile is the new learner',
+  signUpShape?.status === 'signed_in' ? signUpShape.profile.full_name : null,
+  'Uma Union',
+);
+// The discriminator is load-bearing: a caller that reads `.profile` without
+// checking `.status` is the bug this union exists to make impossible, and it
+// would not compile.
+expectEqual(
+  '...and a learner, never a coach — signup cannot mint privilege',
+  signUpShape?.status === 'signed_in' ? signUpShape.profile.role : null,
+  'learner',
+);
+// A duplicate is still a conflict, and still a THROW rather than a third arm:
+// it is a failure, not an outcome.
+await refuses('a duplicate address is still a conflict', 'conflict', () =>
+  db.signUp({ email: 'union-probe@javelin.test', password: 'another-password', fullName: 'Ursula Union' }),
 );
 
 // ---------------------------------------------------------------------------

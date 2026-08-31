@@ -186,9 +186,17 @@ the buyer reviews it. What is left in §1 is the money.
   who has ever minted an invite fails until those rows are dealt with —
   documented in `supabase/README.md`, and a real obstacle to writing the
   feature.
-* **Email confirmation is off.** Correct for now — nothing implements a
-  confirmation callback — but it means addresses are unverified, which stops
-  being acceptable once receipts are being emailed.
+* ~~**Email confirmation is off.**~~ **On, and supported.** The reason it was off
+  — nothing implemented a callback — ended when `/auth/callback` shipped with
+  password reset. `signUp` now points GoTrue at that route and returns a
+  `confirm_email` result instead of throwing, so the form says "check your
+  inbox" rather than showing a red failure over a signup that worked.
+
+  It cost one thing: GoTrue validates the address domain too, so
+  `verify:supabase`'s write tiers can no longer create fixtures against this
+  project — no fake domain has an MX record. They skip with that reason. Running
+  them again needs a second, test-only project, which is where the stuck-fixtures
+  problem was already heading.
 * **Still no transactional email of our own.** The reset flow rides on
   Supabase's built-in SMTP, which works and is heavily rate-limited — a handful
   of messages an hour, project-wide. That is enough for a pilot and not enough

@@ -71,7 +71,7 @@ PostgREST request arrives as `authenticator`, service-role included. The suite
 confirms that rather than assuming it — `grant_admin` anonymously answers
 `42501 Only an administrator can grant administrator access.`
 
-The mock remains the code twin and is still what `npm run verify:authz` (924
+The mock remains the code twin and is still what `npm run verify:authz` (930
 assertions) and `npm run verify:pages` (261) exercise — both hard-set
 `DATA_BACKEND=mock`, so **neither of those two covers `SupabaseDataClient`.**
 
@@ -332,12 +332,21 @@ now it is not.
    (see its header — the `auth.users` rows must exist first), then bootstrap an
    admin as described below.
 
-   **Turn OFF email confirmation** (Authentication → Providers → Email →
-   "Confirm email") before using the app. Nothing here implements a confirmation
-   callback route, so with it on, `signUp` creates the account, GoTrue returns no
-   session, and the new user lands back on the site anonymous.
-   `SupabaseDataClient.signUp` detects that case and says so rather than failing
-   silently, but the supported configuration is off.
+   **Email confirmation is ON, and that is now the supported configuration.**
+   This paragraph used to say the opposite, and the reason it gave — that
+   nothing here implements a confirmation callback route — stopped being true
+   when `/auth/callback` shipped with password reset. `signUp` now passes an
+   `emailRedirectTo` pointing at that route and returns
+   `{ status: 'confirm_email' }` rather than throwing, and the form renders
+   "check your inbox" instead of a red failure over a signup that worked. See
+   `SignUpResult` in `client.ts`.
+
+   **Two consequences worth knowing.** GoTrue also validates the address domain,
+   so anything without an MX record is refused — `@example.com` included — which
+   is what stops `verify:supabase`'s write tiers provisioning fixtures against
+   this project. And the built-in SMTP quota is small and project-wide, so a
+   burst of signups or resets exhausts it for everybody: exactly the denial of
+   service `src/lib/rate-limit.ts` exists to make expensive.
 
 2. ~~**Implement `SupabaseDataClient`.**~~ **Done** — `src/lib/data/supabase/`:
    * `supabaseClient.ts` — all 39 methods.

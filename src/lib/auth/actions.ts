@@ -64,10 +64,27 @@ export async function signUpAction(_prev: FormState, formData: FormData): Promis
     return { status: 'error', message: TOO_MANY_MESSAGE, values };
   }
 
-  let userId: string;
+  let userId: string | null = null;
   try {
-    const profile = await getDataClient().signUp({ email, password, fullName });
-    userId = profile.id;
+    const result = await getDataClient().signUp({ email, password, fullName });
+
+    /*
+     * TWO SUCCESSES, not a success and a failure.
+     *
+     * With email confirmation on — the supported configuration now that
+     * `/auth/callback` exists — GoTrue creates the account, sends the link and
+     * returns NO SESSION. That used to arrive here as a thrown
+     * `DataError('invalid')` and rendered a red "something went wrong" over a
+     * signup that had entirely worked, leaving the user unaware an email was
+     * coming. See `SignUpResult`.
+     */
+    if (result.status === 'confirm_email') {
+      // No session to create and nothing to revalidate: nothing about who this
+      // visitor is has changed yet. The form renders "check your inbox".
+      return { status: 'success', values: { email: result.email } };
+    }
+
+    userId = result.profile.id;
   } catch (error) {
     return toFormState(error, { values, fieldFor: guessAuthField });
   }

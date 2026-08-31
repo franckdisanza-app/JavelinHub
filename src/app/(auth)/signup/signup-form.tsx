@@ -13,6 +13,34 @@ export function SignupForm() {
   const [state, formAction, pending] = useActionState(signUpAction, idleFormState);
   const errors = state.fieldErrors ?? {};
 
+  /*
+   * THE FORM IS REPLACED ON SUCCESS, not annotated.
+   *
+   * A signup that needs confirmation ends here rather than at a redirect: there
+   * is no session, so there is nowhere signed-in to send them. Leaving the
+   * filled-in form on screen under a confirmation invites a second submission,
+   * which GoTrue answers as "an account with that email already exists" — a
+   * user following their instincts would be told their own successful signup
+   * had failed.
+   *
+   * The other success — a session, because confirmation is off or the backend
+   * is the mock — never reaches this branch: the action redirects instead.
+   */
+  if (state.status === 'success') {
+    return (
+      <Alert tone="success" title="Check your inbox.">
+        <p>
+          We have sent a confirmation link{state.values?.email ? <> to <strong>{state.values.email}</strong></> : null}.
+          Open it and you will be signed in and taken to the offers.
+        </p>
+        <p className="mt-3">
+          The link comes from Supabase and can take a minute. If nothing arrives, check the spam folder before
+          signing up again — the account already exists, so a second attempt will say so.
+        </p>
+      </Alert>
+    );
+  }
+
   return (
     <form action={formAction} className="flex flex-col gap-5" noValidate>
       {state.status === 'error' && state.message ? <Alert tone="error">{state.message}</Alert> : null}

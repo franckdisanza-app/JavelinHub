@@ -58,6 +58,7 @@
  * SERVER ONLY.
  */
 
+import { AUTH_CALLBACK_PATH, RESET_PASSWORD_PATH } from '@/lib/auth/paths';
 import { issueResetToken, redeemResetToken } from '@/lib/auth/reset-tokens';
 import { createSession } from '@/lib/auth/session';
 import { normalizeEmail } from '@/lib/data/mock/store';
@@ -71,11 +72,10 @@ if (typeof window !== 'undefined') {
   );
 }
 
-/** Where a redeemed link lands. A real page, gated on the session it just created. */
-export const RESET_PASSWORD_PATH = '/reset-password';
-
-/** The route both backends' links point at. See `src/app/auth/callback/route.ts`. */
-export const AUTH_CALLBACK_PATH = '/auth/callback';
+// Both paths moved to `./paths.ts` so `SupabaseDataClient` can reach them
+// without dragging `next/headers` into a plain Node script. Re-exported here
+// because this module is where callers expect to find them.
+export { AUTH_CALLBACK_PATH, RESET_PASSWORD_PATH };
 
 /**
  * Starts a reset for `email`, if there is an account behind it.
@@ -95,7 +95,7 @@ export async function requestPasswordReset(email: string): Promise<void> {
     // points. GoTrue checks it against the project's Redirect URLs as well, so
     // a mismatch fails closed instead of emailing a link somewhere else.
     await supabase.auth.resetPasswordForEmail(address, {
-      redirectTo: `${siteUrl()}${AUTH_CALLBACK_PATH}`,
+      redirectTo: `${siteUrl()}${AUTH_CALLBACK_PATH}?next=${encodeURIComponent(RESET_PASSWORD_PATH)}`,
     });
     // The error is deliberately not inspected. GoTrue reports "user not found"
     // for an unregistered address, and surfacing that is precisely the
@@ -128,7 +128,7 @@ export async function requestPasswordReset(email: string): Promise<void> {
    * to that.
    */
   if (!isProduction()) {
-    const link = `${siteUrl()}${AUTH_CALLBACK_PATH}?token=${encodeURIComponent(token)}`;
+    const link = `${siteUrl()}${AUTH_CALLBACK_PATH}?token=${encodeURIComponent(token)}&next=${encodeURIComponent(RESET_PASSWORD_PATH)}`;
     console.log(`\n[mock] Password reset for ${address}\n[mock] ${link}\n`);
   }
 }

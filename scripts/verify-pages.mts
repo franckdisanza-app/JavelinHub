@@ -81,7 +81,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Actor } from '@/lib/data/types';
+import type { Actor, Profile } from '@/lib/data/types';
 
 const scratch = mkdtempSync(join(tmpdir(), 'javelin-pages-'));
 const storePath = join(scratch, 'db.json');
@@ -105,6 +105,24 @@ const { mutateDb } = await import('@/lib/data/mock/store');
 // the server boots — the store is cached in the server process, so a token
 // minted after boot would be invisible to it.
 const { issueResetToken } = await import('@/lib/auth/reset-tokens');
+
+const db0 = getDataClient();
+/**
+ * `signUp` returns a a discriminated union union, because on Supabase a
+ * successful signup with email confirmation on yields no session. **The mock
+ * has no mail and must therefore always sign the user in**, and this helper
+ * asserts that invariant on every call rather than trusting it: a mock that
+ * started returning `confirm_email` would strand every fixture below with no
+ * actor, and the failure would look like an authorization bug.
+ */
+async function signUpProfile(input: { email: string; password: string; fullName: string }): Promise<Profile> {
+  const result = await db0.signUp(input);
+  if (result.status !== 'signed_in') {
+    throw new Error(`the mock signUp returned "${result.status}" — it has no mail and must always sign in`);
+  }
+  return result.profile;
+}
+
 
 // ---------------------------------------------------------------------------
 // Seeded ids, mirrored from store.ts. Hand-written rather than imported: an
@@ -192,7 +210,7 @@ async function plantFixtures(): Promise<{
   // `getListing` carry no coach-status predicate, so the offer stays public
   // while `getPublicCoach` returns null — which is why an unconditional
   // `/coaches/<listing.coach_id>` link would emit an href to a 404.
-  const dana = await db.signUp({
+  const dana = await signUpProfile({
     email: 'dana@verify-pages.test',
     password: 'learner1234',
     fullName: 'Dana Okoro',
@@ -215,7 +233,7 @@ async function plantFixtures(): Promise<{
   // --- F4 -------------------------------------------------------------------
   // A coach who has SOLD and has never been reviewed — the account-level twin
   // of offer `…0105`, and a state no seeded coach is in.
-  const rune = await db.signUp({
+  const rune = await signUpProfile({
     email: 'rune@verify-pages.test',
     password: 'learner1234',
     fullName: 'Rune Haugen',
@@ -312,7 +330,7 @@ async function plantFixtures(): Promise<{
   // claim to Lena or Dana would silently retarget an existing section at a
   // different order.
   const invite = await db.createInvite(ADMIN, { note: 'verify-pages instant delivery fixture' });
-  const iris = await db.signUp({
+  const iris = await signUpProfile({
     email: 'iris@verify-pages.test',
     password: 'learner1234',
     fullName: 'Iris Vale',
@@ -347,7 +365,7 @@ async function plantFixtures(): Promise<{
     fulfilment: 'instant',
   });
 
-  const otto = await db.signUp({
+  const otto = await signUpProfile({
     email: 'otto@verify-pages.test',
     password: 'learner1234',
     fullName: 'Otto Brandt',
@@ -363,7 +381,7 @@ async function plantFixtures(): Promise<{
   // Its own account, since redeeming it creates a session and burning it is the
   // point of one of the assertions. Doing that to a seeded actor would leave
   // whatever came before it in a state the next reader cannot predict.
-  const reset = await db.signUp({
+  const reset = await signUpProfile({
     email: 'locked-out@verify-pages.test',
     password: 'learner1234',
     fullName: 'Lockie Out',

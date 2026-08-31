@@ -28,6 +28,7 @@ import type {
   ListingFilter,
   SignInInput,
   SignUpInput,
+  SignUpResult,
   UpdateListingInput,
   UpdateMyCoachProfileInput,
 } from '../client';
@@ -488,7 +489,13 @@ export class MockDataClient implements DataClient {
   // Auth-shaped
   // =========================================================================
 
-  async signUp(input: SignUpInput): Promise<Profile> {
+  /**
+   * ALWAYS `signed_in`. The mock has no mail transport and therefore no
+   * confirmation step — the same split as password reset, where GoTrue owns a
+   * mechanism this backend cannot have. A developer running on the JSON store
+   * gets a session immediately, which is the only useful local behaviour.
+   */
+  async signUp(input: SignUpInput): Promise<SignUpResult> {
     const email = requireEmail(input?.email);
     const fullName = requireText(input?.fullName, 'Full name', 120, 2);
     // NOT requireText: a password is never trimmed — see requirePassword.
@@ -532,7 +539,7 @@ export class MockDataClient implements DataClient {
         updated_at: timestamp,
       };
       db.profiles.push(profile);
-      return copy(profile);
+      return { status: 'signed_in', profile: copy(profile) };
     });
   }
 

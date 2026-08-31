@@ -6,7 +6,7 @@
  *   npm run verify:supabase              read-only
  *   VERIFY_SUPABASE_WRITES=1 npm run verify:supabase    the full flow
  *
- * `verify:authz` (850 assertions) and `verify:pages` (247) both hard-set
+ * `verify:authz` (930 assertions) and `verify:pages` (261) both hard-set
  * `DATA_BACKEND=mock`. That is deliberate and it is also the gap: **neither of
  * them executes a single line of `SupabaseDataClient`, and none of the RLS
  * policies, column grants, guard triggers or storage rules in
@@ -37,6 +37,14 @@
  * no hard delete of a listing for any role, and no delete path for an order at
  * all, both by design. It withdraws what it publishes and leaves the rest,
  * labelled. Point it at a project you are willing to leave fixtures in.
+ *
+ * **AND IT NO LONGER RUNS AGAINST THIS PROJECT.** Email confirmation was turned
+ * on — correctly, since it now serves real users — and with it GoTrue validates
+ * the address domain. Both halves defeat the write tier: `@javelinhub-verify.test`
+ * and even `@example.com` are refused for having no MX record, and a signup that
+ * did succeed would return no session for the suite to act with. The tier skips
+ * with that reason rather than failing, and running it needs a second,
+ * test-only project with confirmation off.
  *
  * -----------------------------------------------------------------------------
  * The write tier needs ONE thing it cannot create: an approved coach
@@ -231,7 +239,13 @@ async function signUp(label: string): Promise<Account | null> {
     body: JSON.stringify({ email, password, data: { full_name: `Verify ${label}` } }),
   });
   const parsed = (await res.json().catch(() => null)) as
-    | { access_token?: string; user?: { id?: string }; msg?: string; error_description?: string }
+    | {
+        access_token?: string;
+        user?: { id?: string };
+        msg?: string;
+        error_description?: string;
+        error_code?: string;
+      }
     | null;
 
   const token = parsed?.access_token;
@@ -242,11 +256,29 @@ async function signUp(label: string): Promise<Account | null> {
         parsed?.msg ?? parsed?.error_description ?? `HTTP ${res.status}`,
       )}`,
     );
-    // The overwhelmingly likely cause, and the one worth naming: GoTrue returns
-    // a user with NO SESSION when email confirmation is on, which
-    // `supabase/README.md` says to turn off because nothing here implements a
-    // confirmation callback.
-    if (res.ok) note('a signup with no session means email confirmation is ON — see supabase/README.md');
+    /*
+     * TWO CAUSES, and both are now expected rather than faults — the write
+     * tiers were built when this project accepted throwaway addresses and
+     * returned a session immediately, and neither is true any more.
+     *
+     * `email_address_invalid`: GoTrue validates the domain, so an address at a
+     * domain with no MX record is refused. `@javelinhub-verify.test` and even
+     * `@example.com` are both rejected. There is no fake domain that works.
+     *
+     * A 200 with no `access_token`: email confirmation is on, so a successful
+     * signup yields no session — which is correct behaviour and the reason
+     * `SignUpResult` has two arms. It also means this suite cannot ACT as the
+     * account it just created.
+     *
+     * Either way the write tiers cannot provision fixtures against a project
+     * configured for real users, which is what this one now is. Running them
+     * needs a separate project with confirmation off — see the note the summary
+     * prints.
+     */
+    if (res.ok) note('a signup with no session means email confirmation is ON — expected on this project');
+    else if (typeof parsed?.error_code === 'string' && parsed.error_code.includes('email_address_invalid')) {
+      note('GoTrue rejects addresses at domains with no MX record, so no throwaway domain will work here');
+    }
     return null;
   }
   return { id, email, token };
