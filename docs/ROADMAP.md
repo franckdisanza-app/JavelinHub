@@ -299,16 +299,14 @@ decisions, not omissions:
 4. ~~**Storage and delivery.**~~ Done — both modes, both buckets.
 5. ~~**Password reset, and rate limiting in front of it.**~~ Both done — see §4
    and §6. Transactional email of our own is still open.
-6. **Bootstrap the live project.** It has the schema and nothing else: no
-   profiles, no administrator, and therefore no way to approve a coach. Cheap,
-   and it blocks every hands-on check of everything above. See
-   `supabase/README.md`, "Swap path" step 1.
+6. ~~**Bootstrap the live project.**~~ Done. An administrator exists, minted an
+   invite code, and that code has been redeemed — so the approval path works
+   end to end for the first time.
 
-   It also gates the second half of `npm run verify:supabase`. That suite's
-   read-only tier runs today and covers the column revokes, the self-scoped
-   views, the anon INSERT refusals and the enum parity — 43 assertions the mock
-   suites structurally cannot make. Its write tiers need an unredeemed invite
-   code, which needs an administrator, which needs this.
+   With it, `npm run verify:supabase` runs every tier: **83 passed, 0 failed, 0
+   skipped**, against the real database. That is the first time any of the RLS
+   policies, guard triggers, storage rules or SECURITY DEFINER functions have
+   been executed by a test rather than reasoned about.
 7. **Checkout, then payouts.**
 8. **Chat.**
 

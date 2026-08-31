@@ -4,16 +4,19 @@
 **0001-0014** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
 pages off it.
 
-**But the project holds no data and no administrator** — see the warning under
-"Swap path" step 1. The schema being applied is not the same as the project
-being usable, and it currently is not.
+**Bootstrapped.** An administrator exists, minted an invite code, and that code
+has been redeemed — so the approval path is open end to end for the first time.
+The project holds 5 profiles, 1 approved coach and no published listings; four
+of those profiles and the coach are `verify:supabase` fixtures, and the offer it
+published was withdrawn again at the end of the run. `seed.sql` has still never
+been run, so there is no fabricated data.
 
 **The checks against the live database are now a script**, not a table
 somebody re-ran by hand: `npm run verify:supabase`. It asks PostgREST and
 GoTrue directly, with the same anon key a browser gets, and it is READ-ONLY by
 default because it runs against whatever `NEXT_PUBLIC_SUPABASE_URL` names —
-here, the live project. Last run: **54 passed** read-only, 0 failed, the coach
-tier skipped for want of an invite code.
+here, the live project. Last full run — every tier, nothing skipped —
+**83 passed, 0 failed, 0 skipped.**
 
 What the read-only tier covers, and why each one is here rather than in the
 mock suites:
@@ -44,15 +47,28 @@ and what password reset depends on — the signed-in tier's account came back
 with a session rather than the confirmation-pending shape, so this is measured
 rather than assumed.
 
-Two write tiers sit behind `VERIFY_SUPABASE_WRITES=1` — the signed-in one
-(signup trigger, self-promotion refusals, publish refusal) and the coach one
-(the fulfilment freeze, the `asset_path` CHECK, entitlement from both sides,
-the derived `price_epoch`). The second needs an unredeemed invite code, since
-publishing needs an approved coach and **no key in this repo can make the first
-administrator**: `grant_admin()` authorises on `session_user <> 'authenticator'`
-and every PostgREST request arrives as `authenticator`, service-role included.
-The suite confirms that rather than assuming it — `grant_admin` anonymously
-answers `42501 Only an administrator can grant administrator access.`
+Two write tiers sit behind `VERIFY_SUPABASE_WRITES=1` and **both have now run
+green against this project**:
+
+* the signed-in tier — the `after insert on auth.users` profile trigger firing
+  and landing a LEARNER, `guard_profile_privilege_columns` refusing a
+  self-promotion to `admin` and to `coach_status = 'approved'`, and
+  `listings_insert_approved_coach` refusing a publish;
+* the coach tier — an invite code promoting its redeemer, `claim_offer`
+  refusing an instant offer with no file (`22023`, its own sentence), the
+  `listings_asset_path_shape` CHECK refusing a path outside the offer's own
+  folder (`23514`), the owner reading `asset_path` through `owned_listings`
+  while still getting `42501` off the table, a **signed-in stranger seeing no
+  download path for an offer they did not claim**, the fulfilment freeze after
+  a claim (`42501`, its own sentence), a non-owner's edit matching no row, and
+  a client-supplied `price_epoch` being discarded by the trigger.
+
+The coach tier needs an unredeemed invite code, since publishing needs an
+approved coach and **no key in this repo can make the first administrator**:
+`grant_admin()` authorises on `session_user <> 'authenticator'` and every
+PostgREST request arrives as `authenticator`, service-role included. The suite
+confirms that rather than assuming it — `grant_admin` anonymously answers
+`42501 Only an administrator can grant administrator access.`
 
 The mock remains the code twin and is still what `npm run verify:authz` (862
 assertions) and `npm run verify:pages` (247) exercise — both hard-set
@@ -62,8 +78,12 @@ The app itself was separately checked serving real pages off this project:
 `/offers/junk` and `/coaches/junk` give 404 rather than the error boundary, and
 `/`, `/offers`, `/coaches`, `/login`, `/signup` render their empty states.
 
-**Still not exercised end to end: signup.** That needs a real email address, and
-therefore an account on somebody's domain — see "Before trusting this" below.
+**Signup IS now exercised end to end.** `verify:supabase`'s write tier creates
+its own accounts through GoTrue and uses the sessions they return, which is what
+confirms email confirmation is off and that the profile trigger fires. What is
+still unexercised is a real inbox: nothing here has received an actual email, so
+the reset LINK has been tested (over HTTP, in `verify:pages`) while the reset
+MAIL has not.
 
 | File | Contents |
 |---|---|
@@ -263,21 +283,27 @@ now it is not.
    npm run db:push                 # applies any migration not yet recorded
    ```
 
-   > **⚠ THE SEED AND THE ADMIN BOOTSTRAP NEVER HAPPENED, and the project is
-   > unusable without them.** Measured against the live project: `listings`,
-   > `public_coaches` and `public_reviews` are EMPTY, and `profiles` holds
-   > exactly one row — a throwaway LEARNER that `verify:supabase`'s write tier
-   > created for itself. So **there is no administrator**, and `grant_admin()`
-   > authorises on `session_user <> 'authenticator'` while every PostgREST
-   > request arrives as `authenticator` (service-role included), so one cannot
-   > be made through the API at all. That refusal is asserted by the suite
-   > rather than assumed. It also means there are no invite codes, because
+   > **✅ THE ADMIN BOOTSTRAP HAS NOW HAPPENED.** An administrator exists and has
+   > minted an invite code, so the approval path works. The paragraph below is
+   > kept because it is the procedure, and because it is the only one there is:
+   > if this project is ever reset, or a second environment is stood up, this is
+   > what has to happen again.
+   >
+   > `seed.sql` has still never been run, which remains a deliberate choice
+   > rather than an oversight — see "Finding fabricated data" above.
+   >
+   > **Why it cannot be skipped.** `grant_admin()` authorises on
+   > `session_user <> 'authenticator'`, and every PostgREST request arrives as
+   > `authenticator` — service-role included — so an administrator cannot be
+   > made through the API at all. That refusal is asserted by `verify:supabase`
+   > rather than assumed. Without one there are also no invite codes, because
    > `invites.created_by` references a profile that does not exist.
    >
-   > The result is a closed loop: a visitor can sign up and apply to coach, and
-   > nobody can ever approve them. Fix it by signing up through the deployed
-   > app and then running `select public.grant_admin('<that user id>');` in the
-   > SQL editor — see "Bootstrapping (and repairing) an administrator" below.
+   > A project in that state is a closed loop: a visitor can sign up and apply
+   > to coach, and nobody can ever approve them. The way out is to sign up
+   > through the app, then run `select public.grant_admin('<that user id>');`
+   > in the dashboard's SQL editor — see "Bootstrapping (and repairing) an
+   > administrator" below — and mint an invite from `/admin/invites`.
    > Running `seed.sql` as well is optional and deliberate: those are the
    > fabricated rows "Finding fabricated data" above says to check for before a
    > public launch.
