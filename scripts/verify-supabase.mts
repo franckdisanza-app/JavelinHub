@@ -6,6 +6,11 @@
  *   npm run verify:supabase              read-only
  *   VERIFY_SUPABASE_WRITES=1 npm run verify:supabase    the full flow
  *
+ * `SUPABASE_SERVICE_ROLE_KEY`, if present in the environment, adds one more
+ * check: that GoTrue accepts it. That key is what `banAuthUser()` needs to kill
+ * a deleted account's credential, and a deployment missing it looks identical to
+ * a working one from the outside. The key itself is never printed.
+ *
  * `verify:authz` (930 assertions) and `verify:pages` (261) both hard-set
  * `DATA_BACKEND=mock`. That is deliberate and it is also the gap: **neither of
  * them executes a single line of `SupabaseDataClient`, and none of the RLS
@@ -90,6 +95,12 @@ nextEnv.loadEnvConfig(process.cwd(), true, { info: () => {}, error: console.erro
 const URL_BASE = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? '').trim().replace(/\/+$/, '');
 const ANON_KEY = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '').trim();
 const WRITES = process.env.VERIFY_SUPABASE_WRITES === '1';
+/**
+ * Optional, and never printed. Only its PRESENCE and whether GoTrue accepts it
+ * ever reach the output — see the service-role section for why that is the whole
+ * check.
+ */
+const SERVICE_ROLE_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? '').trim();
 const INVITE = (process.env.VERIFY_SUPABASE_INVITE ?? '').trim();
 
 if (URL_BASE === '' || ANON_KEY === '') {
@@ -968,6 +979,56 @@ expectEqual(
   (await rest('public_profiles?select=id,full_name&limit=1')).status,
   200,
 );
+
+// ===========================================================================
+section('The service-role key — account deletion\'s second half');
+// ===========================================================================
+// `delete_my_account()` (0018) anonymises the profile and CANNOT touch
+// `auth.users`: `javelin_privileged` holds no USAGE on the `auth` schema, which
+// is the dead end `0004` is kept in the tree to record. So the GoTrue user
+// survives the deletion, and `banAuthUser()` is what kills the credential —
+// through one admin call that needs `SUPABASE_SERVICE_ROLE_KEY`.
+//
+// WITHOUT THE KEY the deletion still happens and the app still refuses the
+// account everywhere, because `resolveProfile` rejects a deleted profile. What
+// does not happen is the credential dying: the person can still authenticate
+// against GoTrue directly and hold a JWT that satisfies RLS as their own user
+// id. `account-deletion.ts` documents a residual of "up to the token lifetime";
+// that sentence assumes the ban worked, and without the key there is no expiry
+// on it at all.
+//
+// THE FAILURE IS SILENT BY DESIGN — `banAuthUser` reports and returns false
+// rather than failing a deletion that has already anonymised somebody — so a
+// misconfigured deployment looks exactly like a working one from the outside.
+// This is the check that tells them apart.
+//
+// The key is never printed. A status code is the entire result.
+
+if (SERVICE_ROLE_KEY === '') {
+  skip(
+    'the service-role key is accepted by GoTrue',
+    'SUPABASE_SERVICE_ROLE_KEY is not set in this environment. Account deletion still ' +
+      'anonymises the profile; it does not ban the GoTrue user. Set it here to check the ' +
+      'key, or `vercel env pull` to check the one production uses',
+  );
+} else {
+  // One READ against the admin endpoint `banAuthUser` writes to. A read rather
+  // than a write because the question is whether the key is accepted, and
+  // banning somebody to find out would be an odd way to ask.
+  const admin = await fetch(`${URL_BASE}/auth/v1/admin/users?page=1&per_page=1`, {
+    headers: { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}` },
+  });
+  expectEqual('the service-role key is accepted by GoTrue', admin.status, 200);
+
+  // THE CONTROL, and it is not decoration: if this endpoint answered 200 to
+  // anybody, the assertion above would pass with a blank key, a typo, or the
+  // publishable key pasted into the wrong variable — which is the exact mistake
+  // this section exists to catch.
+  const asAnon = await fetch(`${URL_BASE}/auth/v1/admin/users?page=1&per_page=1`, {
+    headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
+  });
+  expectEqual('...and the publishable key is NOT', asAnon.status >= 400, true);
+}
 
 // ===========================================================================
 section('The signed-in tier');
