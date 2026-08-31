@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
+import { Pager } from '@/components/pager';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { linkButtonClass } from '@/components/ui/button';
@@ -10,6 +11,8 @@ import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { getActor, requireUser } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { DataErrorNotice, resolveDataError } from '@/lib/data-error';
+import type { Page } from '@/lib/data/pagination';
+import { firstValue } from '@/lib/search-params';
 import type { OrderWithListing } from '@/lib/data/types';
 import { formatDate, formatPrice } from '@/lib/format';
 
@@ -37,9 +40,11 @@ export default async function PurchasesPage({
   await requireUser(PURCHASES_PATH);
   const params = await searchParams;
 
-  let orders: OrderWithListing[];
+  const cursor = firstValue(params.after).trim();
+
+  let page: Page<OrderWithListing>;
   try {
-    orders = await getDataClient().listMyOrders(await getActor());
+    page = await getDataClient().listMyOrders(await getActor(), { cursor: cursor || undefined });
   } catch (error) {
     return (
       <Shell>
@@ -49,6 +54,8 @@ export default async function PurchasesPage({
   }
 
   const justClaimed = params.claimed === '1';
+
+  const orders = page.items;
 
   return (
     <Shell>
@@ -61,11 +68,23 @@ export default async function PurchasesPage({
       {orders.length === 0 ? (
         <EmptyState />
       ) : (
-        <ul className="flex flex-col gap-3">
-          {orders.map((order) => (
-            <PurchaseRow key={order.id} order={order} />
-          ))}
-        </ul>
+        <>
+          <ul className="flex flex-col gap-3">
+            {orders.map((order) => (
+              <PurchaseRow key={order.id} order={order} />
+            ))}
+          </ul>
+          <Pager
+            basePath={PURCHASES_PATH}
+            cursorParam="after"
+            nextCursor={page.nextCursor}
+            onFirstPage={cursor === ''}
+            shown={orders.length}
+            total={page.total}
+            noun="purchases"
+            className="mt-6"
+          />
+        </>
       )}
     </Shell>
   );

@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import {
+  ADMIN_REPORTS_PATH,
   parseReportFilter,
   REPORT_FILTER_LABELS,
   REPORT_FILTERS,
@@ -11,6 +12,7 @@ import {
 } from '@/app/admin/reports/filters';
 import { ResolveReportForm } from '@/app/admin/reports/resolve-report-form';
 import { AdminNav } from '@/components/admin-nav';
+import { Pager } from '@/components/pager';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -26,6 +28,7 @@ import {
   type ReportSubject,
   type ReportWithContext,
 } from '@/lib/data/types';
+import type { Page } from '@/lib/data/pagination';
 import { formatDate } from '@/lib/format';
 import { firstValue } from '@/lib/search-params';
 
@@ -68,25 +71,42 @@ export default async function AdminReportsPage({ searchParams }: PageProps<'/adm
 
   const params = await searchParams;
   const filter = parseReportFilter(firstValue(params.status));
+  // TWO LISTS, TWO CURSORS — the queue and the audit log below it.
+  const queueCursor = firstValue(params.after).trim();
+  const logCursor = firstValue(params.log).trim();
 
   const actor = await getActor();
   const db = getDataClient();
 
-  let reports: ReportWithContext[];
+  let reportPage: Page<ReportWithContext>;
   let counts: Counts;
-  let actions: AdminActionWithNames[];
+  let actionPage: Page<AdminActionWithNames>;
   try {
-    // Unfiltered once, for the tab counts; then filtered here rather than by a
-    // second round trip. `/admin/applications` reads twice because its filter
-    // is pushed into the query; this one is a four-way count over the same
-    // rows, so a second read would fetch what is already in hand.
-    const all = await db.listReports(actor);
-    counts = countBy(all);
+    /*
+     * FOUR READS FOR FOUR COUNTS, and they are counts rather than rows: each of
+     * the three status reads asks for `limit: 1` and uses only `page.total`, so
+     * PostgREST returns one row and a count rather than a table.
+     *
+     * This used to read every report once and tally the statuses in memory,
+     * which is exactly the shape pagination removes — the tally would have been
+     * of the first page and the tabs would have read "Open 24" for ever.
+     */
+    const [openCount, upheldCount, dismissedCount] = await Promise.all([
+      db.listReports(actor, 'open', { limit: 1 }),
+      db.listReports(actor, 'upheld', { limit: 1 }),
+      db.listReports(actor, 'dismissed', { limit: 1 }),
+    ]);
+    counts = {
+      open: openCount.total ?? 0,
+      upheld: upheldCount.total ?? 0,
+      dismissed: dismissedCount.total ?? 0,
+      all: (openCount.total ?? 0) + (upheldCount.total ?? 0) + (dismissedCount.total ?? 0),
+    };
 
-    const status = toReportStatus(filter);
-    reports = status ? all.filter((report) => report.status === status) : all;
-
-    actions = await db.listAdminActions(actor);
+    reportPage = await db.listReports(actor, toReportStatus(filter), {
+      cursor: queueCursor || undefined,
+    });
+    actionPage = await db.listAdminActions(actor, { cursor: logCursor || undefined });
   } catch (error) {
     return (
       <Shell filter={filter} counts={emptyCounts()}>
@@ -94,6 +114,9 @@ export default async function AdminReportsPage({ searchParams }: PageProps<'/adm
       </Shell>
     );
   }
+
+  const reports = reportPage.items;
+  const actions = actionPage.items;
 
   return (
     <Shell filter={filter} counts={counts}>
@@ -113,12 +136,27 @@ export default async function AdminReportsPage({ searchParams }: PageProps<'/adm
             ))}
           </ul>
         )}
+
+        <Pager
+          basePath={ADMIN_REPORTS_PATH}
+          params={{
+            status: filter === 'open' ? undefined : filter,
+            log: logCursor || undefined,
+          }}
+          cursorParam="after"
+          nextCursor={reportPage.nextCursor}
+          onFirstPage={queueCursor === ''}
+          shown={reports.length}
+          total={reportPage.total}
+          noun="reports"
+          className="mt-4"
+        />
       </section>
 
       {/* --------------------------------------------------------------- Log */}
       <section>
         <h2 className="text-xs font-semibold tracking-wide text-faint uppercase">
-          Administrator actions ({actions.length})
+          Administrator actions ({actionPage.total ?? actions.length})
         </h2>
         <p className="mt-1.5 max-w-2xl text-body-15 leading-relaxed text-muted">
           Every action any administrator has taken — not only report decisions. It lives on this page
@@ -159,6 +197,21 @@ export default async function AdminReportsPage({ searchParams }: PageProps<'/adm
             ))}
           </ul>
         )}
+
+        <Pager
+          basePath={ADMIN_REPORTS_PATH}
+          params={{
+            status: filter === 'open' ? undefined : filter,
+            after: queueCursor || undefined,
+          }}
+          cursorParam="log"
+          nextCursor={actionPage.nextCursor}
+          onFirstPage={logCursor === ''}
+          shown={actions.length}
+          total={actionPage.total}
+          noun="actions"
+          className="mt-4"
+        />
       </section>
     </Shell>
   );
@@ -314,15 +367,6 @@ interface Counts {
   upheld: number;
   dismissed: number;
   all: number;
-}
-
-function countBy(reports: readonly ReportWithContext[]): Counts {
-  return {
-    open: reports.filter((r) => r.status === 'open').length,
-    upheld: reports.filter((r) => r.status === 'upheld').length,
-    dismissed: reports.filter((r) => r.status === 'dismissed').length,
-    all: reports.length,
-  };
 }
 
 /** Zeroes for the error shell, where the counts are unknown rather than nil. */

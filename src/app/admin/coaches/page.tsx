@@ -3,14 +3,17 @@ import Link from 'next/link';
 
 import { CoachStandingForm, RestoreListingForm } from '@/app/admin/coaches/coach-standing-form';
 import { AdminNav } from '@/components/admin-nav';
+import { Pager } from '@/components/pager';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { getActor, getCurrentProfile, requireAdmin } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { DataErrorNotice, resolveDataError } from '@/lib/data-error';
+import { drainAll, type Page } from '@/lib/data/pagination';
 import type { CoachStatus, ListingWithCoach, Profile } from '@/lib/data/types';
 import { formatDate } from '@/lib/format';
+import { firstValue } from '@/lib/search-params';
 
 /**
  * Same reasoning as every other admin page: `generateMetadata` runs
@@ -41,26 +44,37 @@ export async function generateMetadata(): Promise<Metadata> {
  * queue, and their withdrawn offers stay withdrawn until then. The confirmation
  * panel says so before the click, rather than after.
  */
-export default async function AdminCoachesPage() {
+export default async function AdminCoachesPage({ searchParams }: PageProps<'/admin/coaches'>) {
   await requireAdmin('/admin/coaches');
+
+  const params = await searchParams;
+  const cursor = firstValue(params.after).trim();
 
   const actor = await getActor();
   const db = getDataClient();
 
+  let page: Page<Profile>;
   let coaches: Profile[];
   let listingsByCoach: Map<string, ListingWithCoach[]>;
   try {
-    coaches = await db.listCoachesForAdmin(actor);
+    page = await db.listCoachesForAdmin(actor, { cursor: cursor || undefined });
+    coaches = page.items;
 
     /*
-     * One read per coach. Genuinely N+1, and deliberately so: this is an
-     * admin-only page over a list that is small by construction, and the
-     * alternative is a bulk-by-coach-ids read that no other caller in the app
-     * wants. If this list ever grows past a page, the fix is pagination, not a
-     * wider read.
+     * One drain per coach on this page — genuinely N+1, and now bounded, which
+     * is what changed. Before pagination this was N+1 over the whole coach
+     * table; it is N+1 over one page, and `listCoachesForAdmin` is what sets
+     * that page.
+     *
+     * EVERY offer of each coach, not the first page of each. The
+     * confirmation panel names how many offers a suspension will take down, and
+     * the Restore list below has to hold all of them or a takedown becomes
+     * unliftable — `drainAll` exists for exactly this shape of requirement.
      */
-    const lists = await Promise.all(coaches.map((coach) => db.listListingsForAdmin(actor, coach.id)));
-    listingsByCoach = new Map(coaches.map((coach, index) => [coach.id, lists[index]]));
+    const lists = await Promise.all(
+      coaches.map((coach) => drainAll((p) => db.listListingsForAdmin(actor, coach.id, p))),
+    );
+    listingsByCoach = new Map(coaches.map((coach, index) => [coach.id, lists[index]!]));
   } catch (error) {
     return (
       <Shell>
@@ -154,6 +168,17 @@ export default async function AdminCoachesPage() {
           );
         })}
       </ul>
+
+      <Pager
+        basePath="/admin/coaches"
+        cursorParam="after"
+        nextCursor={page.nextCursor}
+        onFirstPage={cursor === ''}
+        shown={coaches.length}
+        total={page.total}
+        noun="coaches"
+        className="mt-6"
+      />
     </Shell>
   );
 }

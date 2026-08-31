@@ -185,6 +185,7 @@ import type {
   ReportWithContext,
   Review,
 } from './types';
+import type { Page, PageRequest } from './pagination';
 
 /** Input to {@link DataClient.signUp}. */
 export interface SignUpInput {
@@ -253,6 +254,41 @@ export interface ListingFilter {
    * — it is not free text, so there is nothing for it to match.
    */
   category?: ListingCategory;
+  /**
+   * Inclusive price floor, in cents. Omitted means no floor.
+   *
+   * Cents, like every other price in this codebase, and the reason is the one
+   * `Listing.price_cents` gives: a filter in pounds would have to divide, and a
+   * divide is where a rounding rule gets invented that disagrees with the one
+   * used to display the price.
+   */
+  minPriceCents?: number;
+  /** Inclusive price ceiling, in cents. Omitted means no ceiling. */
+  maxPriceCents?: number;
+  /**
+   * How to order the results. Omitted means `'newest'`.
+   *
+   * Each value has its own keyset — see `KEYSETS` — so a cursor minted under one
+   * sort is refused under another and the reader falls back to page one. That is
+   * the correct behaviour: the positions mean different things.
+   */
+  sort?: ListingSort;
+}
+
+/**
+ * The browse orderings.
+ *
+ * Deliberately three, and deliberately not "highest rated": a rating lives in
+ * `offer_stats`, which is a separate aggregate keyed by listing, so sorting by
+ * it means either a join this read does not have or an in-memory sort of the
+ * whole table — and the second is exactly what pagination exists to prevent.
+ */
+export type ListingSort = 'newest' | 'price_asc' | 'price_desc';
+
+export const LISTING_SORTS: readonly ListingSort[] = ['newest', 'price_asc', 'price_desc'];
+
+export function isListingSort(value: unknown): value is ListingSort {
+  return typeof value === 'string' && (LISTING_SORTS as readonly string[]).includes(value);
 }
 
 /** Input to {@link DataClient.createListing}. `coach_id` is NOT accepted — it always comes from the actor. */
@@ -494,6 +530,29 @@ export interface DataClient {
   // ---------------------------------------------------------------------------
 
   /**
+   * Several public profiles at once, by id — the batch form of
+   * {@link getPublicProfile}, and the same shape of trade as
+   * {@link listOfferStats}: one read for a grid instead of one per card.
+   *
+   * NOT PAGINATED, and it is the only unbounded-looking read that is not. The
+   * caller supplies the ids, so the result is bounded by the page that asked for
+   * it — pagination here would mean a caller could ask about 24 coaches and be
+   * told about 12, which is a worse contract than the one it replaced.
+   *
+   * IDS IT CANNOT RESOLVE ARE DROPPED, so match by id and never by position. A
+   * deleted account has no `public_profiles` row.
+   *
+   * WHY A BROWSE GRID NEEDS THIS. A coach name is a link only when the coach is
+   * approved, because `/coaches/[id]` is a 404 otherwise — and an offer can
+   * outlive its author's approval (redeem an invite, publish, then have a still
+   * open application rejected). The grid used to learn that from the whole coach
+   * directory; once that directory is a page, a coach on page 3 would silently
+   * stop being a link. `is_approved_coach` per id is the fact the grid actually
+   * needs.
+   */
+  listPublicProfiles(userIds: readonly string[]): Promise<PublicProfile[]>;
+
+  /**
    * The coach directory: every APPROVED coach, newest first, optionally
    * narrowed by a name keyword. Public — no actor.
    *
@@ -512,7 +571,7 @@ export interface DataClient {
    * order changes at the backend swap is worse than one that is not
    * alphabetical.
    */
-  listCoaches(filter?: CoachDirectoryFilter): Promise<PublicCoach[]>;
+  listCoaches(filter?: CoachDirectoryFilter, page?: PageRequest): Promise<Page<PublicCoach>>;
 
   /**
    * One public coach profile. Public — no actor.
@@ -691,7 +750,7 @@ export interface DataClient {
    * `deleted_at is null`; missing one of them silently republishes a withdrawn
    * offer. See {@link Listing.deleted_at} for the full list.
    */
-  listListings(filter?: ListingFilter): Promise<ListingWithCoach[]>;
+  listListings(filter?: ListingFilter, page?: PageRequest): Promise<Page<ListingWithCoach>>;
 
   /**
    * Public listing detail. `null` when the id is unknown **or the offer has
@@ -746,7 +805,7 @@ export interface DataClient {
    * which derives the coach id from the actor and cannot be pointed at anyone
    * else.
    */
-  listListingsByCoach(actor: Actor, coachId: string): Promise<ListingWithCoach[]>;
+  listListingsByCoach(actor: Actor, coachId: string, page?: PageRequest): Promise<Page<ListingWithCoach>>;
 
   /**
    * Every listing owned by one coach, **withdrawn ones included** — the read
@@ -769,7 +828,7 @@ export interface DataClient {
    * @throws DataError `unauthorized` when anonymous, `forbidden` for anyone who
    * is not an admin.
    */
-  listListingsForAdmin(actor: Actor, coachId: string): Promise<ListingWithCoach[]>;
+  listListingsForAdmin(actor: Actor, coachId: string, page?: PageRequest): Promise<Page<ListingWithCoach>>;
 
   /**
    * The actor's OWN offers, newest first, **including withdrawn ones** — the
@@ -782,7 +841,7 @@ export interface DataClient {
    *
    * @throws DataError `unauthorized` when anonymous.
    */
-  listMyListings(actor: Actor): Promise<OwnedListing[]>;
+  listMyListings(actor: Actor, page?: PageRequest): Promise<Page<OwnedListing>>;
 
   /**
    * Creates a listing owned by the actor.
@@ -931,7 +990,7 @@ export interface DataClient {
    * @throws DataError `unauthorized` when anonymous, `not_found` for an unknown
    * id, `forbidden` for anyone who is neither the offer's coach nor an admin.
    */
-  listListingRevisions(actor: Actor, listingId: string): Promise<ListingRevision[]>;
+  listListingRevisions(actor: Actor, listingId: string, page?: PageRequest): Promise<Page<ListingRevision>>;
 
   // ---------------------------------------------------------------------------
   // Social proof — aggregates (PUBLIC) and the rows behind them (NOT public)
@@ -1019,7 +1078,7 @@ export interface DataClient {
    * `order_id`, no `author_id`, no `price_epoch`. See that type for why each is
    * absent.
    */
-  listReviewsForListing(listingId: string): Promise<PublicReview[]>;
+  listReviewsForListing(listingId: string, page?: PageRequest): Promise<Page<PublicReview>>;
 
   /**
    * Every review of every offer this coach has ever published, all epochs,
@@ -1028,7 +1087,7 @@ export interface DataClient {
    * This is the account-level list that pairs with {@link getCoachStats}, and
    * it is deliberately not filtered by epoch.
    */
-  listReviewsForCoach(coachId: string): Promise<PublicReviewWithListing[]>;
+  listReviewsForCoach(coachId: string, page?: PageRequest): Promise<Page<PublicReviewWithListing>>;
 
   /**
    * One order. NOT public: readable by the buyer, by the coach who sold it, and
@@ -1038,8 +1097,71 @@ export interface DataClient {
    */
   getOrder(actor: Actor, orderId: string): Promise<OrderWithListing | null>;
 
+  /**
+   * One of the actor's OWN offers, by id — the single form of
+   * {@link listMyListings}, with the same shape and the same scope.
+   *
+   * The coach id is derived from the actor and is not a parameter, so this
+   * cannot read somebody else's offer: an id they do not own returns `null`, in
+   * the same breath as an id that does not exist. `null` rather than a throw,
+   * for the reason {@link getListingForViewer} gives — a refusal would confirm
+   * that something exists there.
+   *
+   * WHY THE EDITOR CANNOT USE {@link listMyListings}. It used to: read every
+   * offer the coach owns, then `.find()` the one being edited. Once that read is
+   * a page, the offer being edited is simply absent from it for any coach with
+   * more than a page of offers, and the editor 404s on their older work.
+   *
+   * WITHDRAWN OFFERS INCLUDED, deliberately. A coach whose offer was taken down
+   * over its contents must be able to open the editor and fix it.
+   *
+   * @throws DataError `unauthorized` when anonymous.
+   */
+  getMyListing(actor: Actor, listingId: string): Promise<OwnedListing | null>;
+
+  /**
+   * How many orders exist against one offer, across EVERY price epoch.
+   *
+   * Owner-or-admin, exactly like {@link listOrdersForCoach} — a claim count is
+   * commercial information, and the public aggregate is
+   * {@link getOfferStats}.`sales_count`.
+   *
+   * NOT THE SAME NUMBER as that one, and the difference is the point of having
+   * this at all: `offer_stats` counts sales at the offer's CURRENT price epoch,
+   * so an offer whose price has risen since it sold reports zero. The editor
+   * uses this to decide whether the delivery mode is still changeable —
+   * `guard_listing_update()` freezes it at the first claim, at any epoch — and
+   * the epoch-filtered number would unlock a control the database then refuses.
+   *
+   * @throws DataError `unauthorized` when anonymous, `forbidden` for anyone who
+   * is neither the offer's coach nor an admin. `0` for an unknown offer, which
+   * is what "nobody has claimed it" means for something that does not exist.
+   */
+  countOrdersForListing(actor: Actor, listingId: string): Promise<number>;
+
+  /**
+   * The actor's own order for one offer, or `null` if they have not claimed it.
+   *
+   * WHY THIS EXISTS RATHER THAN A SCAN OF {@link listMyOrders}. An offer page
+   * has to know whether to show a Claim button, and it used to answer that by
+   * reading the buyer's entire purchase history and looking for a match. That
+   * was merely wasteful while the history was unbounded; once it is a page it is
+   * WRONG — a buyer with more than a page of purchases would be shown a Claim
+   * button for an offer they already own, and told "you have already claimed
+   * this offer" only after pressing it.
+   *
+   * Scoped by the actor exactly as `listMyOrders` is: the learner id is derived
+   * and is not a parameter, so this cannot be pointed at somebody else's
+   * purchase. `null` for an unknown or malformed listing id, never a throw —
+   * this answers a question about the CALLER, and refusing would confirm the
+   * existence of an offer they cannot see.
+   *
+   * @throws DataError `unauthorized` when anonymous.
+   */
+  getMyOrderForListing(actor: Actor, listingId: string): Promise<OrderWithListing | null>;
+
   /** The actor's own purchases, newest first. @throws DataError `unauthorized` when anonymous. */
-  listMyOrders(actor: Actor): Promise<OrderWithListing[]>;
+  listMyOrders(actor: Actor, page?: PageRequest): Promise<Page<OrderWithListing>>;
 
   /**
    * A coach's sales, newest first. Every epoch — a price change does not hide
@@ -1048,7 +1170,7 @@ export interface DataClient {
    * actor IS that coach or is an admin. (The sales *count* is public via
    * {@link getCoachStats}; the rows are not.)
    */
-  listOrdersForCoach(actor: Actor, coachId: string): Promise<OrderWithListing[]>;
+  listOrdersForCoach(actor: Actor, coachId: string, page?: PageRequest): Promise<Page<OrderWithListing>>;
 
   /**
    * Writes a review for an order the actor owns.
@@ -1144,7 +1266,7 @@ export interface DataClient {
    * §6 has the standing note about that, and it applies here sooner than most:
    * a moderation queue grows monotonically.
    */
-  listReviewsForModeration(actor: Actor): Promise<ModeratableReview[]>;
+  listReviewsForModeration(actor: Actor, page?: PageRequest): Promise<Page<ModeratableReview>>;
 
   /**
    * Takes a review down: copies it to `removed_reviews`, then deletes it.
@@ -1176,7 +1298,7 @@ export interface DataClient {
    * — both underlying columns are `ON DELETE SET NULL`, so a log entry outlives
    * the accounts it names.
    */
-  listRemovedReviews(actor: Actor): Promise<RemovedReviewWithNames[]>;
+  listRemovedReviews(actor: Actor, page?: PageRequest): Promise<Page<RemovedReviewWithNames>>;
 
   // ---------------------------------------------------------------------------
   // Reports — the queue `/admin/reviews` was pretending to be
@@ -1213,7 +1335,7 @@ export interface DataClient {
   reportCoach(actor: Actor, coachId: string, reason: ReportReason, note?: string | null): Promise<Report>;
 
   /** The actor's own reports, newest first, so "did anything happen?" is answerable. */
-  listMyReports(actor: Actor): Promise<Report[]>;
+  listMyReports(actor: Actor, page?: PageRequest): Promise<Page<Report>>;
 
   /**
    * The queue. ADMIN ONLY, newest first, open ones by default.
@@ -1223,7 +1345,7 @@ export interface DataClient {
    * report deletes the review, so by the time anybody reads the report the text
    * may be gone — and the row says so rather than vanishing with it.
    */
-  listReports(actor: Actor, status?: ReportStatus): Promise<ReportWithContext[]>;
+  listReports(actor: Actor, status?: ReportStatus, page?: PageRequest): Promise<Page<ReportWithContext>>;
 
   /**
    * Marks a report upheld or dismissed. ADMIN ONLY.
@@ -1270,10 +1392,10 @@ export interface DataClient {
    * suspended — which is correct for visitors and useless for the administrator
    * who has to reinstate them.
    */
-  listCoachesForAdmin(actor: Actor): Promise<Profile[]>;
+  listCoachesForAdmin(actor: Actor, page?: PageRequest): Promise<Page<Profile>>;
 
   /** The audit log, newest first. ADMIN ONLY. */
-  listAdminActions(actor: Actor): Promise<AdminActionWithNames[]>;
+  listAdminActions(actor: Actor, page?: PageRequest): Promise<Page<AdminActionWithNames>>;
 
   // ---------------------------------------------------------------------------
   // Invites (admin-minted, one-shot coach fast-track codes)
@@ -1283,7 +1405,7 @@ export interface DataClient {
   createInvite(actor: Actor, input: CreateInviteInput): Promise<Invite>;
 
   /** @throws DataError `unauthorized` / `forbidden` unless the actor's stored role is `'admin'`. */
-  listInvites(actor: Actor): Promise<Invite[]>;
+  listInvites(actor: Actor, page?: PageRequest): Promise<Page<Invite>>;
 
   /** @throws DataError `unauthorized` / `forbidden` (non-admin), `not_found`, `conflict` (already revoked/redeemed). */
   revokeInvite(actor: Actor, code: string): Promise<Invite>;
@@ -1314,8 +1436,32 @@ export interface DataClient {
   /** The actor's most recent application, or `null`. @throws DataError `unauthorized` when anonymous. */
   getMyCoachApplication(actor: Actor): Promise<CoachApplication | null>;
 
+  /**
+   * One application by id, as an administrator sees it — the single form of
+   * {@link listCoachApplications}, joined to the applicant the same way.
+   *
+   * WHY THE QUEUE PAGE NEEDS IT. After a decision, `/admin/applications`
+   * redirects back with `?reviewed=<id>` and renders a banner naming the
+   * outcome. It used to find that row in the unfiltered list it had already
+   * read for the tab counts — and that list is gone twice over: the counts are
+   * counts now, and the row is usually not in the visible page anyway, because
+   * approving an application removes it from the `pending` tab the admin is
+   * looking at.
+   *
+   * `null` for an unknown id, so a hand-typed `?reviewed=` renders no banner
+   * rather than an error.
+   *
+   * @throws DataError `unauthorized` when anonymous, `forbidden` for anyone who
+   * is not an admin — the same rule as the list, because this is the same data.
+   */
+  getCoachApplication(actor: Actor, applicationId: string): Promise<CoachApplicationWithUser | null>;
+
   /** Admin review queue, newest first. @throws DataError `unauthorized` / `forbidden` unless stored role is `'admin'`. */
-  listCoachApplications(actor: Actor, filter?: CoachApplicationFilter): Promise<CoachApplicationWithUser[]>;
+  listCoachApplications(
+    actor: Actor,
+    filter?: CoachApplicationFilter,
+    page?: PageRequest,
+  ): Promise<Page<CoachApplicationWithUser>>;
 
   /**
    * Records an admin decision and mirrors it onto the applicant's profile:

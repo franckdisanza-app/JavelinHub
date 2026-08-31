@@ -5,6 +5,7 @@ import { notFound } from 'next/navigation';
 import { ListingCard } from '@/components/listing-card';
 import { InitialsAvatar } from '@/components/initials-avatar';
 import { avatarPublicUrl } from '@/lib/storage/avatars';
+import { Pager } from '@/components/pager';
 import { ReportForm } from '@/components/report-form';
 import { ReviewItem } from '@/components/review-item';
 import { Alert } from '@/components/ui/alert';
@@ -65,14 +66,27 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
   const coach = await db.getPublicCoach(id);
   if (!coach) notFound();
 
-  const [stats, offers, reviews] = await Promise.all([
+  /*
+   * TWO PAGED LISTS ON ONE PAGE, so two cursor parameters. They must not share
+   * one: a single `?after=` would move both lists at once, and the cursor from
+   * either would be refused by the other's keyset (different `scope`) — so one
+   * of the two would silently reset to the top every time the reader advanced
+   * the other.
+   */
+  const search = await searchParams;
+  const offerCursor = firstValue(search.offers).trim();
+  const reviewCursor = firstValue(search.reviews).trim();
+
+  const [stats, offerPage, reviewPage] = await Promise.all([
     db.getCoachStats(coach.id),
     // Public, published-only. `actor` is accepted for interface symmetry and is
     // not consulted — this read is deliberately not dual-mode, so it can never
     // be talked into returning somebody's withdrawn offers.
-    db.listListingsByCoach(null, coach.id),
-    db.listReviewsForCoach(coach.id),
+    db.listListingsByCoach(null, coach.id, { cursor: offerCursor || undefined }),
+    db.listReviewsForCoach(coach.id, { cursor: reviewCursor || undefined }),
   ]);
+  const offers = offerPage.items;
+  const reviews = reviewPage.items;
 
   // One batched read for the whole offer list, for the reason `listOfferStats`
   // exists at all. Keyed by id rather than zipped by index: this method DROPS
@@ -87,8 +101,15 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
   const offerStats = await db.listOfferStats(offers.map((offer) => offer.id));
   const offerStatsById = new Map(offerStats.map((stats) => [stats.listing_id, stats]));
 
-  const search = await searchParams;
   const backHref = buildBackHref(firstValue(search.q).trim());
+  // What each pager must carry so that advancing one list does not reset the
+  // other, and neither loses the visitor's search term on the way back.
+  const q = firstValue(search.q).trim();
+  const pagerParams = {
+    q: q || undefined,
+    offers: offerCursor || undefined,
+    reviews: reviewCursor || undefined,
+  };
 
   // Only for deciding whether to offer the report control. Deliberately NOT
   // passed to any of the reads above: this page is the same page for everybody,
@@ -97,16 +118,12 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
   const viewer = await getActor();
   const canReport = viewer !== null && viewer.userId !== coach.id;
 
-  // Which of the reviewed offers a visitor can still open. A withdrawn offer is
-  // a 404 for the public, so linking its title from here would be a dead end —
-  // and the reviews of one still belong on this page, because the coaching was
-  // sold and reviewed.
-  const publishedOfferIds = new Set(offers.map((offer) => offer.id));
-
   // Nothing sold and nothing written: the one state that reads "New coach".
   // A coach who HAS sold and simply has no reviews yet is a different fact and
   // must not be called new — see the empty-state table in PROGRESS.md.
   const brandNew = stats.sales_count === 0 && stats.review_count === 0;
+  const offerTotal = offerPage.total ?? offers.length;
+  const reviewTotal = reviewPage.total ?? reviews.length;
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
@@ -202,7 +219,8 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
       {/* ------------------------------------------------------------- Offers */}
       <section className="mt-8">
         <h2 className="text-sm font-semibold text-ink">
-          {offers.length === 1 ? '1 offer' : `${offers.length} offers`}
+          {/* The TOTAL. The pager underneath says how many are on screen. */}
+          {offerTotal === 1 ? '1 offer' : `${offerTotal} offers`}
         </h2>
 
         {offers.length > 0 ? (
@@ -227,12 +245,24 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
             <Alert tone="info">{coach.full_name} hasn&rsquo;t published any offers yet.</Alert>
           </div>
         )}
+
+        <Pager
+          basePath={`/coaches/${coach.id}`}
+          params={pagerParams}
+          cursorParam="offers"
+          nextCursor={offerPage.nextCursor}
+          onFirstPage={offerCursor === ''}
+          shown={offers.length}
+          total={offerPage.total}
+          noun="offers"
+          className="mt-4"
+        />
       </section>
 
       {/* ------------------------------------------------------------ Reviews */}
       <section className="mt-8">
         <h2 className="text-sm font-semibold text-ink">
-          {reviews.length === 1 ? '1 review' : `${reviews.length} reviews`}
+          {reviewTotal === 1 ? '1 review' : `${reviewTotal} reviews`}
         </h2>
 
         {reviews.length > 0 ? (
@@ -246,12 +276,29 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
                   <ReviewItem
                     review={review}
                     context={
-                      <ReviewedOffer review={review} linkable={publishedOfferIds.has(review.listing_id)} />
+                      // FROM THE ROW (0026), not from an intersection with the
+                      // offer list above. Both lists are pages now, so a review
+                      // here can be about an offer three pages down — and the
+                      // intersection would have said "withdrawn" about an offer
+                      // that is on sale, silently and only for some readers.
+                      <ReviewedOffer review={review} linkable={review.listing_published} />
                     }
                   />
                 </li>
               ))}
             </ul>
+
+            <Pager
+              basePath={`/coaches/${coach.id}`}
+              params={pagerParams}
+              cursorParam="reviews"
+              nextCursor={reviewPage.nextCursor}
+              onFirstPage={reviewCursor === ''}
+              shown={reviews.length}
+              total={reviewPage.total}
+              noun="reviews"
+              className="mt-4"
+            />
           </>
         ) : (
           <div className="mt-3">

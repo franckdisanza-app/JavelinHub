@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { CoachCard } from '@/components/coach-card';
+import { Pager } from '@/components/pager';
 import { Alert } from '@/components/ui/alert';
 import { Button, linkButtonClass } from '@/components/ui/button';
 import { Field, fieldDescribedBy } from '@/components/ui/field';
@@ -44,10 +45,14 @@ export default async function CoachesPage({ searchParams }: PageProps<'/coaches'
   const params = await searchParams;
   const q = firstValue(params.q).trim();
 
+  const cursor = firstValue(params.after).trim();
+
   const db = getDataClient();
-  const coaches = await db.listCoaches({ q: q || undefined });
+  const page = await db.listCoaches({ q: q || undefined }, { cursor: cursor || undefined });
+  const coaches = page.items;
   // One row per id, in the order given — `listCoachStats` never drops one, so
-  // the zip below cannot slip.
+  // the zip below cannot slip. Batched over THIS PAGE's ids, which is what
+  // keeps a directory of any size to two reads.
   const stats = await db.listCoachStats(coaches.map((coach) => coach.id));
 
   return (
@@ -99,7 +104,7 @@ export default async function CoachesPage({ searchParams }: PageProps<'/coaches'
         page past the viewport width at 375px.
       */}
       <p className="mt-6 text-sm break-words text-muted" aria-live="polite">
-        {describeResults(coaches.length, q)}
+        {describeResults(page.total ?? coaches.length, q)}
       </p>
 
       {coaches.length > 0 ? (
@@ -118,6 +123,18 @@ export default async function CoachesPage({ searchParams }: PageProps<'/coaches'
               </li>
             ))}
           </ul>
+
+          <Pager
+            basePath="/coaches"
+            params={{ q: q || undefined }}
+            cursorParam="after"
+            nextCursor={page.nextCursor}
+            onFirstPage={cursor === ''}
+            shown={coaches.length}
+            total={page.total}
+            noun="coaches"
+            className="mt-6"
+          />
 
           {/*
             Rendered ONLY when at least one card is actually showing a rating.

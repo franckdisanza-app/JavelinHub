@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 
 import { getActor } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { drainAll } from '@/lib/data/pagination';
 import { isDataError } from '@/lib/data/types';
 import { formError, formSuccess, toFormState, type FormState } from '@/lib/forms';
 
@@ -64,7 +65,9 @@ export async function setCoachStandingAction(_prev: FormState, formData: FormDat
       // `Promise.all`: each of these is a write against the same coach's rows,
       // and a partial failure halfway through a parallel batch would leave a
       // state nobody could describe in the message below.
-      const listings = await db.listListingsForAdmin(actor, coachId);
+      // EVERY page: `set_coach_status()` refuses while any offer is on sale, so
+      // a first-page sweep would take some down and then fail — see `drainAll`.
+      const listings = await drainAll((page) => db.listListingsForAdmin(actor, coachId, page));
       for (const listing of listings) {
         if (listing.deleted_at !== null) continue;
         await db.softDeleteListing(actor, listing.id);

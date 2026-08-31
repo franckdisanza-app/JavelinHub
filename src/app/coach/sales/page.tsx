@@ -6,11 +6,14 @@ import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
 import { linkButtonClass } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
+import { Pager } from '@/components/pager';
 import { getActor, requireUser } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { DataErrorNotice, resolveDataError } from '@/lib/data-error';
+import type { Page } from '@/lib/data/pagination';
 import type { OrderWithListing } from '@/lib/data/types';
 import { formatDate, formatPrice } from '@/lib/format';
+import { firstValue } from '@/lib/search-params';
 
 export const metadata: Metadata = { title: 'Your sales' };
 
@@ -32,8 +35,13 @@ const SALES_PATH = '/coach/sales';
  * anything. Sending them their files happens on `/orders/[id]`, which needs no
  * name — the order is the introduction.
  */
-export default async function CoachSalesPage() {
+export default async function CoachSalesPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const profile = await requireUser(SALES_PATH);
+  const params = await searchParams;
 
   if (profile.coach_status !== 'approved') {
     return (
@@ -43,9 +51,13 @@ export default async function CoachSalesPage() {
     );
   }
 
-  let orders: OrderWithListing[];
+  const cursor = firstValue(params.after).trim();
+
+  let page: Page<OrderWithListing>;
   try {
-    orders = await getDataClient().listOrdersForCoach(await getActor(), profile.id);
+    page = await getDataClient().listOrdersForCoach(await getActor(), profile.id, {
+      cursor: cursor || undefined,
+    });
   } catch (error) {
     return (
       <Shell>
@@ -54,6 +66,11 @@ export default async function CoachSalesPage() {
     );
   }
 
+  const orders = page.items;
+  // The TOTAL, not the number of rows below — a coach reading "3 claims" over a
+  // full page and a Next button would be reading a lie.
+  const claims = page.total ?? orders.length;
+
   return (
     <Shell>
       {orders.length === 0 ? (
@@ -61,13 +78,22 @@ export default async function CoachSalesPage() {
       ) : (
         <>
           <p className="text-sm text-muted">
-            {orders.length} {orders.length === 1 ? 'claim' : 'claims'} across your offers.
+            {claims} {claims === 1 ? 'claim' : 'claims'} across your offers.
           </p>
           <ul className="flex flex-col gap-3">
             {orders.map((order) => (
               <SaleRow key={order.id} order={order} />
             ))}
           </ul>
+          <Pager
+            basePath={SALES_PATH}
+            cursorParam="after"
+            nextCursor={page.nextCursor}
+            onFirstPage={cursor === ''}
+            shown={orders.length}
+            total={page.total}
+            noun="sales"
+          />
         </>
       )}
     </Shell>

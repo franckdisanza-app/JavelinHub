@@ -24,6 +24,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { Actor, CoachApplication, ListingCategory, Profile, ReportReason } from '@/lib/data/types';
+import type { Page, PageRequest } from '@/lib/data/pagination';
+import { MAX_PAGE_SIZE } from '@/lib/data/pagination';
 import { COACH_STATUSES, LISTING_CATEGORIES, ROLES, listingCategoryLabel } from '@/lib/data/types';
 import { initialsOf } from '@/lib/initials';
 
@@ -49,6 +51,74 @@ const { hashToken, issueResetToken, redeemResetToken } = await import('@/lib/aut
 const { LIMITS, consume } = await import('@/lib/rate-limit');
 
 const db = getDataClient();
+
+/**
+ * =============================================================================
+ * `all` — every paginated read, drained into one array.
+ * =============================================================================
+ * This suite is about WHO MAY READ WHAT. Its four hundred assertions ask what a
+ * list contains and who is refused it, and none of them is about page
+ * boundaries — pagination has its own section below, where the boundaries are
+ * the subject.
+ *
+ * So every paginated method is wrapped here to follow `nextCursor` to the end
+ * and hand back the whole list, which is exactly what those assertions meant
+ * when the methods returned arrays. `db.listX` still exists and is what the
+ * pagination section uses directly.
+ *
+ * **AND IT PAGES IN THREES.** `limit: 3` is not a detail: it means every one of
+ * those four hundred assertions now traverses two, five, ten pages of cursors,
+ * and any keyset that skips or repeats a row makes a content assertion fail
+ * somewhere. A suite that asked for one big page would exercise the cursor
+ * exactly as often as the pagination section remembered to.
+ *
+ * A refusal still throws from the FIRST page, so `refuses(...)` works unchanged.
+ */
+async function drain<T>(fetch: (page: PageRequest) => Promise<Page<T>>): Promise<T[]> {
+  const items: T[] = [];
+  let cursor: string | null = null;
+
+  // A bounded loop, not `while (true)`. A cursor that fails to advance is a
+  // real bug in a keyset — the tie-break dropped, say — and it would otherwise
+  // hang the suite rather than failing it.
+  for (let guard = 0; guard < 500; guard += 1) {
+    const page: Page<T> = await fetch({ cursor, limit: 3 });
+    items.push(...page.items);
+    if (!page.nextCursor) return items;
+    cursor = page.nextCursor;
+  }
+  throw new Error('drain: the cursor never reached the end — a keyset is not advancing');
+}
+
+const all = {
+  listCoaches: (filter?: Parameters<typeof db.listCoaches>[0]) =>
+    drain((page) => db.listCoaches(filter, page)),
+  listListings: (filter?: Parameters<typeof db.listListings>[0]) =>
+    drain((page) => db.listListings(filter, page)),
+  listListingsByCoach: (actor: Actor, coachId: string) =>
+    drain((page) => db.listListingsByCoach(actor, coachId, page)),
+  listListingsForAdmin: (actor: Actor, coachId: string) =>
+    drain((page) => db.listListingsForAdmin(actor, coachId, page)),
+  listMyListings: (actor: Actor) => drain((page) => db.listMyListings(actor, page)),
+  listListingRevisions: (actor: Actor, listingId: string) =>
+    drain((page) => db.listListingRevisions(actor, listingId, page)),
+  listReviewsForListing: (listingId: string) =>
+    drain((page) => db.listReviewsForListing(listingId, page)),
+  listReviewsForCoach: (coachId: string) => drain((page) => db.listReviewsForCoach(coachId, page)),
+  listMyOrders: (actor: Actor) => drain((page) => db.listMyOrders(actor, page)),
+  listOrdersForCoach: (actor: Actor, coachId: string) =>
+    drain((page) => db.listOrdersForCoach(actor, coachId, page)),
+  listReviewsForModeration: (actor: Actor) => drain((page) => db.listReviewsForModeration(actor, page)),
+  listRemovedReviews: (actor: Actor) => drain((page) => db.listRemovedReviews(actor, page)),
+  listMyReports: (actor: Actor) => drain((page) => db.listMyReports(actor, page)),
+  listReports: (actor: Actor, status?: Parameters<typeof db.listReports>[1]) =>
+    drain((page) => db.listReports(actor, status, page)),
+  listCoachesForAdmin: (actor: Actor) => drain((page) => db.listCoachesForAdmin(actor, page)),
+  listAdminActions: (actor: Actor) => drain((page) => db.listAdminActions(actor, page)),
+  listInvites: (actor: Actor) => drain((page) => db.listInvites(actor, page)),
+  listCoachApplications: (actor: Actor, filter?: Parameters<typeof db.listCoachApplications>[1]) =>
+    drain((page) => db.listCoachApplications(actor, filter, page)),
+};
 
 /**
  * `signUp` returns a {@link SignUpResult} union, because on Supabase a
@@ -258,7 +328,17 @@ const LISTING_REVISION_COLUMNS = [
 /** The public shape of a review. Anything else on it has leaked. */
 const PUBLIC_REVIEW_COLUMNS = ['id', 'listing_id', 'rating', 'body', 'created_at', 'author_name'] as const;
 /** Plus the offer title, on the coach-profile list. Still nothing more. */
-const PUBLIC_REVIEW_WITH_LISTING_COLUMNS = [...PUBLIC_REVIEW_COLUMNS, 'listing_title'] as const;
+/**
+ * `listing_published` (0026) is the flag that says whether the offer title can be
+ * a link. On the ROW rather than derived by the caller: the coach page used to
+ * intersect this list with the coach's offer list, and once both are pages that
+ * intersection is wrong — a review on page 1 can be about an offer on page 3.
+ */
+const PUBLIC_REVIEW_WITH_LISTING_COLUMNS = [
+  ...PUBLIC_REVIEW_COLUMNS,
+  'listing_title',
+  'listing_published',
+] as const;
 /**
  * A review row in FULL, as only an administrator sees it — the deliberate
  * opposite of `PUBLIC_REVIEW_COLUMNS`.
@@ -409,6 +489,9 @@ const PROFILE_COLUMNS = [
  * carries as `id` regardless. That reasoning is what makes it admissible; a
  * column without it does not become admissible by being useful.
  */
+/** `public.public_profiles` — a name and two facts, and deliberately no email. */
+const PUBLIC_PROFILE_COLUMNS = ['id', 'full_name', 'is_approved_coach', 'avatar_path'] as const;
+
 const PUBLIC_COACH_COLUMNS = [
   'id',
   'full_name',
@@ -507,7 +590,7 @@ console.log(`throwaway store: ${storePath}`);
 // ---------------------------------------------------------------------------
 section('Seed sanity');
 // ---------------------------------------------------------------------------
-const seedListings = await db.listListings();
+const seedListings = await all.listListings();
 expectEqual('seeded listing count', seedListings.length, 6);
 // listCategories() returns the TAXONOMY, not the values in use. Three of the
 // eight have no seeded listing, so a filter derived from the rows would be short
@@ -568,7 +651,7 @@ expectEqual('an offer sold but never reviewed: reviews', soldUnrated?.review_cou
 expectEqual('an offer sold but never reviewed: rating is NULL', soldUnrated?.rating_average, null);
 
 const emptyCoachStats = await db.getCoachStats(EMPTY_COACH);
-expectEqual('an approved coach with nothing: offers', (await db.listListingsByCoach(ANON, EMPTY_COACH)).length, 0);
+expectEqual('an approved coach with nothing: offers', (await all.listListingsByCoach(ANON, EMPTY_COACH)).length, 0);
 expectEqual('an approved coach with nothing: sales', emptyCoachStats.sales_count, 0);
 expectEqual('an approved coach with nothing: reviews', emptyCoachStats.review_count, 0);
 expectEqual('an approved coach with nothing: rating is NULL, not 0.0', emptyCoachStats.rating_average, null);
@@ -708,7 +791,7 @@ expectEqual('the archived rows are exactly the epoch-1 ones', seedCoachStats.sal
 
 // The review LISTS have to agree with the counts, or an offer says "1 review"
 // and then renders three.
-const strengthReviews = await db.listReviewsForListing(OFFER.strength);
+const strengthReviews = await all.listReviewsForListing(OFFER.strength);
 expectEqual('the offer page shows only current-epoch reviews', strengthReviews.length, 1);
 // Identified by its body rather than by an epoch column, because the public
 // shape does not publish the epoch. The two archived reviews of this offer say
@@ -719,7 +802,7 @@ expectEqual(
   true,
 );
 
-const coachReviews = await db.listReviewsForCoach(COACH!.userId);
+const coachReviews = await all.listReviewsForCoach(COACH!.userId);
 expectEqual('the coach profile shows every review, every epoch', coachReviews.length, 8);
 expectEqual(
   'the archived reviews are still readable on the coach profile',
@@ -747,13 +830,13 @@ expectEqual(
   coachReviews.every((r, i) => i === 0 || coachReviews[i - 1]!.created_at >= r.created_at),
   true,
 );
-expectEqual('the empty coach has no reviews to show', (await db.listReviewsForCoach(EMPTY_COACH)).length, 0);
+expectEqual('the empty coach has no reviews to show', (await all.listReviewsForCoach(EMPTY_COACH)).length, 0);
 
 // A public review is a PROJECTION, not the row. Three of the columns it drops
 // are load-bearing: `order_id` would be a valid argument to the buyer-scoped
 // order reads below, `author_id` links a display name to an account, and
 // `price_epoch` publishes how often a coach has raised a price.
-const sample = (await db.listReviewsForListing(OFFER.fundamentals))[0]!;
+const sample = (await all.listReviewsForListing(OFFER.fundamentals))[0]!;
 expectShape('a public review exposes exactly the columns it renders', sample, PUBLIC_REVIEW_COLUMNS);
 expectEqual(
   'a public review carries no author identity beyond the display name',
@@ -773,8 +856,8 @@ section('Orders are NOT public — the aggregate is');
 // scoped to buyer / selling coach / admin. Getting this wrong publishes a
 // purchase history per person and a customer list per coach.
 await refuses('anon getOrder', 'unauthorized', () => db.getOrder(ANON, ORDER.lenaOnFundamentals));
-await refuses('anon listMyOrders', 'unauthorized', () => db.listMyOrders(ANON));
-await refuses('anon listOrdersForCoach', 'unauthorized', () => db.listOrdersForCoach(ANON, COACH!.userId));
+await refuses('anon listMyOrders', 'unauthorized', () => all.listMyOrders(ANON));
+await refuses('anon listOrdersForCoach', 'unauthorized', () => all.listOrdersForCoach(ANON, COACH!.userId));
 
 // The rule is "readable ONLY by its buyer, the selling coach and an admin", and
 // it has two halves. The refusals below cover ONLY; these three cover READABLE,
@@ -816,7 +899,7 @@ expectEqual('an order is not findable by its buyer id', await db.getOrder(ADMIN,
 expectEqual('an order is not findable by its listing id', await db.getOrder(ADMIN, OFFER.fundamentals), null);
 expectEqual('an order is not findable by its seller id', await db.getOrder(ADMIN, COACH!.userId), null);
 
-const lenaOrders = await db.listMyOrders(LEARNER);
+const lenaOrders = await all.listMyOrders(LEARNER);
 expectEqual('listMyOrders returns only the actor’s own purchases', lenaOrders.length, 2);
 expectEqual(
   '...and every row really is theirs',
@@ -827,7 +910,7 @@ expectEqual(
 // assertion is equally satisfied by a listMyOrders that returns nothing to
 // anyone — which is the exact shape of the bug a scoping check is supposed to
 // have. Found by auditing every `.every()` in this file for that property.
-const marcusOrders = await db.listMyOrders(MARCUS);
+const marcusOrders = await all.listMyOrders(MARCUS);
 expectEqual(
   'a different learner sees a different set',
   marcusOrders.length > 0 && marcusOrders.every((o) => o.learner_id === MARCUS!.userId),
@@ -844,7 +927,7 @@ const forgedOwnerActors: Array<[string, Actor]> = [
   ['role on the PROTOTYPE chain', Object.assign(Object.create({ role: 'admin' }), { userId: MARCUS!.userId }) as Actor],
 ];
 for (const [shape, actor] of forgedOwnerActors) {
-  const rows = await db.listMyOrders(actor);
+  const rows = await all.listMyOrders(actor);
   expectEqual(
     `listMyOrders ignores a forged ${shape} and returns only the actor's rows`,
     rows.length > 0 && rows.every((o) => o.learner_id === MARCUS!.userId),
@@ -853,7 +936,7 @@ for (const [shape, actor] of forgedOwnerActors) {
 }
 expectEqual(
   'the seeded unreviewed purchase is flagged as unreviewed',
-  (await db.listMyOrders(AISHA)).find((o) => o.id === ORDER.aishaOnClinic)?.has_review,
+  (await all.listMyOrders(AISHA)).find((o) => o.id === ORDER.aishaOnClinic)?.has_review,
   false,
 );
 expectEqual(
@@ -867,7 +950,7 @@ expectShape('an order row carries the offer title but NO buyer name or email', l
 // look like if it stopped throwing, so the count is the assertion.
 const ownSales = await allows(
   'a coach may list their OWN sales',
-  () => db.listOrdersForCoach(COACH, COACH!.userId),
+  () => all.listOrdersForCoach(COACH, COACH!.userId),
   (r) => `${r.length} sale(s)`,
 );
 expectEqual('...and every seeded sale is in it', ownSales?.length, 10);
@@ -880,13 +963,13 @@ expectEqual('...all of them theirs', (ownSales ?? []).every((o) => o.coach_id ==
 expectShape('...each row carrying exactly the order columns', ownSales?.[0], ORDER_COLUMNS);
 const adminSales = await allows(
   'an admin may list any coach’s sales',
-  () => db.listOrdersForCoach(ADMIN, COACH!.userId),
+  () => all.listOrdersForCoach(ADMIN, COACH!.userId),
   (r) => `${r.length} sale(s)`,
 );
 expectEqual('...and an admin sees the same ten', adminSales?.length, 10);
 expectEqual(
   'the empty coach really has no sales (not an empty answer to everyone)',
-  (await db.listOrdersForCoach(ADMIN, EMPTY_COACH)).length,
+  (await all.listOrdersForCoach(ADMIN, EMPTY_COACH)).length,
   0,
 );
 
@@ -917,8 +1000,8 @@ await mutateDb((store) => {
     created_at: new Date().toISOString(),
   });
 });
-const corySalesNow = await db.listOrdersForCoach(COACH, COACH!.userId);
-expectEqual('a second coach’s sale now exists in the store', (await db.listOrdersForCoach(ADMIN, EMPTY_COACH)).length, 1);
+const corySalesNow = await all.listOrdersForCoach(COACH, COACH!.userId);
+expectEqual('a second coach’s sale now exists in the store', (await all.listOrdersForCoach(ADMIN, EMPTY_COACH)).length, 1);
 expectEqual('...and it is NOT in the first coach’s sales list', corySalesNow.some((sale) => sale.id === rivalOrderId), false);
 expectEqual('...whose count is unchanged by it', corySalesNow.length, 10);
 expectEqual(
@@ -926,23 +1009,23 @@ expectEqual(
   corySalesNow.every((sale) => sale.coach_id === COACH!.userId),
   true,
 );
-const rivalSales = await db.listOrdersForCoach(NILS, EMPTY_COACH);
+const rivalSales = await all.listOrdersForCoach(NILS, EMPTY_COACH);
 expectEqual('the second coach sees his own sale', rivalSales.length, 1);
 expectEqual('...and only his', rivalSales.every((sale) => sale.coach_id === EMPTY_COACH), true);
 // Removed again so every later assertion describes the seeded shape.
 await mutateDb((store) => {
   store.orders = store.orders.filter((order) => order.id !== rivalOrderId);
 });
-expectEqual('second-coach sale fixture removed', (await db.listOrdersForCoach(ADMIN, EMPTY_COACH)).length, 0);
+expectEqual('second-coach sale fixture removed', (await all.listOrdersForCoach(ADMIN, EMPTY_COACH)).length, 0);
 // The one that matters: the count is public, the rows are not.
 await refuses('a learner may NOT list a coach’s sales', 'forbidden', () =>
-  db.listOrdersForCoach(MARCUS, COACH!.userId),
+  all.listOrdersForCoach(MARCUS, COACH!.userId),
 );
 await refuses('a coach may not list ANOTHER coach’s sales', 'forbidden', () =>
-  db.listOrdersForCoach(COACH, EMPTY_COACH),
+  all.listOrdersForCoach(COACH, EMPTY_COACH),
 );
 await refuses('a forged admin role does not unlock a coach’s sales', 'forbidden', () =>
-  db.listOrdersForCoach({ userId: MARCUS!.userId, role: 'admin' } as unknown as Actor, COACH!.userId),
+  all.listOrdersForCoach({ userId: MARCUS!.userId, role: 'admin' } as unknown as Actor, COACH!.userId),
 );
 expectEqual(
   'the sales COUNT is still public with no actor at all',
@@ -955,12 +1038,12 @@ section('Anonymous actor is refused every mutation');
 // ---------------------------------------------------------------------------
 await refuses('anon createListing', 'unauthorized', () => db.createListing(ANON, LISTING));
 await refuses('anon createInvite', 'unauthorized', () => db.createInvite(ANON, {}));
-await refuses('anon listInvites', 'unauthorized', () => db.listInvites(ANON));
+await refuses('anon listInvites', 'unauthorized', () => all.listInvites(ANON));
 await refuses('anon revokeInvite', 'unauthorized', () => db.revokeInvite(ANON, 'JAVELIN-COACH-2026'));
 await refuses('anon redeemInviteCode', 'unauthorized', () => db.redeemInviteCode(ANON, 'JAVELIN-COACH-2026'));
 await refuses('anon createCoachApplication', 'unauthorized', () => db.createCoachApplication(ANON, APPLICATION));
 await refuses('anon getMyCoachApplication', 'unauthorized', () => db.getMyCoachApplication(ANON));
-await refuses('anon listCoachApplications', 'unauthorized', () => db.listCoachApplications(ANON));
+await refuses('anon listCoachApplications', 'unauthorized', () => all.listCoachApplications(ANON));
 await refuses('anon reviewCoachApplication', 'unauthorized', () =>
   db.reviewCoachApplication(ANON, 'any-id', 'approved'),
 );
@@ -977,7 +1060,7 @@ section('Public reads need no actor; profiles do NOT leak email');
 // returned. `allows()` on its own only proves the method did not throw — a read
 // that started returning `null` or `[]` to everyone would sail through it, and
 // that is exactly the shape of the bug a permission check is supposed to have.
-const anonSearch = await allows('anon listListings', () => db.listListings({ q: 'javelin' }), (r) => `${r.length} result(s)`);
+const anonSearch = await allows('anon listListings', () => all.listListings({ q: 'javelin' }), (r) => `${r.length} result(s)`);
 expectEqual('...and it actually returned the matching listing', anonSearch?.length, 1);
 const anonListing = await allows(
   'anon getListing',
@@ -995,7 +1078,7 @@ expectShape('getListing hands out exactly the listing columns', anonListing, LIS
 expectShape('listListings hands out the same columns', anonSearch?.[0], LISTING_WITH_COACH_COLUMNS);
 expectShape(
   'listListingsByCoach hands out the same columns',
-  (await db.listListingsByCoach(ANON, COACH!.userId))[0],
+  (await all.listListingsByCoach(ANON, COACH!.userId))[0],
   LISTING_WITH_COACH_COLUMNS,
 );
 expectEqual('a published listing carries a NULL deleted_at, not a missing one', anonListing?.deleted_at, null);
@@ -1063,17 +1146,17 @@ expectEqual('...and an admin really does get the requested row', adminRead?.id, 
 // Neither the stored slug nor the rendered label is a searchable column.
 expectEqual(
   'search does NOT match on the category slug (SQL parity)',
-  (await db.listListings({ q: 'mobility_plan' })).length,
+  (await all.listListings({ q: 'mobility_plan' })).length,
   0,
 );
 expectEqual(
   'search does NOT match on the category label (SQL parity)',
-  (await db.listListings({ q: 'Mobility plan' })).length,
+  (await all.listListings({ q: 'Mobility plan' })).length,
   0,
 );
-expectEqual('search does NOT match on coach name (SQL parity)', (await db.listListings({ q: 'Cory' })).length, 0);
-expectEqual('search matches on title', (await db.listListings({ q: 'crossover' })).length, 1);
-expectEqual('search matches on description', (await db.listListings({ q: 'check mark' })).length, 1);
+expectEqual('search does NOT match on coach name (SQL parity)', (await all.listListings({ q: 'Cory' })).length, 0);
+expectEqual('search matches on title', (await all.listListings({ q: 'crossover' })).length, 1);
+expectEqual('search matches on description', (await all.listListings({ q: 'check mark' })).length, 1);
 
 // ---------------------------------------------------------------------------
 section('createListing is gated on STORED coach_status');
@@ -1092,7 +1175,7 @@ const forgedShapes: Array<[string, Actor]> = [
 ];
 for (const [shape, actor] of forgedShapes) {
   await refuses(`forged actor (${shape}) cannot createListing`, 'forbidden', () => db.createListing(actor, LISTING));
-  await refuses(`forged actor (${shape}) cannot listInvites`, 'forbidden', () => db.listInvites(actor));
+  await refuses(`forged actor (${shape}) cannot listInvites`, 'forbidden', () => all.listInvites(actor));
 }
 
 // Malformed actors must fail closed, never be treated as a valid session.
@@ -1163,7 +1246,7 @@ expectEqual('injected id is IGNORED', injected.id === '00000000-0000-4000-8000-0
 expectEqual('injected created_at is IGNORED', injected.created_at.startsWith('1999'), false);
 expectEqual(
   'the injected coach_id did NOT gain a listing',
-  (await db.listListingsByCoach(LEARNER, LEARNER!.userId)).length,
+  (await all.listListingsByCoach(LEARNER, LEARNER!.userId)).length,
   0,
 );
 
@@ -1183,20 +1266,20 @@ if (ownProfile) {
     (await db.getProfile(LEARNER, LEARNER!.userId))?.role,
     'learner',
   );
-  await refuses('...and the mutated copy grants nothing', 'forbidden', () => db.listInvites(LEARNER));
+  await refuses('...and the mutated copy grants nothing', 'forbidden', () => all.listInvites(LEARNER));
 }
 
 // ---------------------------------------------------------------------------
 section('Non-admin is refused admin-only operations');
 // ---------------------------------------------------------------------------
-await refuses('coach listInvites', 'forbidden', () => db.listInvites(COACH));
+await refuses('coach listInvites', 'forbidden', () => all.listInvites(COACH));
 await refuses('coach createInvite', 'forbidden', () => db.createInvite(COACH, { note: 'nope' }));
 await refuses('coach revokeInvite', 'forbidden', () => db.revokeInvite(COACH, 'JAVELIN-COACH-2026'));
-await refuses('learner listInvites', 'forbidden', () => db.listInvites(LEARNER));
+await refuses('learner listInvites', 'forbidden', () => all.listInvites(LEARNER));
 await refuses('learner createInvite', 'forbidden', () => db.createInvite(LEARNER, {}));
-await refuses('learner listCoachApplications', 'forbidden', () => db.listCoachApplications(LEARNER));
+await refuses('learner listCoachApplications', 'forbidden', () => all.listCoachApplications(LEARNER));
 await refuses('coach reviewCoachApplication', 'forbidden', () => db.reviewCoachApplication(COACH, 'x', 'approved'));
-const adminInvites = await allows('admin listInvites', () => db.listInvites(ADMIN), (r) => `${r.length} invite(s)`);
+const adminInvites = await allows('admin listInvites', () => all.listInvites(ADMIN), (r) => `${r.length} invite(s)`);
 expectEqual('...and the two seeded codes are actually there', adminInvites?.length, 2);
 const minted = await allows('admin createInvite', () => db.createInvite(ADMIN, { note: 'from test' }), (r) => `minted ${r.code}`);
 expectEqual('...and it minted a real code owned by the admin', minted?.created_by, ADMIN!.userId);
@@ -1220,7 +1303,7 @@ expectEqual('D1: half two — applicant coach_status is pending_review', await c
 await refuses('pending_review actor createListing', 'forbidden', () => db.createListing(LEARNER, LISTING));
 await refuses('duplicate pending application', 'conflict', () => db.createCoachApplication(LEARNER, APPLICATION));
 
-const queue = await db.listCoachApplications(ADMIN, { status: 'pending' });
+const queue = await all.listCoachApplications(ADMIN, { status: 'pending' });
 expectEqual('admin sees 1 pending application', queue.length, 1);
 note(`queue row: ${queue[0]?.user_name} <${queue[0]?.user_email}> status=${queue[0]?.user_coach_status}`);
 
@@ -1259,7 +1342,7 @@ expectEqual('D2: admin is STILL an admin after redeeming', await roleOf(ADMIN!.u
 expectEqual('D2: admin did gain approved coach status', await coachStatusOf(ADMIN!.userId), 'approved');
 const invitesAfterRedeem = await allows(
   'D2: admin still has admin powers after redeeming',
-  () => db.listInvites(ADMIN),
+  () => all.listInvites(ADMIN),
   (r) => `${r.length} invite(s) still visible`,
 );
 expectEqual('D2: ...and the invite list is not silently empty', (invitesAfterRedeem ?? []).length >= 2, true);
@@ -1303,7 +1386,7 @@ const REJECT: Actor = { userId: rejectMe.id };
 expectEqual('signUp always creates a learner', rejectMe.role, 'learner');
 expectEqual('signUp always creates coach_status=none', rejectMe.coach_status, 'none');
 await db.createCoachApplication(REJECT, APPLICATION);
-const pendingRejected = (await db.listCoachApplications(ADMIN, { status: 'pending' }))[0]!;
+const pendingRejected = (await all.listCoachApplications(ADMIN, { status: 'pending' }))[0]!;
 await allows(
   'admin reviewCoachApplication(rejected)',
   () => db.reviewCoachApplication(ADMIN, pendingRejected.id, 'rejected', 'Not enough experience yet.'),
@@ -1375,7 +1458,7 @@ const promotedRacers = (
   await Promise.all([racerA.id, racerB.id, racerC.id].map(async (id) => await coachStatusOf(id)))
 ).filter((status) => status === 'approved');
 expectEqual('exactly one racer was promoted', promotedRacers.length, 1);
-const claimedBy = (await db.listInvites(ADMIN)).find((i) => i.code === contested.code)?.redeemed_by;
+const claimedBy = (await all.listInvites(ADMIN)).find((i) => i.code === contested.code)?.redeemed_by;
 expectEqual(
   'the invite records exactly the winning redeemer',
   claimedBy !== null && claimedBy !== undefined && [racerA.id, racerB.id, racerC.id].includes(claimedBy),
@@ -1424,7 +1507,7 @@ for (const [shape, category] of badCategories) {
 }
 expectEqual(
   'no rejected category reached the store',
-  (await db.listListings()).every((l) => (LISTING_CATEGORIES as readonly string[]).includes(l.category)),
+  (await all.listListings()).every((l) => (LISTING_CATEGORIES as readonly string[]).includes(l.category)),
   true,
 );
 // A filter value outside the taxonomy must match nothing, and specifically must
@@ -1432,7 +1515,7 @@ expectEqual(
 // whole catalogue.
 expectEqual(
   'listListings with an out-of-taxonomy category matches nothing, not everything',
-  (await db.listListings({ category: 'Track & Field' as unknown as ListingCategory })).length,
+  (await all.listListings({ category: 'Track & Field' as unknown as ListingCategory })).length,
   0,
 );
 const taxonomyProbes = await allows(
@@ -1514,7 +1597,7 @@ expectEqual(
 );
 expectEqual(
   'listListings passes a legacy category through UNCHANGED',
-  (await db.listListings()).find((l) => l.id === legacyId)?.category,
+  (await all.listListings()).find((l) => l.id === legacyId)?.category,
   LEGACY_CATEGORY,
 );
 // The blank-badge bug the read type exists to prevent: a caller indexing the
@@ -1535,12 +1618,12 @@ expectEqual(
 // control only ever offers the eight.
 expectEqual(
   'a legacy row is unreachable by its own category as a filter',
-  (await db.listListings({ category: LEGACY_CATEGORY as unknown as ListingCategory })).length,
+  (await all.listListings({ category: LEGACY_CATEGORY as unknown as ListingCategory })).length,
   0,
 );
 expectEqual(
   'a legacy row is still visible with no category filter',
-  (await db.listListings()).some((l) => l.id === legacyId),
+  (await all.listListings()).some((l) => l.id === legacyId),
   true,
 );
 expectEqual(
@@ -1579,7 +1662,7 @@ await refuses('a learner cannot review another learner’s UNREVIEWED order', 'f
 );
 expectEqual(
   'the forged review did not land',
-  (await db.listMyOrders(AISHA)).find((o) => o.id === ORDER.aishaOnClinic)?.has_review,
+  (await all.listMyOrders(AISHA)).find((o) => o.id === ORDER.aishaOnClinic)?.has_review,
   false,
 );
 
@@ -1641,7 +1724,7 @@ for (const [shape, orderId] of createReviewLookupProbes) {
 }
 expectEqual(
   '...and none of those probes wrote a review',
-  (await db.listReviewsForCoach(COACH!.userId)).length,
+  (await all.listReviewsForCoach(COACH!.userId)).length,
   8,
 );
 for (const [shape, actor] of [
@@ -1654,7 +1737,7 @@ for (const [shape, actor] of [
 }
 expectEqual(
   'no forged attempt reached the store',
-  (await db.listReviewsForCoach(COACH!.userId)).length,
+  (await all.listReviewsForCoach(COACH!.userId)).length,
   8,
 );
 
@@ -1715,7 +1798,7 @@ expectEqual('...and is still unrated', injectedTarget?.rating_average, null);
 expectEqual('the offer the ORDER bought gained it', (await db.getOfferStats(OFFER.shoulder))?.review_count, 1);
 expectEqual(
   'the learner named in the payload is not credited with it',
-  (await db.listReviewsForListing(OFFER.shoulder)).every((r) => r.author_name === 'Aisha Bello'),
+  (await all.listReviewsForListing(OFFER.shoulder)).every((r) => r.author_name === 'Aisha Bello'),
   true,
 );
 
@@ -1776,7 +1859,7 @@ expectEqual('it does not appear in the offer’s review count', offerAfter?.revi
 expectEqual('it does not move the offer rating', offerAfter?.rating_average, offerBefore?.rating_average);
 expectEqual(
   'it does not appear on the offer page',
-  (await db.listReviewsForListing(OFFER.strength)).some((r) => r.rating === 1),
+  (await all.listReviewsForListing(OFFER.strength)).some((r) => r.rating === 1),
   false,
 );
 // ...but the writing is not lost: it counts where every epoch counts.
@@ -1784,7 +1867,7 @@ const accountAfter = await db.getCoachStats(COACH!.userId);
 expectEqual('it DOES count toward the coach account', accountAfter.review_count, accountBefore.review_count + 1);
 expectEqual(
   'and it is readable on the coach profile',
-  (await db.listReviewsForCoach(COACH!.userId)).some((r) => r.rating === 1),
+  (await all.listReviewsForCoach(COACH!.userId)).some((r) => r.rating === 1),
   true,
 );
 // Remove it again so the totals below describe the seeded shape plus the two
@@ -1890,7 +1973,7 @@ const coachAfter = await db.getCoachStats(COACH!.userId);
 expectEqual('both new reviews are counted at account level', coachAfter.review_count, 10);
 expectEqual('...and changed the account rating', coachAfter.rating_average, 4.2);
 expectEqual('a review never changes a sales count', coachAfter.sales_count, 10);
-const clinicReviews = await db.listReviewsForListing(OFFER.clinic);
+const clinicReviews = await all.listReviewsForListing(OFFER.clinic);
 expectEqual('the new review renders on the offer', clinicReviews.length, 2);
 expectEqual(
   'the new review is attributed by public name only',
@@ -1942,26 +2025,26 @@ expectEqual('no row was removed from the store', await mutateDb((store) => store
 // Enumerated one by one rather than spot-checked: missing exactly one of these
 // is the failure mode, and a single "it is gone from browse" assertion would not
 // have caught it.
-expectEqual('withdrawn: absent from listListings', (await db.listListings()).some((l) => l.id === OFFER.video), false);
+expectEqual('withdrawn: absent from listListings', (await all.listListings()).some((l) => l.id === OFFER.video), false);
 expectEqual(
   'withdrawn: absent from a CATEGORY-filtered listListings',
-  (await db.listListings({ category: 'video_review' })).some((l) => l.id === OFFER.video),
+  (await all.listListings({ category: 'video_review' })).some((l) => l.id === OFFER.video),
   false,
 );
 expectEqual(
   'withdrawn: absent from a KEYWORD-filtered listListings',
-  (await db.listListings({ q: 'frame-by-frame' })).some((l) => l.id === OFFER.video),
+  (await all.listListings({ q: 'frame-by-frame' })).some((l) => l.id === OFFER.video),
   false,
 );
 expectEqual('withdrawn: getListing is null (a 404 for the public)', await db.getListing(OFFER.video), null);
 expectEqual(
   'withdrawn: absent from the PUBLIC coach offer list',
-  (await db.listListingsByCoach(ANON, COACH!.userId)).some((l) => l.id === OFFER.video),
+  (await all.listListingsByCoach(ANON, COACH!.userId)).some((l) => l.id === OFFER.video),
   false,
 );
 expectEqual(
   'withdrawn: passing an actor does NOT widen listListingsByCoach, not even for its owner',
-  (await db.listListingsByCoach(COACH, COACH!.userId)).some((l) => l.id === OFFER.video),
+  (await all.listListingsByCoach(COACH, COACH!.userId)).some((l) => l.id === OFFER.video),
   false,
 );
 expectEqual('withdrawn: no offer-level stats row', await db.getOfferStats(OFFER.video), null);
@@ -1970,7 +2053,7 @@ expectEqual(
   (await db.listOfferStats([OFFER.video, OFFER.fundamentals])).map((s) => s.listing_id).join(','),
   OFFER.fundamentals,
 );
-expectEqual('withdrawn: its offer-page review list is empty', (await db.listReviewsForListing(OFFER.video)).length, 0);
+expectEqual('withdrawn: its offer-page review list is empty', (await all.listReviewsForListing(OFFER.video)).length, 0);
 
 // --- and the inverse: the account level must NOT have noticed ---------------
 const afterWithdrawal = await db.getCoachStats(COACH!.userId);
@@ -1979,33 +2062,33 @@ expectEqual('a withdrawn offer still counts toward account reviews', afterWithdr
 expectEqual('a withdrawn offer does not move the account rating', afterWithdrawal.rating_average, beforeWithdrawal.rating_average);
 expectEqual(
   'its reviews are still readable on the coach profile',
-  (await db.listReviewsForCoach(COACH!.userId)).some((r) => r.listing_id === OFFER.video),
+  (await all.listReviewsForCoach(COACH!.userId)).some((r) => r.listing_id === OFFER.video),
   true,
 );
 expectEqual(
   '...still joined to the offer title, not to "Unknown offer"',
-  (await db.listReviewsForCoach(COACH!.userId)).find((r) => r.listing_id === OFFER.video)?.listing_title,
+  (await all.listReviewsForCoach(COACH!.userId)).find((r) => r.listing_id === OFFER.video)?.listing_title,
   withdrawnTitle,
 );
 // A buyer's purchase list must not degrade either — `listingTitle()` is the one
 // join that deliberately carries no filter.
 expectEqual(
   'a buyer of a withdrawn offer still sees what they bought',
-  (await db.listMyOrders({ userId: '00000000-0000-4000-8000-000000000013' })).find(
+  (await all.listMyOrders({ userId: '00000000-0000-4000-8000-000000000013' })).find(
     (o) => o.listing_id === OFFER.video,
   )?.listing_title,
   withdrawnTitle,
 );
 expectEqual(
   'the selling coach still sees the sale',
-  (await db.listOrdersForCoach(COACH, COACH!.userId)).some((o) => o.listing_id === OFFER.video),
+  (await all.listOrdersForCoach(COACH, COACH!.userId)).some((o) => o.listing_id === OFFER.video),
   true,
 );
 
 // --- the owner's own dashboard read ----------------------------------------
 const myListings = await allows(
   'the owner lists their own offers, withdrawn ones included',
-  () => db.listMyListings(COACH),
+  () => all.listMyListings(COACH),
   (r) => `${r.length} offer(s)`,
 );
 expectEqual(
@@ -2020,12 +2103,12 @@ expectEqual(
 );
 expectEqual('...and every row really is the actor’s own', (myListings ?? []).every((l) => l.coach_id === COACH!.userId), true);
 expectShape('listMyListings hands out the projection plus the takedown flag', myListings?.[0], OWNED_LISTING_COLUMNS);
-await refuses('anon listMyListings', 'unauthorized', () => db.listMyListings(ANON));
+await refuses('anon listMyListings', 'unauthorized', () => all.listMyListings(ANON));
 // The coach id is derived from the actor, never taken as a parameter — so there
 // is no shape of this call that reads someone else's withdrawn offers. Nils is
 // an approved coach who owns nothing, which is what makes the emptiness here a
 // real result rather than a broken read.
-expectEqual('a coach with no offers gets an empty list, not somebody else’s', (await db.listMyListings(NILS)).length, 0);
+expectEqual('a coach with no offers gets an empty list, not somebody else’s', (await all.listMyListings(NILS)).length, 0);
 for (const [shape, actor] of [
   ['coach_id claim', { userId: NILS!.userId, coach_id: COACH!.userId } as unknown as Actor],
   ['nested claims object', { userId: NILS!.userId, claims: { coach_id: COACH!.userId } } as unknown as Actor],
@@ -2033,7 +2116,7 @@ for (const [shape, actor] of [
 ] as Array<[string, Actor]>) {
   expectEqual(
     `listMyListings ignores a forged ${shape}`,
-    (await db.listMyListings(actor)).length,
+    (await all.listMyListings(actor)).length,
     0,
   );
 }
@@ -2116,7 +2199,7 @@ await refuses('withdrawing an unknown offer', 'not_found', () =>
 await refuses('withdrawing an already-withdrawn offer', 'conflict', () => db.softDeleteListing(COACH, OFFER.video));
 expectEqual(
   'none of those refusals withdrew anything',
-  (await db.listListings()).some((l) => l.id === OFFER.fundamentals),
+  (await all.listListings()).some((l) => l.id === OFFER.fundamentals),
   true,
 );
 
@@ -2130,7 +2213,7 @@ const takenDown = await allows(
   (r) => `deleted_at=${r.deleted_at ? 'set' : 'null'}`,
 );
 expectEqual('...and it really is withdrawn', typeof takenDown?.deleted_at, 'string');
-expectEqual('...gone from browse', (await db.listListings()).some((l) => l.id === OFFER.mentalPrep), false);
+expectEqual('...gone from browse', (await all.listListings()).some((l) => l.id === OFFER.mentalPrep), false);
 
 // --- restore ----------------------------------------------------------------
 await refuses('anon restoreListing', 'unauthorized', () => db.restoreListing(ANON, OFFER.video));
@@ -2148,13 +2231,13 @@ const restored = await allows(
   (r) => `deleted_at=${r.deleted_at}`,
 );
 expectEqual('...clearing the withdrawal', restored?.deleted_at, null);
-expectEqual('...back in browse', (await db.listListings()).some((l) => l.id === OFFER.video), true);
-expectEqual('...back on the public coach profile', (await db.listListingsByCoach(ANON, COACH!.userId)).some((l) => l.id === OFFER.video), true);
+expectEqual('...back in browse', (await all.listListings()).some((l) => l.id === OFFER.video), true);
+expectEqual('...back on the public coach profile', (await all.listListingsByCoach(ANON, COACH!.userId)).some((l) => l.id === OFFER.video), true);
 // NOTHING WAS DESTROYED, which is the whole justification for a soft delete.
 expectEqual('...with its sales intact', (await db.getOfferStats(OFFER.video))?.sales_count, 1);
 expectEqual('...with its reviews intact', (await db.getOfferStats(OFFER.video))?.review_count, 1);
 expectEqual('...at the same pricing generation', (await db.getListing(OFFER.video))?.price_epoch, 1);
-expectEqual('...and its offer page renders its reviews again', (await db.listReviewsForListing(OFFER.video)).length, 1);
+expectEqual('...and its offer page renders its reviews again', (await all.listReviewsForListing(OFFER.video)).length, 1);
 expectEqual('...and it is a published detail read again', (await db.getListingForViewer(ANON, OFFER.video))?.state, 'published');
 expectEqual('still no row was ever removed', await mutateDb((store) => store.listings.length), listingRowsBefore);
 // ---------------------------------------------------------------------------
@@ -2169,7 +2252,7 @@ await refuses('a coach may NOT restore an offer an admin took down', 'forbidden'
 );
 expectEqual(
   '...and it stayed down',
-  (await db.listListings()).some((l) => l.id === OFFER.mentalPrep),
+  (await all.listListings()).some((l) => l.id === OFFER.mentalPrep),
   false,
 );
 await refuses('...nor with a forged admin role', 'forbidden', () =>
@@ -2177,7 +2260,7 @@ await refuses('...nor with a forged admin role', 'forbidden', () =>
 );
 // The takedown flag reaches the dashboard as a BOOLEAN — never as the admin's
 // id, which is what makes it publishable to the coach at all.
-const ownedDuringTakedown = (await db.listMyListings(COACH)).find((l) => l.id === OFFER.mentalPrep);
+const ownedDuringTakedown = (await all.listMyListings(COACH)).find((l) => l.id === OFFER.mentalPrep);
 expectEqual('the dashboard can tell it was a takedown', ownedDuringTakedown?.withdrawn_by_admin, true);
 expectEqual(
   '...and the flag is a boolean, not an administrator id',
@@ -2189,7 +2272,7 @@ expectEqual(
 expectEqual('the owner dashboard hands out no deleted_by', 'deleted_by' in (ownedDuringTakedown ?? {}), false);
 expectEqual(
   'no row in the owner dashboard carries deleted_by',
-  (await db.listMyListings(COACH)).some((l) => 'deleted_by' in l),
+  (await all.listMyListings(COACH)).some((l) => 'deleted_by' in l),
   false,
 );
 const takedownTombstone = await db.getListingForViewer(COACH, OFFER.mentalPrep);
@@ -2205,9 +2288,9 @@ expectEqual(
 expectEqual(
   'NO listing-shaped read anywhere hands out deleted_by',
   [
-    ...(await db.listListings()),
-    ...(await db.listListingsByCoach(ANON, COACH!.userId)),
-    ...(await db.listMyListings(COACH)),
+    ...(await all.listListings()),
+    ...(await all.listListingsByCoach(ANON, COACH!.userId)),
+    ...(await all.listMyListings(COACH)),
     (await db.getListing(OFFER.fundamentals))!,
     (await db.getListingForViewer(ANON, OFFER.fundamentals))!.listing,
   ].some((l) => 'deleted_by' in l),
@@ -2217,10 +2300,10 @@ expectEqual(
 // An admin may lift a takedown as well as apply one — the same actor set as
 // softDeleteListing, so an admin is never left unable to undo their own action.
 await allows('an ADMIN may restore what they took down', () => db.restoreListing(ADMIN, OFFER.mentalPrep), (r) => `${r.id.slice(-4)} restored`);
-expectEqual('...and it is back in browse', (await db.listListings()).some((l) => l.id === OFFER.mentalPrep), true);
+expectEqual('...and it is back in browse', (await all.listListings()).some((l) => l.id === OFFER.mentalPrep), true);
 expectEqual(
   '...and it no longer reads as an admin takedown',
-  (await db.listMyListings(COACH)).find((l) => l.id === OFFER.mentalPrep)?.withdrawn_by_admin,
+  (await all.listMyListings(COACH)).find((l) => l.id === OFFER.mentalPrep)?.withdrawn_by_admin,
   false,
 );
 
@@ -2228,7 +2311,7 @@ expectEqual(
 // equally satisfied by a method that refuses everyone: a coach must still be
 // able to undo their OWN withdrawal freely.
 await db.softDeleteListing(COACH, OFFER.mentalPrep);
-const ownWithdrawal = (await db.listMyListings(COACH)).find((l) => l.id === OFFER.mentalPrep);
+const ownWithdrawal = (await all.listMyListings(COACH)).find((l) => l.id === OFFER.mentalPrep);
 expectEqual('a coach’s own withdrawal is not flagged as a takedown', ownWithdrawal?.withdrawn_by_admin, false);
 const selfRestored = await allows(
   'a coach MAY restore an offer they withdrew themselves',
@@ -2236,7 +2319,7 @@ const selfRestored = await allows(
   (r) => `deleted_at=${r.deleted_at}`,
 );
 expectEqual('...and it is genuinely back', selfRestored?.deleted_at, null);
-expectEqual('...and back in browse', (await db.listListings()).some((l) => l.id === OFFER.mentalPrep), true);
+expectEqual('...and back in browse', (await all.listListings()).some((l) => l.id === OFFER.mentalPrep), true);
 // Restoring clears the ATTRIBUTION as well as the timestamp. `deleted_by` is
 // projected out of every read, so the store is the only place this is
 // observable — and it is worth observing: `deleted_at` and `deleted_by` are one
@@ -2260,13 +2343,13 @@ await allows(
   () => db.restoreListing(ADMIN, OFFER.mentalPrep),
   (r) => `deleted_at=${r.deleted_at}`,
 );
-expectEqual('...leaving it published', (await db.listListings()).some((l) => l.id === OFFER.mentalPrep), true);
+expectEqual('...leaving it published', (await all.listListings()).some((l) => l.id === OFFER.mentalPrep), true);
 // Restoring clears the attribution with the timestamp, so the NEXT withdrawal is
 // judged on its own and not against a stale one.
 await db.softDeleteListing(COACH, OFFER.mentalPrep);
 expectEqual(
   'after an admin restore, the coach’s next withdrawal is their own again',
-  (await db.listMyListings(COACH)).find((l) => l.id === OFFER.mentalPrep)?.withdrawn_by_admin,
+  (await all.listMyListings(COACH)).find((l) => l.id === OFFER.mentalPrep)?.withdrawn_by_admin,
   false,
 );
 await allows(
@@ -2299,7 +2382,7 @@ await refuses('an unattributed withdrawal is still not a stranger’s to restore
 await refuses('...nor a learner’s', 'forbidden', () => db.restoreListing(MARCUS, OFFER.mentalPrep));
 expectEqual(
   '...and it stayed withdrawn',
-  (await db.listListings()).some((l) => l.id === OFFER.mentalPrep),
+  (await all.listListings()).some((l) => l.id === OFFER.mentalPrep),
   false,
 );
 // ...but the OWNER may restore it. The takedown rule fails OPEN on a null
@@ -2310,7 +2393,7 @@ await allows(
   () => db.restoreListing(COACH, OFFER.mentalPrep),
   (r) => `deleted_at=${r.deleted_at}`,
 );
-expectEqual('...and it is back', (await db.listListings()).some((l) => l.id === OFFER.mentalPrep), true);
+expectEqual('...and it is back', (await all.listListings()).some((l) => l.id === OFFER.mentalPrep), true);
 const coachAfterRestore = await db.getCoachStats(COACH!.userId);
 expectEqual('a full withdraw/restore cycle left the account totals identical', coachAfterRestore.sales_count, beforeWithdrawal.sales_count);
 expectEqual('...including the review count', coachAfterRestore.review_count, beforeWithdrawal.review_count);
@@ -2507,7 +2590,7 @@ const afterCut = await db.getOfferStats(lifecycle.id);
 expectEqual('a price CUT does not archive the sale', afterCut?.sales_count, 1);
 expectEqual('a price CUT does not archive the review', afterCut?.review_count, 1);
 expectEqual('a price CUT does not archive the rating', afterCut?.rating_average, 5);
-expectEqual('...and the reviews still render on the offer page', (await db.listReviewsForListing(lifecycle.id)).length, 1);
+expectEqual('...and the reviews still render on the offer page', (await all.listReviewsForListing(lifecycle.id)).length, 1);
 
 // A CONTENT-ONLY rewrite. The documented, accepted limit: it keeps every review.
 await db.updateListing(COACH, lifecycle.id, {
@@ -2531,7 +2614,7 @@ expectEqual('a price INCREASE archives the sale', afterRise?.sales_count, 0);
 expectEqual('a price INCREASE archives the review', afterRise?.review_count, 0);
 expectEqual('...and the offer reads as unrated, not as rated zero', afterRise?.rating_average, null);
 expectEqual('...and it is not the number zero', afterRise?.rating_average === 0, false);
-expectEqual('...the offer page shows no reviews', (await db.listReviewsForListing(lifecycle.id)).length, 0);
+expectEqual('...the offer page shows no reviews', (await all.listReviewsForListing(lifecycle.id)).length, 0);
 // NOTHING WAS DELETED. The account level is the proof.
 const accountAfterRepricing = await db.getCoachStats(COACH!.userId);
 expectEqual('the archived sale still counts toward the coach account', accountAfterRepricing.sales_count, accountBeforeRepricing.sales_count);
@@ -2539,7 +2622,7 @@ expectEqual('the archived review still counts toward the coach account', account
 expectEqual('...and the account rating is untouched by the price rise', accountAfterRepricing.rating_average, accountBeforeRepricing.rating_average);
 expectEqual(
   '...and the archived review is still readable on the coach profile',
-  (await db.listReviewsForCoach(COACH!.userId)).some((r) => r.listing_id === lifecycle.id),
+  (await all.listReviewsForCoach(COACH!.userId)).some((r) => r.listing_id === lifecycle.id),
   true,
 );
 
@@ -2575,7 +2658,7 @@ await db.updateListing(NILS, rivalListing.id, {
 // Proof the fixture is real: the rival's revision EXISTS in the store. Without
 // this, "absent from Cory's result" would also hold if the row were never
 // written.
-const rivalRevisions = await db.listListingRevisions(NILS, rivalListing.id);
+const rivalRevisions = await all.listListingRevisions(NILS, rivalListing.id);
 expectEqual('the rival coach’s offer really does have a revision', rivalRevisions.length, 1);
 expectEqual(
   '...holding the title it used to have',
@@ -2590,7 +2673,7 @@ expectEqual(
 
 const revisions = await allows(
   'the OWNER may read their offer’s edit history',
-  () => db.listListingRevisions(COACH, lifecycle.id),
+  () => all.listListingRevisions(COACH, lifecycle.id),
   (r) => `${r.length} revision(s)`,
 );
 expectEqual('...and it is not empty (every edit above appended one)', (revisions?.length ?? 0) > 0, true);
@@ -2655,7 +2738,7 @@ expectEqual(
 const revisionCountBefore = revisions?.length ?? 0;
 const oldestBefore = revisions?.[revisionCountBefore - 1]?.title;
 await db.updateListing(COACH, lifecycle.id, { ...EDIT, title: 'One more edit', price_cents: 501 });
-const revisionsAfter = await db.listListingRevisions(COACH, lifecycle.id);
+const revisionsAfter = await all.listListingRevisions(COACH, lifecycle.id);
 expectEqual('another edit appends exactly one revision', revisionsAfter.length, revisionCountBefore + 1);
 expectEqual('...and rewrites none of the existing ones', revisionsAfter[revisionsAfter.length - 1]?.title, oldestBefore);
 
@@ -2666,7 +2749,7 @@ expectEqual('...and rewrites none of the existing ones', revisionsAfter[revision
 // survived green. "Somebody saved this offer at this time" is a true and useful
 // fact, and the alternative is a subtle comparison that is one more thing to
 // get wrong.
-const beforeNoop = await db.listListingRevisions(COACH, lifecycle.id);
+const beforeNoop = await all.listListingRevisions(COACH, lifecycle.id);
 const currentRow = (await db.getListing(lifecycle.id))!;
 await allows(
   'an edit that changes NOTHING is still accepted',
@@ -2679,7 +2762,7 @@ await allows(
     }),
   (r) => `"${r.title}" unchanged`,
 );
-const afterNoop = await db.listListingRevisions(COACH, lifecycle.id);
+const afterNoop = await all.listListingRevisions(COACH, lifecycle.id);
 expectEqual('...and it still appends a revision', afterNoop.length, beforeNoop.length + 1);
 expectEqual(
   '...holding the same values, since nothing changed',
@@ -2693,23 +2776,23 @@ expectEqual('...and the no-op did not move the epoch', (await db.getListing(life
 // assertions that follow describe the wrong number.
 const revisionBaseline = afterNoop.length;
 
-await refuses('anon listListingRevisions', 'unauthorized', () => db.listListingRevisions(ANON, lifecycle.id));
+await refuses('anon listListingRevisions', 'unauthorized', () => all.listListingRevisions(ANON, lifecycle.id));
 await refuses('a learner may not read an offer’s edit history', 'forbidden', () =>
-  db.listListingRevisions(MARCUS, lifecycle.id),
+  all.listListingRevisions(MARCUS, lifecycle.id),
 );
 // Nils is an approved coach: the only thing he is not is the owner of this offer.
 await refuses('another approved coach may not read it', 'forbidden', () =>
-  db.listListingRevisions(NILS, lifecycle.id),
+  all.listListingRevisions(NILS, lifecycle.id),
 );
 await refuses('a forged admin role does not unlock it', 'forbidden', () =>
-  db.listListingRevisions({ userId: MARCUS!.userId, role: 'admin' } as unknown as Actor, lifecycle.id),
+  all.listListingRevisions({ userId: MARCUS!.userId, role: 'admin' } as unknown as Actor, lifecycle.id),
 );
 await refuses('reading the history of an offer that does not exist', 'not_found', () =>
-  db.listListingRevisions(COACH, '00000000-0000-4000-8000-0000000dead8'),
+  all.listListingRevisions(COACH, '00000000-0000-4000-8000-0000000dead8'),
 );
 const adminRevisions = await allows(
   'an ADMIN may read it (moderation)',
-  () => db.listListingRevisions(ADMIN, lifecycle.id),
+  () => all.listListingRevisions(ADMIN, lifecycle.id),
   (r) => `${r.length} revision(s)`,
 );
 expectEqual('...and sees the same history, not an empty list', adminRevisions?.length, revisionBaseline);
@@ -2719,7 +2802,7 @@ expectEqual('...and sees the same history, not an empty list', adminRevisions?.l
 await db.softDeleteListing(COACH, lifecycle.id);
 expectEqual(
   'a withdrawn offer’s history is still readable by its owner',
-  (await db.listListingRevisions(COACH, lifecycle.id)).length,
+  (await all.listListingRevisions(COACH, lifecycle.id)).length,
   revisionBaseline,
 );
 // EDITING A WITHDRAWN OFFER IS ALLOWED, and an earlier revision of this round
@@ -2736,18 +2819,18 @@ const editedWhileWithdrawn = await allows(
 expectEqual('...and the edit really landed', editedWhileWithdrawn?.title, 'Edited while withdrawn');
 expectEqual(
   '...it appended a revision like any other edit',
-  (await db.listListingRevisions(COACH, lifecycle.id)).length,
+  (await all.listListingRevisions(COACH, lifecycle.id)).length,
   revisionBaseline + 1,
 );
 // The load-bearing part: editing must not quietly republish it.
 expectEqual('...the offer is STILL withdrawn', editedWhileWithdrawn?.deleted_at !== null, true);
-expectEqual('...still absent from browse', (await db.listListings()).some((l) => l.id === lifecycle.id), false);
+expectEqual('...still absent from browse', (await all.listListings()).some((l) => l.id === lifecycle.id), false);
 expectEqual('...still a 404 for the public', await db.getListing(lifecycle.id), null);
 expectShape('...and the returned row still carries no deleted_by', editedWhileWithdrawn, LISTING_WITH_COACH_COLUMNS);
 await db.restoreListing(COACH, lifecycle.id);
 expectEqual(
   'withdrawing and restoring appends no revision at all',
-  (await db.listListingRevisions(COACH, lifecycle.id)).length,
+  (await all.listListingRevisions(COACH, lifecycle.id)).length,
   revisionBaseline + 1,
 );
 
@@ -2814,12 +2897,12 @@ expectEqual(
 );
 expectEqual(
   '...and is readable on the coach profile',
-  (await db.listReviewsForCoach(COACH!.userId)).some((r) => r.rating === 2 && r.listing_id === OFFER.shoulder),
+  (await all.listReviewsForCoach(COACH!.userId)).some((r) => r.rating === 2 && r.listing_id === OFFER.shoulder),
   true,
 );
 // ...and nowhere offer-level, because there is no offer page.
 expectEqual('...but there is no offer-level stats row to move', await db.getOfferStats(OFFER.shoulder), null);
-expectEqual('...and no offer-page review list', (await db.listReviewsForListing(OFFER.shoulder)).length, 0);
+expectEqual('...and no offer-page review list', (await all.listReviewsForListing(OFFER.shoulder)).length, 0);
 // The self-dealing check must still be the thing that refuses a coach — NOT a
 // not_found from a filtered lookup. This is the other half of what the missing
 // filter protects: filtering would turn `forbidden` into `not_found` here.
@@ -2847,7 +2930,7 @@ await mutateDb((store) => {
   );
 });
 expectEqual('withdrawn-review fixtures removed', (await db.getOrder(ADMIN, withdrawnReviewOrderId)) === null, true);
-expectEqual('...and the offer is back on sale', (await db.listListings()).some((l) => l.id === OFFER.shoulder), true);
+expectEqual('...and the offer is back on sale', (await all.listListings()).some((l) => l.id === OFFER.shoulder), true);
 
 // ---------------------------------------------------------------------------
 section('A pre-soft-delete store upgrades to a NULL deleted_at, not to undefined');
@@ -2911,18 +2994,18 @@ expectEqual(
 expectEqual('...and specifically NOT undefined, which a dashboard reads as withdrawn', upgraded?.deleted_at === undefined, false);
 expectEqual(
   '...so a dashboard branching on `deleted_at !== null` sees it as PUBLISHED',
-  (await db.listMyListings(COACH)).find((l) => l.id === preSoftDeleteId)?.deleted_at !== null,
+  (await all.listMyListings(COACH)).find((l) => l.id === preSoftDeleteId)?.deleted_at !== null,
   false,
 );
 expectEqual(
   '...and it really is on sale in browse, so the two surfaces agree',
-  (await db.listListings()).some((l) => l.id === preSoftDeleteId),
+  (await all.listListings()).some((l) => l.id === preSoftDeleteId),
   true,
 );
 // It still withdraws normally once upgraded — the backfill is a repair, not a
 // quarantine.
 await allows('a pre-soft-delete row can still be withdrawn', () => db.softDeleteListing(COACH, preSoftDeleteId), (r) => `deleted_at=${r.deleted_at ? 'set' : 'null'}`);
-expectEqual('...and it leaves browse', (await db.listListings()).some((l) => l.id === preSoftDeleteId), false);
+expectEqual('...and it leaves browse', (await all.listListings()).some((l) => l.id === preSoftDeleteId), false);
 await mutateDb((store) => {
   store.listings = store.listings.filter((l) => l.id !== preSoftDeleteId);
 });
@@ -3003,7 +3086,7 @@ await grantAdmin(shadowAdmin.id);
 expectEqual('F2 fixture: an admin who is NOT an approved coach — role', await roleOf(shadowAdmin.id), 'admin');
 expectEqual('F2 fixture: ...and coach_status', await coachStatusOf(shadowAdmin.id), 'none');
 
-const directory = await allows('anon listCoaches', () => db.listCoaches(), (r) => `${r.length} coach(es)`);
+const directory = await allows('anon listCoaches', () => all.listCoaches(), (r) => `${r.length} coach(es)`);
 const directoryIds = (directory ?? []).map((c) => c.id);
 // Non-emptiness first: every `.every()` below is vacuously true over `[]`, so a
 // method that returned nothing would otherwise sail through the whole block.
@@ -3099,22 +3182,22 @@ expectEqual(
 // ---------------------------------------------------------------------------
 section('Coach directory — the name search matches full_name and nothing else');
 // ---------------------------------------------------------------------------
-const byName = await db.listCoaches({ q: 'vaughn' });
+const byName = await all.listCoaches({ q: 'vaughn' });
 expectEqual('search is case-insensitive on full_name', byName.length, 1);
 expectEqual('...and returns the coach it named', byName[0]?.id, COACH!.userId);
-expectEqual('a keyword matching nobody returns []', (await db.listCoaches({ q: 'zzzznobody' })).length, 0);
+expectEqual('a keyword matching nobody returns []', (await all.listCoaches({ q: 'zzzznobody' })).length, 0);
 // SQL parity: `profiles_full_name_trgm_idx` is the only index Postgres can
 // serve this from, so matching the headline or the bio here would make the mock
 // the more capable of the two backends and change results at the swap. Both
 // probes are strings that ARE present in the seeded coach's copy.
 expectEqual(
   'search does NOT match the headline (SQL parity)',
-  (await db.listCoaches({ q: 'technique' })).length,
+  (await all.listCoaches({ q: 'technique' })).length,
   0,
 );
 expectEqual(
   'search does NOT match the bio (SQL parity)',
-  (await db.listCoaches({ q: 'eleven seasons' })).length,
+  (await all.listCoaches({ q: 'eleven seasons' })).length,
   0,
 );
 // The approval predicate applies WITH a query too, not only without one. A
@@ -3122,12 +3205,12 @@ expectEqual(
 // assertion above and fail this one.
 expectEqual(
   'a query cannot reach a REJECTED applicant by name',
-  (await db.listCoaches({ q: 'Rhea' })).length,
+  (await all.listCoaches({ q: 'Rhea' })).length,
   0,
 );
 expectEqual(
   'a query cannot reach a PENDING applicant by name',
-  (await db.listCoaches({ q: 'Pia Pending' })).length,
+  (await all.listCoaches({ q: 'Pia Pending' })).length,
   0,
 );
 
@@ -3251,8 +3334,8 @@ section('The coach PROFILE page reads — withdrawal, epochs, and deleted_by');
 // linkable" would be vacuously true and the withdrawn branch would be dead code
 // nobody noticed had stopped being reachable.
 const profileStatsBefore = await db.getCoachStats(COACH!.userId);
-const profileReviewsBefore = await db.listReviewsForCoach(COACH!.userId);
-const profileOffersBefore = await db.listListingsByCoach(ANON, COACH!.userId);
+const profileReviewsBefore = await all.listReviewsForCoach(COACH!.userId);
+const profileOffersBefore = await all.listListingsByCoach(ANON, COACH!.userId);
 // A positive control first: with nothing withdrawn, every reviewed offer IS in
 // the public list, so the assertion after the withdrawal is a real change.
 const publishedBefore = new Set(profileOffersBefore.map((l) => l.id));
@@ -3270,8 +3353,8 @@ expectEqual('fixture: the offer about to be withdrawn really does carry a review
 await allows('withdraw one of the coach\'s reviewed offers', () => db.softDeleteListing(COACH, OFFER.video), (r) => `deleted_at=${r.deleted_at ? 'set' : 'null'}`);
 
 const profileStatsAfter = await db.getCoachStats(COACH!.userId);
-const profileReviewsAfter = await db.listReviewsForCoach(COACH!.userId);
-const profileOffersAfter = await db.listListingsByCoach(ANON, COACH!.userId);
+const profileReviewsAfter = await all.listReviewsForCoach(COACH!.userId);
+const profileOffersAfter = await all.listListingsByCoach(ANON, COACH!.userId);
 
 // The offer list — the only one of the three that moves.
 expectEqual('the withdrawn offer leaves the profile offer list', profileOffersAfter.some((l) => l.id === OFFER.video), false);
@@ -3306,7 +3389,7 @@ expectEqual('...and that offer is a 404 for the public', await db.getListing(OFF
 
 // The OFFER-level pair, for contrast: they DO vanish.
 expectEqual('offer-level stats for a withdrawn offer are gone entirely', await db.getOfferStats(OFFER.video), null);
-expectEqual('...and its offer-page review list is empty', (await db.listReviewsForListing(OFFER.video)).length, 0);
+expectEqual('...and its offer-page review list is empty', (await all.listReviewsForListing(OFFER.video)).length, 0);
 
 // `deleted_by` holds an id, and after a takedown an ADMINISTRATOR's. None of the
 // three coach-profile reads may carry it. Asserted at each of them by name
@@ -3321,12 +3404,12 @@ expectShape('...and the offers are exactly the public listing shape', profileOff
 expectShape('...the reviews are exactly the public review shape', profileReviewsAfter[0], PUBLIC_REVIEW_WITH_LISTING_COLUMNS);
 expectEqual(
   'no public coach row carries deleted_by either',
-  (await db.listCoaches()).some((c) => 'deleted_by' in c),
+  (await all.listCoaches()).some((c) => 'deleted_by' in c),
   false,
 );
 
 await allows('restore the offer for the rest of the suite', () => db.restoreListing(COACH, OFFER.video), (r) => `deleted_at=${r.deleted_at}`);
-expectEqual('...and the profile offer list is whole again', (await db.listListingsByCoach(ANON, COACH!.userId)).length, profileOffersBefore.length);
+expectEqual('...and the profile offer list is whole again', (await all.listListingsByCoach(ANON, COACH!.userId)).length, profileOffersBefore.length);
 expectEqual(
   '...with account-level stats still untouched by the whole cycle',
   JSON.stringify(await db.getCoachStats(COACH!.userId)),
@@ -3426,7 +3509,7 @@ expectEqual('F1: ...and the edit really landed', adminAfterOwnEdit?.coach_headli
 // every admin operation, which is what made the original bug so expensive.
 await allows(
   'F1: ...and they still hold admin powers after editing their own profile',
-  () => db.listInvites(ADMIN),
+  () => all.listInvites(ADMIN),
   (r) => `${r.length} invite(s) still visible`,
 );
 // Crafted extra keys, cast past the type: a Server Action is a public endpoint
@@ -3510,7 +3593,7 @@ const copyApplicant = await signUpProfile({ email: 'copy-me@javelin.test', passw
 const COPY: Actor = { userId: copyApplicant.id };
 await db.createCoachApplication(COPY, { ...APPLICATION, bio: APPLICANT_BIO });
 expectEqual('before approval the applicant is not in the directory at all', await db.getPublicCoach(copyApplicant.id), null);
-const copyApp = (await db.listCoachApplications(ADMIN, { status: 'pending' })).find((a) => a.user_id === copyApplicant.id)!;
+const copyApp = (await all.listCoachApplications(ADMIN, { status: 'pending' })).find((a) => a.user_id === copyApplicant.id)!;
 await allows('admin approves them', () => db.reviewCoachApplication(ADMIN, copyApp.id, 'approved'), (r) => `status=${r.status}`);
 const copiedCoach = await db.getPublicCoach(copyApplicant.id);
 expectEqual('the application bio is now their PUBLIC bio', copiedCoach?.coach_bio, APPLICANT_BIO);
@@ -3543,7 +3626,7 @@ await db.createCoachApplication({ userId: keepBioUser.id }, { ...APPLICATION, bi
 await mutateDb((store) => {
   store.profiles.find((p) => p.id === keepBioUser.id)!.coach_bio = 'THE COACH OWN WORDS';
 });
-const keepApp = (await db.listCoachApplications(ADMIN, { status: 'pending' })).find((a) => a.user_id === keepBioUser.id)!;
+const keepApp = (await all.listCoachApplications(ADMIN, { status: 'pending' })).find((a) => a.user_id === keepBioUser.id)!;
 await db.reviewCoachApplication(ADMIN, keepApp.id, 'approved');
 expectEqual(
   'approval does not overwrite a bio the coach already has',
@@ -3555,7 +3638,7 @@ expectEqual(
 // rejected applicant has no public coach row.
 const rejectedCopyUser = await signUpProfile({ email: 'reject-copy@javelin.test', password: 'password123', fullName: 'Rob Rejected' });
 await db.createCoachApplication({ userId: rejectedCopyUser.id }, { ...APPLICATION, bio: 'REJECTED BIO that must never be published anywhere.' });
-const rejApp = (await db.listCoachApplications(ADMIN, { status: 'pending' })).find((a) => a.user_id === rejectedCopyUser.id)!;
+const rejApp = (await all.listCoachApplications(ADMIN, { status: 'pending' })).find((a) => a.user_id === rejectedCopyUser.id)!;
 await db.reviewCoachApplication(ADMIN, rejApp.id, 'rejected', 'Not yet.');
 expectEqual('a REJECTED application copies nothing into the profile', (await db.getProfile(ADMIN, rejectedCopyUser.id))?.coach_bio, null);
 expectEqual('...and there is no public coach row to read it from', await db.getPublicCoach(rejectedCopyUser.id), null);
@@ -3568,7 +3651,7 @@ expectEqual(
   (await db.getPublicCoach(INVITEE.userId))?.coach_bio,
   null,
 );
-expectEqual('...but they ARE in the directory', (await db.listCoaches()).some((c) => c.id === INVITEE.userId), true);
+expectEqual('...but they ARE in the directory', (await all.listCoaches()).some((c) => c.id === INVITEE.userId), true);
 
 // ---------------------------------------------------------------------------
 section('E3-F10 pickup — getMyCoachApplication is scoped to the actor');
@@ -3619,10 +3702,10 @@ section('E3-F11 pickup — listCoachApplications honours its status filter');
 // Admin-only and a convenience rather than an authorization predicate, but it
 // was ignored-undetected: the fixtures only ever held one status at a time.
 // By this point the store holds all three, which is what lets these bite.
-const allApps = await db.listCoachApplications(ADMIN);
-const pendingApps = await db.listCoachApplications(ADMIN, { status: 'pending' });
-const approvedApps = await db.listCoachApplications(ADMIN, { status: 'approved' });
-const rejectedApps = await db.listCoachApplications(ADMIN, { status: 'rejected' });
+const allApps = await all.listCoachApplications(ADMIN);
+const pendingApps = await all.listCoachApplications(ADMIN, { status: 'pending' });
+const approvedApps = await all.listCoachApplications(ADMIN, { status: 'approved' });
+const rejectedApps = await all.listCoachApplications(ADMIN, { status: 'rejected' });
 // Non-emptiness on all three, or `.every()` below is vacuous and a filter that
 // returned nothing would pass.
 expectEqual('F11: there is at least one application in each of the three statuses', `${pendingApps.length > 0}/${approvedApps.length > 0}/${rejectedApps.length > 0}`, 'true/true/true');
@@ -3636,7 +3719,7 @@ expectEqual('F11: status=rejected returns only rejected', rejectedApps.every((a)
 expectEqual('F11: the three filtered lists partition the unfiltered one', pendingApps.length + approvedApps.length + rejectedApps.length, allApps.length);
 expectEqual('F11: and each filtered list is strictly smaller than the whole', pendingApps.length < allApps.length && approvedApps.length < allApps.length && rejectedApps.length < allApps.length, true);
 note(`${allApps.length} applications: ${pendingApps.length} pending, ${approvedApps.length} approved, ${rejectedApps.length} rejected`);
-await refuses('a learner listCoachApplications', 'forbidden', () => db.listCoachApplications({ userId: second.id }, { status: 'pending' }));
+await refuses('a learner listCoachApplications', 'forbidden', () => all.listCoachApplications({ userId: second.id }, { status: 'pending' }));
 
 // ---------------------------------------------------------------------------
 section('A pre-coach-columns store upgrades to NULL, not to undefined');
@@ -3797,7 +3880,7 @@ await db.createCoachApplication({ userId: blankBioUser.id }, { ...APPLICATION, b
 await mutateDb((store) => {
   store.profiles.find((p) => p.id === blankBioUser.id)!.coach_bio = '   \n\t  ';
 });
-const blankApp = (await db.listCoachApplications(ADMIN, { status: 'pending' })).find((a) => a.user_id === blankBioUser.id)!;
+const blankApp = (await all.listCoachApplications(ADMIN, { status: 'pending' })).find((a) => a.user_id === blankBioUser.id)!;
 await db.reviewCoachApplication(ADMIN, blankApp.id, 'approved');
 expectEqual(
   'F14: a whitespace-only profile bio counts as empty, so the copy still fires',
@@ -3942,7 +4025,7 @@ expectEqual('...and the path is the one that was sent', attached?.asset_path, AS
 const publicView = await db.getListing(instantOffer!.id);
 expectShape('the PUBLIC read of that same offer still has no asset_path', publicView, LISTING_WITH_COACH_COLUMNS);
 expectEqual('...while still publishing the mode, which IS public', publicView?.fulfilment, 'instant');
-const ownRows = await db.listMyListings(COACH);
+const ownRows = await all.listMyListings(COACH);
 expectEqual(
   'the owner’s own dashboard row carries the path',
   ownRows.find((row) => row.id === instantOffer!.id)?.asset_path,
@@ -4061,7 +4144,7 @@ await allows(
     }),
   (r) => `fulfilment=${r.fulfilment}`,
 );
-const switched = (await db.listMyListings(COACH)).find((row) => row.id === switchable!.id);
+const switched = (await all.listMyListings(COACH)).find((row) => row.id === switchable!.id);
 expectEqual('...the mode really changed', switched?.fulfilment, 'personalised');
 // The half a CHECK constraint enforces in SQL: a personalised offer may not
 // hold a path, so the switch has to clear it in the same write.
@@ -4089,7 +4172,7 @@ await refuses('...and a DIFFERENT learner can no longer claim it', 'invalid', ()
 );
 // The buyer who claimed it while the file was there keeps their order. A
 // withdrawn file is not a repossession.
-const keptOrder = (await db.listMyOrders(AISHA)).find((o) => o.listing_id === unreadyOffer!.id);
+const keptOrder = (await all.listMyOrders(AISHA)).find((o) => o.listing_id === unreadyOffer!.id);
 expectEqual('the earlier buyer still holds their order', typeof keptOrder?.id, 'string');
 
 // ---------------------------------------------------------------------------
@@ -4335,7 +4418,7 @@ expectEqual(
 );
 // The name is published on every review its author has written, so a rename is
 // a content change and must reach them.
-const renamedReviews = await db.listReviewsForCoach(COACH!.userId);
+const renamedReviews = await all.listReviewsForCoach(COACH!.userId);
 expectEqual(
   'a rename is not retroactively stamped onto other people’s reviews',
   renamedReviews.some((r) => r.author_name === 'Samantha Setting'),
@@ -4615,7 +4698,7 @@ expectEqual('...nor a coach at all', anonymised?.role, 'learner');
 expectEqual('and the row is marked deleted', typeof anonymised?.deleted_at, 'string');
 expectEqual(
   'the departed coach is out of the directory',
-  (await db.listCoaches()).some((c) => c.id === doomedCoach!.id),
+  (await all.listCoaches()).some((c) => c.id === doomedCoach!.id),
   false,
 );
 
@@ -4656,7 +4739,7 @@ const modOffer = await allows(
   (r) => r.id,
 );
 await allows('...claimed by a learner', () => db.createOrder(AISHA, modOffer!.id), (o) => o.id);
-const modOrder = (await db.listMyOrders(AISHA)).find((o) => o.listing_id === modOffer!.id);
+const modOrder = (await all.listMyOrders(AISHA)).find((o) => o.listing_id === modOffer!.id);
 const modReview = await allows(
   '...and reviewed',
   () => db.createReview(AISHA, { order_id: modOrder!.id, rating: 2, body: 'A review written to be removed.' }),
@@ -4671,10 +4754,10 @@ for (const [who, actor] of [
   ['another coach', NILS],
 ] as Array<[string, Actor]>) {
   await refuses(`${who} cannot read the moderation queue`, actor === null ? 'unauthorized' : 'forbidden', () =>
-    db.listReviewsForModeration(actor),
+    all.listReviewsForModeration(actor),
   );
   await refuses(`${who} cannot read the removal log`, actor === null ? 'unauthorized' : 'forbidden', () =>
-    db.listRemovedReviews(actor),
+    all.listRemovedReviews(actor),
   );
   await refuses(`${who} cannot remove a review`, actor === null ? 'unauthorized' : 'forbidden', () =>
     db.removeReview(actor, modReview!.id),
@@ -4685,14 +4768,14 @@ for (const [who, actor] of [
 expectEqual('...and the refused coach really does own the offer', modOffer?.coach_id, COACH!.userId);
 expectEqual(
   'no refused removal reached the store',
-  (await db.listReviewsForListing(modOffer!.id)).length,
+  (await all.listReviewsForListing(modOffer!.id)).length,
   1,
 );
 
 // --- the admin's view ------------------------------------------------------
 const modQueue = await allows(
   'an ADMIN can read the queue',
-  () => db.listReviewsForModeration(ADMIN),
+  () => all.listReviewsForModeration(ADMIN),
   (rows) => `${rows.length} review(s)`,
 );
 const queued = modQueue?.find((row) => row.id === modReview!.id);
@@ -4737,22 +4820,22 @@ expectEqual(
 expectEqual('...and keeps the sale', modCoachAfter.sales_count, modCoachBefore.sales_count);
 
 // Gone from every public read, not merely from the rollup.
-expectEqual('the review is gone from the offer page read', (await db.listReviewsForListing(modOffer!.id)).length, 0);
+expectEqual('the review is gone from the offer page read', (await all.listReviewsForListing(modOffer!.id)).length, 0);
 expectEqual(
   '...and from the coach profile read',
-  (await db.listReviewsForCoach(COACH!.userId)).some((r) => r.body === 'A review written to be removed.'),
+  (await all.listReviewsForCoach(COACH!.userId)).some((r) => r.body === 'A review written to be removed.'),
   false,
 );
 expectEqual(
   '...and from the moderation queue itself',
-  (await db.listReviewsForModeration(ADMIN)).some((r) => r.id === modReview!.id),
+  (await all.listReviewsForModeration(ADMIN)).some((r) => r.id === modReview!.id),
   false,
 );
 
 // --- the archive -----------------------------------------------------------
 const log = await allows(
   'the removal is in the log',
-  () => db.listRemovedReviews(ADMIN),
+  () => all.listRemovedReviews(ADMIN),
   (rows) => `${rows.length} entr(y|ies)`,
 );
 const logged = log?.find((row) => row.review_id === modReview!.id);
@@ -4775,20 +4858,20 @@ await refuses('the same review cannot be removed twice', 'not_found', () =>
 await refuses('an unknown id is not_found', 'not_found', () =>
   db.removeReview(ADMIN, '00000000-0000-4000-8000-0000000000ff'),
 );
-expectEqual('...and neither attempt added a second log entry', log?.length, (await db.listRemovedReviews(ADMIN)).length);
+expectEqual('...and neither attempt added a second log entry', log?.length, (await all.listRemovedReviews(ADMIN)).length);
 
 // A removal with no reason records null rather than an empty string.
 const secondOrder = await allows(
   'a second reviewable purchase',
   async () => {
     await db.createOrder(MARCUS, modOffer!.id);
-    const order = (await db.listMyOrders(MARCUS)).find((o) => o.listing_id === modOffer!.id);
+    const order = (await all.listMyOrders(MARCUS)).find((o) => o.listing_id === modOffer!.id);
     return db.createReview(MARCUS, { order_id: order!.id, rating: 5, body: 'Removed with no reason given.' });
   },
   (r) => r.id,
 );
 await allows('...removed with a blank reason', () => db.removeReview(ADMIN, secondOrder!.id, '   '), () => 'removed');
-const blank = (await db.listRemovedReviews(ADMIN)).find((row) => row.review_id === secondOrder!.id);
+const blank = (await all.listRemovedReviews(ADMIN)).find((row) => row.review_id === secondOrder!.id);
 expectEqual('a whitespace-only reason is stored as null', blank?.reason, null);
 
 // ---------------------------------------------------------------------------
@@ -4811,7 +4894,7 @@ const repOffer = await allows(
   (r) => r.id,
 );
 await allows('...claimed by a learner', () => db.createOrder(AISHA, repOffer!.id), (o) => o.id);
-const repOrder = (await db.listMyOrders(AISHA)).find((o) => o.listing_id === repOffer!.id);
+const repOrder = (await all.listMyOrders(AISHA)).find((o) => o.listing_id === repOffer!.id);
 const repReview = await allows(
   '...and reviewed',
   () =>
@@ -4914,10 +4997,10 @@ for (const [who, actor] of [
   ['an approved coach', COACH],
 ] as Array<[string, Actor]>) {
   await refuses(`${who} cannot read the queue`, actor === null ? 'unauthorized' : 'forbidden', () =>
-    db.listReports(actor),
+    all.listReports(actor),
   );
   await refuses(`${who} cannot read the audit log`, actor === null ? 'unauthorized' : 'forbidden', () =>
-    db.listAdminActions(actor),
+    all.listAdminActions(actor),
   );
   await refuses(`${who} cannot resolve a report`, actor === null ? 'unauthorized' : 'forbidden', () =>
     db.resolveReport(actor, reviewReport!.id, 'dismissed'),
@@ -4932,7 +5015,7 @@ expectEqual('...and the refused coach really did file one', reviewReport?.report
 // somebody else's.
 const mine = await allows(
   'a reporter reads their OWN reports',
-  () => db.listMyReports(COACH),
+  () => all.listMyReports(COACH),
   (rows) => `${rows.length} report(s)`,
 );
 expectEqual('...which includes the one they filed', mine?.some((r) => r.id === reviewReport!.id), true);
@@ -4943,14 +5026,14 @@ expectEqual(
 );
 expectEqual(
   'a reporter does not see a report somebody else filed',
-  (await db.listMyReports(AISHA)).some((r) => r.id === reviewReport!.id),
+  (await all.listMyReports(AISHA)).some((r) => r.id === reviewReport!.id),
   false,
 );
 
 // --- the queue --------------------------------------------------------------
 const reportQueue = await allows(
   'an ADMIN reads the queue',
-  () => db.listReports(ADMIN),
+  () => all.listReports(ADMIN),
   (rows) => `${rows.length} report(s)`,
 );
 const queuedReview = reportQueue?.find((r) => r.id === reviewReport!.id);
@@ -4966,12 +5049,12 @@ expectEqual('...and summarises the coach by their headline', typeof queuedCoach?
 
 expectEqual(
   'the status filter is honoured',
-  (await db.listReports(ADMIN, 'upheld')).length,
+  (await all.listReports(ADMIN, 'upheld')).length,
   0,
 );
 expectEqual(
   '...and the open filter finds them',
-  (await db.listReports(ADMIN, 'open')).some((r) => r.id === reviewReport!.id),
+  (await all.listReports(ADMIN, 'open')).some((r) => r.id === reviewReport!.id),
   true,
 );
 
@@ -4983,7 +5066,7 @@ await refuses('an unknown report id is not_found', 'not_found', () =>
   db.resolveReport(ADMIN, '00000000-0000-4000-8000-0000000000fc', 'upheld'),
 );
 
-const reviewsBefore = (await db.listReviewsForListing(repOffer!.id)).length;
+const reviewsBefore = (await all.listReviewsForListing(repOffer!.id)).length;
 await allows(
   'an ADMIN upholds the review report',
   () => db.resolveReport(ADMIN, reviewReport!.id, 'upheld', '  They are right.  '),
@@ -4994,9 +5077,9 @@ await allows(
 // not carry it out. Removing the review is `removeReview`, on another page,
 // with its own confirmation — so "this report was right" and "here is what I
 // am doing about it" stay two separate acts, each with its own audit line.
-expectEqual('upholding does NOT remove the review', (await db.listReviewsForListing(repOffer!.id)).length, reviewsBefore);
+expectEqual('upholding does NOT remove the review', (await all.listReviewsForListing(repOffer!.id)).length, reviewsBefore);
 
-const resolved = (await db.listReports(ADMIN)).find((r) => r.id === reviewReport!.id);
+const resolved = (await all.listReports(ADMIN)).find((r) => r.id === reviewReport!.id);
 expectEqual('the report is upheld', resolved?.status, 'upheld');
 expectEqual('...by the admin who did it', resolved?.resolved_by, ADMIN!.userId);
 expectEqual('...named in the queue', resolved?.resolved_by_name, 'Ada Administrator');
@@ -5020,7 +5103,7 @@ await allows(
 // --- the audit log ----------------------------------------------------------
 const audit = await allows(
   'an ADMIN reads the audit log',
-  () => db.listAdminActions(ADMIN),
+  () => all.listAdminActions(ADMIN),
   (rows) => `${rows.length} action(s)`,
 );
 const resolveLine = audit?.find((a) => a.action === 'resolve_report' && a.subject_id === reviewReport!.id);
@@ -5056,10 +5139,10 @@ for (const [who, actor] of [
     db.setCoachStatus(actor, NILS!.userId, 'suspended'),
   );
   await refuses(`${who} cannot list coaches as an admin`, actor === null ? 'unauthorized' : 'forbidden', () =>
-    db.listCoachesForAdmin(actor),
+    all.listCoachesForAdmin(actor),
   );
   await refuses(`${who} cannot read another coach's withdrawn offers`, actor === null ? 'unauthorized' : 'forbidden', () =>
-    db.listListingsForAdmin(actor, COACH!.userId),
+    all.listListingsForAdmin(actor, COACH!.userId),
   );
 }
 
@@ -5084,7 +5167,7 @@ await refuses('an unknown account is not_found', 'not_found', () =>
 // caller sequences their requests.
 expectEqual(
   'the coach has at least one offer on sale',
-  (await db.listListingsByCoach(null, COACH!.userId)).length > 0,
+  (await all.listListingsByCoach(null, COACH!.userId)).length > 0,
   true,
 );
 await refuses('a coach cannot be suspended while an offer is on sale', 'invalid', () =>
@@ -5097,7 +5180,7 @@ await refuses('...nor demoted', 'invalid', () => db.setCoachStatus(ADMIN, COACH!
 // straight back. See `restoreListing`'s table.
 const coachListings = await allows(
   'an ADMIN reads every offer of one coach, withdrawn included',
-  () => db.listListingsForAdmin(ADMIN, COACH!.userId),
+  () => all.listListingsForAdmin(ADMIN, COACH!.userId),
   (rows) => `${rows.length} offer(s)`,
 );
 for (const listing of coachListings!.filter((l) => l.deleted_at === null)) {
@@ -5105,12 +5188,12 @@ for (const listing of coachListings!.filter((l) => l.deleted_at === null)) {
 }
 expectEqual(
   'nothing of theirs is on sale now',
-  (await db.listListingsByCoach(null, COACH!.userId)).length,
+  (await all.listListingsByCoach(null, COACH!.userId)).length,
   0,
 );
 expectEqual(
   '...but the admin read still sees them all',
-  (await db.listListingsForAdmin(ADMIN, COACH!.userId)).length,
+  (await all.listListingsForAdmin(ADMIN, COACH!.userId)).length,
   coachListings?.length,
 );
 
@@ -5130,7 +5213,7 @@ expectEqual('...while the role survives', suspendedCoach?.role, 'coach');
 expectEqual('a suspended coach leaves the public directory', await db.getPublicCoach(COACH!.userId), null);
 expectEqual(
   '...but is still on the admin list',
-  (await db.listCoachesForAdmin(ADMIN)).some((p) => p.id === COACH!.userId),
+  (await all.listCoachesForAdmin(ADMIN)).some((p) => p.id === COACH!.userId),
   true,
 );
 
@@ -5144,7 +5227,7 @@ await refuses('a suspended coach cannot publish', 'forbidden', () =>
   }),
 );
 // And what it does NOT cost them: the admin's takedown is not theirs to lift.
-const suspendedOwn = await db.listMyListings(COACH);
+const suspendedOwn = await all.listMyListings(COACH);
 const adminTakedown = suspendedOwn.find((l) => l.deleted_at !== null && l.withdrawn_by_admin);
 expectEqual('their own dashboard shows the takedown as an admin one', Boolean(adminTakedown), true);
 await refuses('...and they cannot lift it themselves', 'forbidden', () =>
@@ -5163,7 +5246,7 @@ expectEqual('...and back in the public directory', Boolean(await db.getPublicCoa
 // which suspension, so putting them back is one deliberate decision per offer.
 expectEqual(
   'their offers stay withdrawn until somebody restores them',
-  (await db.listListingsByCoach(null, COACH!.userId)).length,
+  (await all.listListingsByCoach(null, COACH!.userId)).length,
   0,
 );
 await allows(
@@ -5173,7 +5256,7 @@ await allows(
 );
 
 // --- the audit trail --------------------------------------------------------
-const standingLog = await db.listAdminActions(ADMIN);
+const standingLog = await all.listAdminActions(ADMIN);
 // The SUSPENSION line specifically. The list is newest first and this coach
 // has since been reinstated, so a bare `find` would return the reinstatement.
 const standingLine = standingLog.find(
@@ -5196,7 +5279,7 @@ expectEqual(
 await refuses('the other coach cannot be demoted while selling either', 'invalid', () =>
   db.setCoachStatus(ADMIN, NILS!.userId, 'none'),
 );
-for (const listing of await db.listListingsForAdmin(ADMIN, NILS!.userId)) {
+for (const listing of await all.listListingsForAdmin(ADMIN, NILS!.userId)) {
   if (listing.deleted_at === null) await db.softDeleteListing(ADMIN, listing.id);
 }
 const demoted = await allows(
@@ -5209,9 +5292,306 @@ const demoted = await allows(
 expectEqual('...and the role goes with it', demoted?.role, 'learner');
 expectEqual(
   '...so they leave the admin coach list entirely',
-  (await db.listCoachesForAdmin(ADMIN)).some((p) => p.id === NILS!.userId),
+  (await all.listCoachesForAdmin(ADMIN)).some((p) => p.id === NILS!.userId),
   false,
 );
+
+// ---------------------------------------------------------------------------
+section('Pagination — the cursor tiles the list exactly, and carries no authority');
+// ---------------------------------------------------------------------------
+// Every other section in this file drains its lists through `all`, at three rows
+// a page — so the keysets are already exercised several hundred times over, and
+// any cursor that skipped or repeated a row would have failed a content
+// assertion long before here. THIS section is about the boundaries themselves:
+// what a page reports, what a hostile cursor does, and what the clamp allows.
+
+const everyOffer = await all.listListings();
+// `expectEqual` compares with `===`, so every list assertion below joins to a
+// string. Two arrays with identical contents are never `===`.
+const ids = (rows: readonly { id: string }[]): string => rows.map((r) => r.id).join(',');
+
+// Three published offers in the seed, which is two pages at a limit of two —
+// enough for a seam, which is what these assertions are about.
+expectEqual('the fixture list is long enough to page', everyOffer.length >= 3, true);
+
+// --- what one page reports --------------------------------------------------
+const firstPage = await allows(
+  'a page returns the rows asked for',
+  () => db.listListings(undefined, { limit: 2 }),
+  (p) => `${p.items.length} of ${p.total}`,
+);
+expectEqual('...exactly the limit', firstPage?.items.length, 2);
+expectEqual('...with a cursor, because there are more', typeof firstPage?.nextCursor, 'string');
+// THE COUNT IS OF THE WHOLE LIST, not of the page. A tab count, a "137 offers"
+// line and a pager all read this, and a per-page number would be a lie in all
+// three places.
+expectEqual('...and a total of the WHOLE list, not the page', firstPage?.total, everyOffer.length);
+expectEqual(
+  '...which is the first two rows of the drained list',
+  firstPage ? ids(firstPage.items) : '',
+  ids(everyOffer.slice(0, 2)),
+);
+
+// --- the pages tile ---------------------------------------------------------
+// Walked by hand rather than through `all`, because the point is the SEAM: the
+// concatenation must equal the whole list with nothing repeated and nothing
+// dropped, which is the one property offset pagination silently breaks.
+const walked: string[] = [];
+let walkCursor: string | null = null;
+let pageCount = 0;
+for (let i = 0; i < 50; i += 1) {
+  const p: Awaited<ReturnType<typeof db.listListings>> = await db.listListings(undefined, {
+    cursor: walkCursor,
+    limit: 2,
+  });
+  walked.push(...p.items.map((l) => l.id));
+  pageCount += 1;
+  if (!p.nextCursor) break;
+  walkCursor = p.nextCursor;
+}
+expectEqual('walking the cursor visits every row', walked.join(','), ids(everyOffer));
+expectEqual('...exactly once', new Set(walked).size, walked.length);
+expectEqual('...over more than one page', pageCount > 1, true);
+// The last page reports no cursor rather than an empty one — `null` is what a
+// pager branches on to stop rendering Next.
+const lastPage = await db.listListings(undefined, { cursor: walkCursor, limit: 100 });
+expectEqual('the last page has no next cursor', lastPage.nextCursor, null);
+
+// --- the limit is clamped, not trusted --------------------------------------
+// Every one of these arrives from a query string in production.
+expectEqual('a zero limit returns one row, not none', (await db.listListings(undefined, { limit: 0 })).items.length, 1);
+expectEqual('a negative limit likewise', (await db.listListings(undefined, { limit: -5 })).items.length, 1);
+expectEqual(
+  'a vast limit is capped rather than honoured',
+  (await db.listListings(undefined, { limit: 1_000_000 })).items.length <= MAX_PAGE_SIZE,
+  true,
+);
+expectEqual(
+  'a fractional limit is floored',
+  (await db.listListings(undefined, { limit: 2.9 })).items.length,
+  2,
+);
+expectEqual(
+  'NaN falls back to the default rather than returning nothing',
+  (await db.listListings(undefined, { limit: Number.NaN })).items.length > 0,
+  true,
+);
+
+// --- a cursor is a position, never a capability -----------------------------
+// The header of `pagination.ts` makes this claim; these are the assertions that
+// hold it. A cursor names WHERE to resume and nothing else — every scope and
+// entitlement is re-derived on each request.
+const garbage = ['', '   ', 'not-base64', 'AAAA', '!!!!', 'x'.repeat(500)];
+for (const bad of garbage) {
+  const p = await db.listListings(undefined, { cursor: bad, limit: 2 });
+  expectEqual(
+    `a malformed cursor (${bad.slice(0, 12) || 'empty'}) starts at the beginning`,
+    ids(p.items),
+    ids(everyOffer.slice(0, 2)),
+  );
+}
+
+// A cursor from ANOTHER list decodes cleanly and means nothing here, so it is
+// refused by `scope` and the reader gets page one. Without that, a coach-
+// directory position would be applied to offers as though it meant something.
+const coachCursor = (await db.listCoaches(undefined, { limit: 1 })).nextCursor;
+expectEqual('the coach directory produced a cursor', typeof coachCursor, 'string');
+expectEqual(
+  "another list's cursor is refused rather than misapplied",
+  ids((await db.listListings(undefined, { cursor: coachCursor, limit: 2 })).items),
+  ids(everyOffer.slice(0, 2)),
+);
+
+// THE ONE THAT MATTERS. A cursor taken from one person's purchases changes which
+// rows are SKIPPED and cannot change which rows exist to be skipped.
+const aishaOrders = await all.listMyOrders(AISHA);
+const aishaCursor = (await db.listMyOrders(AISHA, { limit: 1 })).nextCursor;
+expectEqual('the buyer has more than one purchase to page', aishaOrders.length > 1, true);
+const stolen = await db.listMyOrders(MARCUS, { cursor: aishaCursor, limit: 50 });
+expectEqual(
+  "another buyer's cursor reveals nothing of theirs",
+  stolen.items.every((order) => order.learner_id === MARCUS!.userId),
+  true,
+);
+await refuses('...and an anonymous caller with a real cursor is still refused', 'unauthorized', () =>
+  db.listMyOrders(ANON, { cursor: aishaCursor }),
+);
+
+// --- the browse filters -----------------------------------------------------
+const prices = everyOffer.map((l) => l.price_cents).sort((a, b) => a - b);
+const median = prices[Math.floor(prices.length / 2)]!;
+
+const dearer = await db.listListings({ minPriceCents: median }, { limit: 100 });
+expectEqual('a minimum price is INCLUSIVE', dearer.items.some((l) => l.price_cents === median), true);
+expectEqual(
+  '...and excludes everything below it',
+  dearer.items.every((l) => l.price_cents >= median),
+  true,
+);
+
+const cheaper = await db.listListings({ maxPriceCents: median }, { limit: 100 });
+expectEqual('a maximum price is inclusive too', cheaper.items.some((l) => l.price_cents === median), true);
+expectEqual('...and excludes everything above', cheaper.items.every((l) => l.price_cents <= median), true);
+// The two halves overlap only on the median, so their totals cover the list.
+expectEqual(
+  'the two halves account for every offer',
+  (dearer.total ?? 0) + (cheaper.total ?? 0) - everyOffer.filter((l) => l.price_cents === median).length,
+  everyOffer.length,
+);
+
+// An inverted pair matches nothing rather than being silently swapped: somebody
+// who typed the bounds the wrong way round should see that, not results for a
+// question they did not ask.
+expectEqual(
+  'an inverted price range matches nothing',
+  (await db.listListings({ minPriceCents: median + 1, maxPriceCents: median - 1 })).items.length,
+  0,
+);
+expectEqual(
+  'a price filter composes with a keyword rather than replacing it',
+  (await db.listListings({ q: 'javelin', maxPriceCents: median }, { limit: 100 })).items.every(
+    (l) => l.price_cents <= median,
+  ),
+  true,
+);
+
+// --- the sorts --------------------------------------------------------------
+const cheapest = await db.listListings({ sort: 'price_asc' }, { limit: 100 });
+expectEqual(
+  'cheapest-first is ascending by price',
+  cheapest.items.every((l, i) => i === 0 || l.price_cents >= cheapest.items[i - 1]!.price_cents),
+  true,
+);
+const dearest = await db.listListings({ sort: 'price_desc' }, { limit: 100 });
+expectEqual(
+  'dearest-first is descending by price',
+  dearest.items.every((l, i) => i === 0 || l.price_cents <= dearest.items[i - 1]!.price_cents),
+  true,
+);
+expectEqual('...and both return the whole list', cheapest.items.length, everyOffer.length);
+
+// Paging the ascending sort is the one place the keyset runs backwards, so it
+// gets its own tiling check.
+const ascWalk: string[] = [];
+let ascCursor: string | null = null;
+for (let i = 0; i < 50; i += 1) {
+  const p = await db.listListings({ sort: 'price_asc' }, { cursor: ascCursor, limit: 2 });
+  ascWalk.push(...p.items.map((l) => l.id));
+  if (!p.nextCursor) break;
+  ascCursor = p.nextCursor;
+}
+expectEqual('the ascending keyset tiles too', ascWalk.join(','), ids(cheapest.items));
+expectEqual('...with nothing repeated', new Set(ascWalk).size, ascWalk.length);
+
+// EACH SORT HAS ITS OWN SCOPE, so a cursor does not survive a change of
+// ordering. Position 2 means a different row in each, and applying one to the
+// other would skip rows nobody would ever see.
+const newestCursor = (await db.listListings(undefined, { limit: 2 })).nextCursor;
+expectEqual(
+  'a newest-first cursor is refused by the price sort',
+  ids((await db.listListings({ sort: 'price_asc' }, { cursor: newestCursor, limit: 2 })).items),
+  ids(cheapest.items.slice(0, 2)),
+);
+
+// --- the other keysets ------------------------------------------------------
+// `removed_reviews` is ordered by when the REMOVAL happened, not by when the
+// review was written, and `invites` is keyed on `code` because that table has no
+// `id`. Both are the kind of detail that fails silently — as a skipped row —
+// rather than loudly, so each gets a tiling check of its own.
+const removedDrained = await all.listRemovedReviews(ADMIN);
+if (removedDrained.length > 1) {
+  const removedWalk: string[] = [];
+  let removedCursor: string | null = null;
+  for (let i = 0; i < 50; i += 1) {
+    const p = await db.listRemovedReviews(ADMIN, { cursor: removedCursor, limit: 1 });
+    removedWalk.push(...p.items.map((r) => r.id));
+    if (!p.nextCursor) break;
+    removedCursor = p.nextCursor;
+  }
+  expectEqual('the removal log tiles on removed_at', removedWalk.join(','), ids(removedDrained));
+} else {
+  note('removal log has fewer than 2 rows; its tiling is covered by the drain above');
+}
+
+const invitesDrained = await all.listInvites(ADMIN);
+if (invitesDrained.length > 1) {
+  const inviteWalk: string[] = [];
+  let inviteCursor: string | null = null;
+  for (let i = 0; i < 50; i += 1) {
+    const p = await db.listInvites(ADMIN, { cursor: inviteCursor, limit: 1 });
+    inviteWalk.push(...p.items.map((r) => r.code));
+    if (!p.nextCursor) break;
+    inviteCursor = p.nextCursor;
+  }
+  expectEqual(
+    'invites tile on the CODE, having no id column',
+    inviteWalk.join(','),
+    invitesDrained.map((r) => r.code).join(','),
+  );
+} else {
+  note('fewer than 2 invites; their tiling is covered by the drain above');
+}
+
+// --- the reads that replaced a scan -----------------------------------------
+// Five single-row reads were added with pagination, each replacing a place where
+// a page would have scanned a list it no longer receives in full. They are
+// asserted here rather than beside their features because what they have in
+// common IS the pagination.
+const scanOffer = everyOffer[0]!;
+expectEqual(
+  'getMyListing finds the coach their own offer',
+  (await db.getMyListing(COACH, scanOffer.id))?.id,
+  scanOffer.coach_id === COACH!.userId ? scanOffer.id : undefined,
+);
+expectEqual(
+  "...and returns null for somebody else's",
+  await db.getMyListing(NILS, scanOffer.id),
+  null,
+);
+await refuses('...and refuses an anonymous caller', 'unauthorized', () =>
+  db.getMyListing(ANON, scanOffer.id),
+);
+
+const aishaOrder = aishaOrders[0]!;
+expectEqual(
+  'getMyOrderForListing finds the buyer their own order',
+  (await db.getMyOrderForListing(AISHA, aishaOrder.listing_id))?.id,
+  aishaOrder.id,
+);
+expectEqual(
+  "...and null for an offer they have not claimed — never somebody else's order",
+  await db.getMyOrderForListing(NILS, aishaOrder.listing_id),
+  null,
+);
+expectEqual(
+  '...and null for an unknown offer rather than a throw',
+  await db.getMyOrderForListing(AISHA, '00000000-0000-4000-8000-0000000000aa'),
+  null,
+);
+
+expectEqual(
+  'countOrdersForListing counts every epoch, unlike offer_stats',
+  await db.countOrdersForListing(COACH, aishaOrder.listing_id),
+  (await all.listOrdersForCoach(ADMIN, aishaOrder.coach_id)).filter(
+    (o) => o.listing_id === aishaOrder.listing_id,
+  ).length,
+);
+await refuses('...and is owner-or-admin, like the sales list it replaced', 'forbidden', () =>
+  db.countOrdersForListing(NILS, aishaOrder.listing_id),
+);
+
+const publicProfiles = await allows(
+  'listPublicProfiles answers a whole grid in one read',
+  () => db.listPublicProfiles(everyOffer.map((l) => l.coach_id)),
+  (rows) => `${rows.length} profile(s)`,
+);
+expectShape('...with the public profile shape and no email', publicProfiles?.[0], PUBLIC_PROFILE_COLUMNS);
+expectEqual(
+  '...dropping ids it cannot resolve rather than padding them',
+  (await db.listPublicProfiles(['00000000-0000-4000-8000-0000000000ab'])).length,
+  0,
+);
+expectEqual('...and an empty request costs nothing', (await db.listPublicProfiles([])).length, 0);
 
 // ---------------------------------------------------------------------------
 section('Rate limiting — a speed bump that has to count correctly');

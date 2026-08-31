@@ -115,6 +115,23 @@ import {
   type RemovedReviewWithNames,
   type Review,
 } from '../types';
+import { isListingSort } from '../client';
+import {
+  byCreatedAt,
+  emptyPage,
+  KEYSETS,
+  normaliseLimit,
+  decodeCursor,
+  pageOf,
+  supabaseAscending,
+  supabaseKeysetFilter,
+  tieBreakColumn,
+  windowOf,
+  type Keyset,
+  type KeysetSpec,
+  type Page,
+  type PageRequest,
+} from '../pagination';
 import {
   optionalActorId,
   optionalAssetPath,
@@ -594,6 +611,48 @@ function oneRow<T>(data: unknown, whenMissing: string): T {
   return row as T;
 }
 
+/**
+ * The three lines every paginated read ends with: seek past the cursor, order by
+ * the keyset, take one row more than asked for.
+ *
+ * Structurally typed rather than importing PostgREST's builder types, because
+ * every one of them is generic over the table and the projection and naming them
+ * here would mean repeating that generic signature at each call site. What the
+ * constraint actually says is the whole contract: this runs BEFORE the query is
+ * awaited, and `or` must still be available — so it has to be called on a filter
+ * builder, not on something already ordered.
+ *
+ * BOTH `.order()` CALLS MATTER. The tie-break column is ordered as well as
+ * filtered, and in the same direction: without it Postgres is free to return
+ * rows sharing a `created_at` in any order it likes, and the cursor — which
+ * names an exact row — then points into a list that has reshuffled underneath
+ * it. That is the bug that shows up as one duplicated row every few pages.
+ */
+function seek<
+  Q extends {
+    or(filter: string): Q;
+    order(column: string, options: { ascending: boolean }): Q;
+    limit(count: number): Q;
+  },
+>(query: Q, spec: KeysetSpec, cursor: Keyset | null, limit: number): Q {
+  const seeked = cursor ? query.or(supabaseKeysetFilter(spec, cursor)) : query;
+  const ascending = supabaseAscending(spec);
+  return seeked
+    .order(spec.column, { ascending })
+    .order(tieBreakColumn(spec), { ascending })
+    .limit(limit + 1);
+}
+
+/**
+ * `count: 'exact'` comes back as `number | null` — null when PostgREST did not
+ * compute one. `Page.total` carries that null through rather than flattening it
+ * to 0, because "no rows" and "not counted" are different sentences and a caller
+ * rendering "0 offers" over a full page would be a bug nobody could see.
+ */
+function totalOf(count: number | null | undefined): number | null {
+  return typeof count === 'number' ? count : null;
+}
+
 /** The narrow listing projection `withListingTitles` reads. Both columns are granted. */
 interface ListingTitleRow {
   id: string;
@@ -804,6 +863,25 @@ export class SupabaseDataClient implements DataClient {
     return profile;
   }
 
+  /** The batch form of `getPublicProfile`. One read for a whole grid. */
+  async listPublicProfiles(userIds: readonly string[]): Promise<PublicProfile[]> {
+    const unique = [...new Set(userIds)].filter((id) => typeof id === 'string' && id !== '');
+    if (unique.length === 0) return [];
+
+    const ctx = await openContext();
+    const { data, error } = await ctx.supabase
+      .from('public_profiles')
+      .select('id, full_name, is_approved_coach, avatar_path')
+      .in('id', unique);
+    if (error) {
+      // One malformed id in the batch would fail the whole read. An empty
+      // result is the honest answer: none of these ids resolved.
+      if (isMalformedId(error)) return [];
+      throwDataError(error, ctx.userId !== null);
+    }
+    return (data ?? []) as PublicProfile[];
+  }
+
   /**
    * Replaces the signed-in user's password through GoTrue.
    *
@@ -876,27 +954,47 @@ export class SupabaseDataClient implements DataClient {
   // The public coach directory
   // -------------------------------------------------------------------------
 
-  async listCoaches(filter?: CoachDirectoryFilter): Promise<PublicCoach[]> {
+  async listCoaches(filter?: CoachDirectoryFilter, page?: PageRequest): Promise<Page<PublicCoach>> {
     const q = typeof filter?.q === 'string' ? filter.q.trim() : '';
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.coaches, page?.cursor);
     const ctx = await openContext();
 
     // The approval predicate lives INSIDE public_coaches, so there is nothing
     // to filter on here and no way for a caller to widen the result.
-    let query = ctx.supabase.from('public_coaches').select(PUBLIC_COACH_COLUMNS);
+    let query = ctx.supabase
+      .from('public_coaches')
+      .select(`${PUBLIC_COACH_COLUMNS}, created_at`, { count: 'exact' });
     if (q !== '') {
       const pattern = likePattern(q);
       // Unrepresentable term (it contains `*`). Return NOTHING rather than
       // dropping the filter — an unexpressible search must not become a
       // broader one. See `escapeLike`.
-      if (pattern === null) return [];
+      if (pattern === null) return emptyPage();
       query = query.ilike('full_name', pattern);
     }
 
-    // `created_at` exists on the view for this ordering only (0003) and is not
-    // selected — `PublicCoach` is exactly the five columns above.
-    const { data, error } = await query.order('created_at', { ascending: false });
+    // `created_at` exists on the view for this ordering only (0003). It is now
+    // SELECTED as well as ordered on, because the cursor is built from it — and
+    // then dropped again below, so `PublicCoach` stays exactly its five columns.
+    const { data, error, count } = await seek(query, KEYSETS.coaches, cursor, limit);
     if (error) throwDataError(error, ctx.userId !== null);
-    return (data ?? []) as PublicCoach[];
+
+    const rows = (data ?? []) as (PublicCoach & { created_at: string })[];
+    const window = windowOf(KEYSETS.coaches, rows, limit, byCreatedAt, totalOf(count));
+    // `created_at` is selected for the keyset and dropped here, so `PublicCoach`
+    // stays exactly the five columns `public_coaches` publishes.
+    return pageOf(
+      window,
+      window.rows.map((row) => ({
+        id: row.id,
+        full_name: row.full_name,
+        coach_headline: row.coach_headline,
+        coach_bio: row.coach_bio,
+        coach_years_coaching: row.coach_years_coaching,
+        avatar_path: row.avatar_path,
+      })),
+    );
   }
 
   async getPublicCoach(coachId: string): Promise<PublicCoach | null> {
@@ -1121,7 +1219,7 @@ export class SupabaseDataClient implements DataClient {
     return data as Profile;
   }
 
-  async listListings(filter?: ListingFilter): Promise<ListingWithCoach[]> {
+  async listListings(filter?: ListingFilter, page?: PageRequest): Promise<Page<ListingWithCoach>> {
     const q = typeof filter?.q === 'string' ? filter.q.trim() : '';
     const rawCategory = typeof filter?.category === 'string' ? filter.category.trim() : '';
     const category: ListingCategory | null = isListingCategory(rawCategory) ? rawCategory : null;
@@ -1129,26 +1227,64 @@ export class SupabaseDataClient implements DataClient {
     // An out-of-taxonomy category matches nothing. Returning early also avoids
     // sending it to Postgres, where comparing it against the enum would be a
     // cast error (22P02) rather than an empty result.
-    if (rawCategory !== '' && category === null) return [];
+    if (rawCategory !== '' && category === null) return emptyPage();
+
+    // The keyset follows the sort, and each sort has its own `scope` — so a
+    // cursor minted while browsing newest-first is refused after switching to
+    // cheapest-first and the reader starts from the top. Position 24 means a
+    // different row in each ordering.
+    const sort = isListingSort(filter?.sort) ? filter.sort : 'newest';
+    const spec =
+      sort === 'newest'
+        ? KEYSETS.listings
+        : sort === 'price_asc'
+          ? KEYSETS.listingsPriceAsc
+          : KEYSETS.listingsPriceDesc;
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(spec, page?.cursor);
 
     const ctx = await openContext();
-    let query = ctx.supabase.from('listings').select(LISTING_COLUMNS).is('deleted_at', null);
+    let query = ctx.supabase
+      .from('listings')
+      .select(LISTING_COLUMNS, { count: 'exact' })
+      .is('deleted_at', null);
 
     if (category) query = query.eq('category', category);
+    // Inclusive bounds. An inverted pair matches nothing rather than being
+    // silently swapped — somebody who typed them the wrong way round should see
+    // that, not results for a question they did not ask.
+    if (typeof filter?.minPriceCents === 'number' && Number.isFinite(filter.minPriceCents)) {
+      query = query.gte('price_cents', Math.max(0, Math.floor(filter.minPriceCents)));
+    }
+    if (typeof filter?.maxPriceCents === 'number' && Number.isFinite(filter.maxPriceCents)) {
+      query = query.lte('price_cents', Math.max(0, Math.floor(filter.maxPriceCents)));
+    }
     if (q !== '') {
       // Title + description only, matching the trigram indexes in 0001 and the
       // mock. Never the coach name: that would make the offer search an
       // enumerator for people.
       const escaped = likePattern(q);
       // Unrepresentable term — see `escapeLike`. Narrow to nothing.
-      if (escaped === null) return [];
+      if (escaped === null) return emptyPage();
       const pattern = quoteForOr(escaped);
       query = query.or(`title.ilike.${pattern},description.ilike.${pattern}`);
     }
 
-    const { data, error } = await query.order('created_at', { ascending: false });
+    const { data, error, count } = await seek(query, spec, cursor, limit);
     if (error) throwDataError(error, ctx.userId !== null);
-    return withCoachNames(ctx, (data ?? []) as ListingRow[]);
+
+    const window = windowOf(
+      spec,
+      (data ?? []) as ListingRow[],
+      limit,
+      sort === 'newest'
+        ? byCreatedAt
+        : (row) => ({ key: String(row.price_cents), id: row.id }),
+      totalOf(count),
+    );
+    // Named AFTER the window, so the extra row fetched to detect a next page is
+    // never given a coach name nobody will read.
+    return pageOf(window, await withCoachNames(ctx, window.rows));
   }
 
   async getListing(id: string): Promise<ListingWithCoach | null> {
@@ -1178,21 +1314,40 @@ export class SupabaseDataClient implements DataClient {
    * read the empty withdrawn set as "they have none". Same construction, same
    * reason, as `listReports`.
    */
-  async listListingsForAdmin(actor: Actor, coachId: string): Promise<ListingWithCoach[]> {
+  async listListingsForAdmin(
+    actor: Actor,
+    coachId: string,
+    page?: PageRequest,
+  ): Promise<Page<ListingWithCoach>> {
     const ctx = await openAuthedContext(actor);
     await requireAdminProfile(ctx);
-    if (typeof coachId !== 'string' || coachId === '') return [];
+    if (typeof coachId !== 'string' || coachId === '') return emptyPage();
 
-    const { data, error } = await ctx.supabase
-      .from('listings')
-      .select(LISTING_COLUMNS)
-      .eq('coach_id', coachId)
-      .order('created_at', { ascending: false });
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.adminListings, page?.cursor);
+
+    const { data, error, count } = await seek(
+      ctx.supabase
+        .from('listings')
+        .select(LISTING_COLUMNS, { count: 'exact' })
+        .eq('coach_id', coachId),
+      KEYSETS.adminListings,
+      cursor,
+      limit,
+    );
     if (error) {
-      if (isMalformedId(error)) return [];
+      if (isMalformedId(error)) return emptyPage();
       throwDataError(error, true);
     }
-    return withCoachNames(ctx, (data ?? []) as ListingRow[]);
+
+    const window = windowOf(
+      KEYSETS.adminListings,
+      (data ?? []) as ListingRow[],
+      limit,
+      byCreatedAt,
+      totalOf(count),
+    );
+    return pageOf(window, await withCoachNames(ctx, window.rows));
   }
 
   /**
@@ -1240,52 +1395,84 @@ export class SupabaseDataClient implements DataClient {
     return [...LISTING_CATEGORIES];
   }
 
-  async listListingsByCoach(actor: Actor, coachId: string): Promise<ListingWithCoach[]> {
-    if (typeof coachId !== 'string' || coachId === '') return [];
+  async listListingsByCoach(
+    actor: Actor,
+    coachId: string,
+    page?: PageRequest,
+  ): Promise<Page<ListingWithCoach>> {
+    if (typeof coachId !== 'string' || coachId === '') return emptyPage();
 
     // A public read. The actor is never consulted, so this cannot be widened
     // into an owner view — the explicit `deleted_at is null` below is what
     // guarantees it, since a coach's own RLS policy would otherwise show them
     // their withdrawn offers through this path too.
     void actor;
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.coachListings, page?.cursor);
     const ctx = await openContext();
 
-    const { data, error } = await ctx.supabase
-      .from('listings')
-      .select(LISTING_COLUMNS)
-      .eq('coach_id', coachId)
-      .is('deleted_at', null)
-      .order('created_at', { ascending: false });
+    const { data, error, count } = await seek(
+      ctx.supabase
+        .from('listings')
+        .select(LISTING_COLUMNS, { count: 'exact' })
+        .eq('coach_id', coachId)
+        .is('deleted_at', null),
+      KEYSETS.coachListings,
+      cursor,
+      limit,
+    );
     if (error) {
-      if (isMalformedId(error)) return [];
+      if (isMalformedId(error)) return emptyPage();
       throwDataError(error, ctx.userId !== null);
     }
-    return withCoachNames(ctx, (data ?? []) as ListingRow[]);
+
+    const window = windowOf(
+      KEYSETS.coachListings,
+      (data ?? []) as ListingRow[],
+      limit,
+      byCreatedAt,
+      totalOf(count),
+    );
+    return pageOf(window, await withCoachNames(ctx, window.rows));
   }
 
-  async listMyListings(actor: Actor): Promise<OwnedListing[]> {
+  async listMyListings(actor: Actor, page?: PageRequest): Promise<Page<OwnedListing>> {
     const ctx = await openAuthedContext(actor);
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.myListings, page?.cursor);
 
     // `public.owned_listings` (0003) is scoped to `auth.uid()` inside the view
     // and carries the derived `withdrawn_by_admin`. WITHDRAWN OFFERS INCLUDED —
     // this is the dashboard, and restoring one is the point.
-    const { data, error } = await ctx.supabase
-      .from('owned_listings')
-      .select(OWNED_LISTING_COLUMNS)
-      .order('created_at', { ascending: false });
+    const { data, error, count } = await seek(
+      ctx.supabase.from('owned_listings').select(OWNED_LISTING_COLUMNS, { count: 'exact' }),
+      KEYSETS.myListings,
+      cursor,
+      limit,
+    );
     if (error) throwDataError(error, true);
 
-    const rows = (data ?? []) as OwnedListingRow[];
+    const window = windowOf(
+      KEYSETS.myListings,
+      (data ?? []) as OwnedListingRow[],
+      limit,
+      byCreatedAt,
+      totalOf(count),
+    );
+    const rows = window.rows;
     const names = await displayNamesFor(ctx, rows.map((row) => row.coach_id));
-    return rows.map((row) => ({
+    return pageOf(
+      window,
+      rows.map((row) => ({
       ...toListingWithCoach(row, names),
       withdrawn_by_admin: row.withdrawn_by_admin === true,
       // The owner's own path, handed back as the string rather than as a derived
       // boolean — the opposite treatment to `withdrawn_by_admin` beside it, and
       // deliberately so: this is the coach's own file and the editor needs the
       // key to replace or remove it. See `OwnedListing.asset_path`.
-      asset_path: row.asset_path ?? null,
-    }));
+        asset_path: row.asset_path ?? null,
+      })),
+    );
   }
 
   async createListing(actor: Actor, input: CreateListingInput): Promise<ListingWithCoach> {
@@ -1545,7 +1732,11 @@ export class SupabaseDataClient implements DataClient {
     return withCoachName(ctx, data as ListingRow);
   }
 
-  async listListingRevisions(actor: Actor, listingId: string): Promise<ListingRevision[]> {
+  async listListingRevisions(
+    actor: Actor,
+    listingId: string,
+    page?: PageRequest,
+  ): Promise<Page<ListingRevision>> {
     const id = requireText(listingId, 'Offer', 200);
     const ctx = await openAuthedContext(actor);
     const profile = await resolveProfile(ctx);
@@ -1558,19 +1749,36 @@ export class SupabaseDataClient implements DataClient {
       throw new DataError('forbidden', 'You can only view the edit history of your own offers.');
     }
 
-    const { data, error } = await ctx.supabase
-      .from('listing_revisions')
-      .select('id, listing_id, title, description, price_cents, category, created_at')
-      .eq('listing_id', id)
-      // `id desc` is NOT decoration — `supabase/README.md` lists it as a
-      // requirement. Two edits inside the same millisecond share a `created_at`,
-      // and Postgres has no insertion order to fall back on, so without a
-      // tie-break the "newest first" contract is simply not met for that pair.
-      // The mock gets the same effect from `.reverse()` before its sort.
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: false });
+    // `id desc` is NOT decoration — `supabase/README.md` lists it as a
+    // requirement. Two edits inside the same millisecond share a `created_at`,
+    // and Postgres has no insertion order to fall back on, so without a
+    // tie-break the "newest first" contract is simply not met for that pair. It
+    // is now `seek`'s second `.order()`, which is also the cursor's tie-break —
+    // the two were always the same requirement.
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.revisions, page?.cursor);
+
+    const { data, error, count } = await seek(
+      ctx.supabase
+        .from('listing_revisions')
+        .select('id, listing_id, title, description, price_cents, category, created_at', {
+          count: 'exact',
+        })
+        .eq('listing_id', id),
+      KEYSETS.revisions,
+      cursor,
+      limit,
+    );
     if (error) throwDataError(error, true);
-    return (data ?? []) as ListingRevision[];
+
+    const window = windowOf(
+      KEYSETS.revisions,
+      (data ?? []) as ListingRevision[],
+      limit,
+      byCreatedAt,
+      totalOf(count),
+    );
+    return pageOf(window, window.rows);
   }
 
   /** Shared by the four methods that need to see an offer before writing to it. */
@@ -1707,20 +1915,112 @@ export class SupabaseDataClient implements DataClient {
    * agrees with `getOfferStats` by construction and a withdrawn offer yields
    * `[]` — those reviews stay readable on the coach profile below.
    */
-  async listReviewsForListing(listingId: string): Promise<PublicReview[]> {
-    if (typeof listingId !== 'string' || listingId === '') return [];
+  async listReviewsForListing(listingId: string, page?: PageRequest): Promise<Page<PublicReview>> {
+    if (typeof listingId !== 'string' || listingId === '') return emptyPage();
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.listingReviews, page?.cursor);
     const ctx = await openContext();
 
-    const { data, error } = await ctx.supabase
-      .from('public_listing_reviews')
-      .select(PUBLIC_REVIEW_COLUMNS)
-      .eq('listing_id', listingId)
-      .order('created_at', { ascending: false });
+    const { data, error, count } = await seek(
+      ctx.supabase
+        .from('public_listing_reviews')
+        .select(PUBLIC_REVIEW_COLUMNS, { count: 'exact' })
+        .eq('listing_id', listingId),
+      KEYSETS.listingReviews,
+      cursor,
+      limit,
+    );
     if (error) {
-      if (isMalformedId(error)) return [];
+      if (isMalformedId(error)) return emptyPage();
       throwDataError(error, ctx.userId !== null);
     }
-    return (data ?? []) as PublicReview[];
+
+    const window = windowOf(
+      KEYSETS.listingReviews,
+      (data ?? []) as PublicReview[],
+      limit,
+      byCreatedAt,
+      totalOf(count),
+    );
+    return pageOf(window, window.rows);
+  }
+
+  /** `owned_listings` is scoped to `auth.uid()` inside the view; this narrows it to one id. */
+  async getMyListing(actor: Actor, listingId: string): Promise<OwnedListing | null> {
+    const ctx = await openAuthedContext(actor);
+    if (typeof listingId !== 'string' || listingId === '') return null;
+
+    const { data, error } = await ctx.supabase
+      .from('owned_listings')
+      .select(OWNED_LISTING_COLUMNS)
+      .eq('id', listingId)
+      .maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) return null;
+      throwDataError(error, true);
+    }
+    if (!data) return null;
+
+    const row = data as OwnedListingRow;
+    const names = await displayNamesFor(ctx, [row.coach_id]);
+    return {
+      ...toListingWithCoach(row, names),
+      withdrawn_by_admin: row.withdrawn_by_admin === true,
+      asset_path: row.asset_path ?? null,
+    };
+  }
+
+  /**
+   * A HEAD request with `count: 'exact'` — the rows are never fetched, only
+   * counted, which is the whole reason this is not `listOrdersForCoach(...).length`.
+   */
+  async countOrdersForListing(actor: Actor, listingId: string): Promise<number> {
+    const ctx = await openAuthedContext(actor);
+    if (typeof listingId !== 'string' || listingId === '') return 0;
+
+    // The entitlement is checked here rather than left to RLS, because
+    // `orders_select_own_coach` renders a refusal as ZERO ROWS — which is
+    // indistinguishable from "nobody claimed it", and would silently unlock the
+    // control this number gates. Same construction, same reason, as `listReports`.
+    const listing = await this.readListingRow(ctx, listingId);
+    if (!listing) return 0;
+    const profile = await resolveProfile(ctx);
+    if (listing.coach_id !== profile.id && profile.role !== 'admin') {
+      throw new DataError('forbidden', 'You can only view your own sales.');
+    }
+
+    const { count, error } = await ctx.supabase
+      .from('orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('listing_id', listingId);
+    if (error) {
+      if (isMalformedId(error)) return 0;
+      throwDataError(error, true);
+    }
+    return typeof count === 'number' ? count : 0;
+  }
+
+  /** One indexed lookup, where the page used to scan a whole purchase history. */
+  async getMyOrderForListing(actor: Actor, listingId: string): Promise<OrderWithListing | null> {
+    const ctx = await openAuthedContext(actor);
+    if (typeof listingId !== 'string' || listingId === '') return null;
+
+    // `learner_id` is DERIVED from the session, never a parameter — the same
+    // construction as `listMyOrders`, and the reason this is safe to expose.
+    const { data, error } = await ctx.supabase
+      .from('orders')
+      .select('*')
+      .eq('learner_id', ctx.userId)
+      .eq('listing_id', listingId)
+      .maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) return null;
+      throwDataError(error, true);
+    }
+    if (!data) return null;
+
+    const [only] = await withListingTitles(ctx, [data as Order]);
+    return only ?? null;
   }
 
   /**
@@ -1728,20 +2028,40 @@ export class SupabaseDataClient implements DataClient {
    * withdrawal state, from `public_coach_reviews` (0003). It is the list beside
    * `coach_stats`' count and must not gain a filter the count does not have.
    */
-  async listReviewsForCoach(coachId: string): Promise<PublicReviewWithListing[]> {
-    if (typeof coachId !== 'string' || coachId === '') return [];
+  async listReviewsForCoach(
+    coachId: string,
+    page?: PageRequest,
+  ): Promise<Page<PublicReviewWithListing>> {
+    if (typeof coachId !== 'string' || coachId === '') return emptyPage();
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.coachReviews, page?.cursor);
     const ctx = await openContext();
 
-    const { data, error } = await ctx.supabase
-      .from('public_coach_reviews')
-      .select(`${PUBLIC_REVIEW_COLUMNS}, listing_title`)
-      .eq('coach_id', coachId)
-      .order('created_at', { ascending: false });
+    // `listing_published` is projected by the view (0026) rather than worked out
+    // here by intersecting with the coach's offer list — that intersection is
+    // wrong once both lists are pages. See the migration.
+    const { data, error, count } = await seek(
+      ctx.supabase
+        .from('public_coach_reviews')
+        .select(`${PUBLIC_REVIEW_COLUMNS}, listing_title, listing_published`, { count: 'exact' })
+        .eq('coach_id', coachId),
+      KEYSETS.coachReviews,
+      cursor,
+      limit,
+    );
     if (error) {
-      if (isMalformedId(error)) return [];
+      if (isMalformedId(error)) return emptyPage();
       throwDataError(error, ctx.userId !== null);
     }
-    return (data ?? []) as PublicReviewWithListing[];
+
+    const window = windowOf(
+      KEYSETS.coachReviews,
+      (data ?? []) as PublicReviewWithListing[],
+      limit,
+      byCreatedAt,
+      totalOf(count),
+    );
+    return pageOf(window, window.rows);
   }
 
   async getOrder(actor: Actor, orderId: string): Promise<OrderWithListing | null> {
@@ -1774,41 +2094,57 @@ export class SupabaseDataClient implements DataClient {
     return only ?? null;
   }
 
-  async listMyOrders(actor: Actor): Promise<OrderWithListing[]> {
+  async listMyOrders(actor: Actor, page?: PageRequest): Promise<Page<OrderWithListing>> {
     const ctx = await openAuthedContext(actor);
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.myOrders, page?.cursor);
 
     // The learner id is DERIVED from the actor, never a parameter, so this
-    // cannot be pointed at anyone else.
-    const { data, error } = await ctx.supabase
-      .from('orders')
-      .select('*')
-      .eq('learner_id', ctx.userId)
-      .order('created_at', { ascending: false });
+    // cannot be pointed at anyone else. The cursor does not change that: it
+    // carries a position, never a scope.
+    const { data, error, count } = await seek(
+      ctx.supabase.from('orders').select('*', { count: 'exact' }).eq('learner_id', ctx.userId),
+      KEYSETS.myOrders,
+      cursor,
+      limit,
+    );
     if (error) throwDataError(error, true);
-    return withListingTitles(ctx, (data ?? []) as Order[]);
+
+    const window = windowOf(KEYSETS.myOrders, (data ?? []) as Order[], limit, byCreatedAt, totalOf(count));
+    return pageOf(window, await withListingTitles(ctx, window.rows));
   }
 
-  async listOrdersForCoach(actor: Actor, coachId: string): Promise<OrderWithListing[]> {
+  async listOrdersForCoach(
+    actor: Actor,
+    coachId: string,
+    page?: PageRequest,
+  ): Promise<Page<OrderWithListing>> {
     const ctx = await openAuthedContext(actor);
-    if (typeof coachId !== 'string' || coachId === '') return [];
+    if (typeof coachId !== 'string' || coachId === '') return emptyPage();
 
     const profile = await resolveProfile(ctx);
     if (profile.id !== coachId && profile.role !== 'admin') {
       throw new DataError('forbidden', 'You can only view your own sales.');
     }
 
-    const { data, error } = await ctx.supabase
-      .from('orders')
-      .select('*')
-      .eq('coach_id', coachId)
-      .order('created_at', { ascending: false });
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.coachOrders, page?.cursor);
+
+    const { data, error, count } = await seek(
+      ctx.supabase.from('orders').select('*', { count: 'exact' }).eq('coach_id', coachId),
+      KEYSETS.coachOrders,
+      cursor,
+      limit,
+    );
     // Only reachable for an admin: a non-admin whose id is not `coachId` was
     // already refused above, and their own id is a well-formed uuid.
     if (error) {
-      if (isMalformedId(error)) return [];
+      if (isMalformedId(error)) return emptyPage();
       throwDataError(error, true);
     }
-    return withListingTitles(ctx, (data ?? []) as Order[]);
+
+    const window = windowOf(KEYSETS.coachOrders, (data ?? []) as Order[], limit, byCreatedAt, totalOf(count));
+    return pageOf(window, await withListingTitles(ctx, window.rows));
   }
 
   /**
@@ -2005,29 +2341,41 @@ export class SupabaseDataClient implements DataClient {
    * withdrawn offer is still a review, and one a moderator could not see is one
    * they could not take down.
    */
-  async listReviewsForModeration(actor: Actor): Promise<ModeratableReview[]> {
+  async listReviewsForModeration(
+    actor: Actor,
+    page?: PageRequest,
+  ): Promise<Page<ModeratableReview>> {
     const ctx = await openAuthedContext(actor);
     await requireAdminProfile(ctx);
 
-    const { data, error } = await ctx.supabase
-      .from('reviews')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.moderation, page?.cursor);
+
+    const { data, error, count } = await seek(
+      ctx.supabase.from('reviews').select('*', { count: 'exact' }),
+      KEYSETS.moderation,
+      cursor,
+      limit,
+    );
     if (error) throwDataError(error, true);
 
-    const reviews = (data ?? []) as Review[];
-    if (reviews.length === 0) return [];
+    const window = windowOf(KEYSETS.moderation, (data ?? []) as Review[], limit, byCreatedAt, totalOf(count));
+    const reviews = window.rows;
+    if (reviews.length === 0) return pageOf(window, []);
 
     const [names, titles] = await Promise.all([
       displayNamesFor(ctx, reviews.map((r) => r.author_id)),
       listingTitlesFor(ctx, reviews.map((r) => r.listing_id)),
     ]);
 
-    return reviews.map((review) => ({
-      ...review,
-      author_name: names.get(review.author_id) ?? 'Unknown',
-      listing_title: titles.get(review.listing_id) ?? UNKNOWN_LISTING,
-    }));
+    return pageOf(
+      window,
+      reviews.map((review) => ({
+        ...review,
+        author_name: names.get(review.author_id) ?? 'Unknown',
+        listing_title: titles.get(review.listing_id) ?? UNKNOWN_LISTING,
+      })),
+    );
   }
 
   /**
@@ -2060,18 +2408,35 @@ export class SupabaseDataClient implements DataClient {
   }
 
   /** The moderation log. `removed_reviews_select_admin` is the policy. */
-  async listRemovedReviews(actor: Actor): Promise<RemovedReviewWithNames[]> {
+  async listRemovedReviews(
+    actor: Actor,
+    page?: PageRequest,
+  ): Promise<Page<RemovedReviewWithNames>> {
     const ctx = await openAuthedContext(actor);
     await requireAdminProfile(ctx);
 
-    const { data, error } = await ctx.supabase
-      .from('removed_reviews')
-      .select('*')
-      .order('removed_at', { ascending: false });
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.removedReviews, page?.cursor);
+
+    // Ordered and keyed on `removed_at` — when it was TAKEN DOWN, not when the
+    // review was written. `KEYSETS.removedReviews` names the same column.
+    const { data, error, count } = await seek(
+      ctx.supabase.from('removed_reviews').select('*', { count: 'exact' }),
+      KEYSETS.removedReviews,
+      cursor,
+      limit,
+    );
     if (error) throwDataError(error, true);
 
-    const rows = (data ?? []) as RemovedReview[];
-    if (rows.length === 0) return [];
+    const window = windowOf(
+      KEYSETS.removedReviews,
+      (data ?? []) as RemovedReview[],
+      limit,
+      (row) => ({ key: row.removed_at, id: row.id }),
+      totalOf(count),
+    );
+    const rows = window.rows;
+    if (rows.length === 0) return pageOf(window, []);
 
     // Both id columns are ON DELETE SET NULL, so either can be absent. The
     // nulls are filtered before the lookup and reinstated after it.
@@ -2085,14 +2450,17 @@ export class SupabaseDataClient implements DataClient {
       listingTitlesFor(ctx, rows.map((r) => r.listing_id)),
     ]);
 
-    return rows.map((row) => ({
-      ...row,
-      author_name: (row.author_id && names.get(row.author_id)) || 'Unknown',
-      listing_title: titles.get(row.listing_id) ?? UNKNOWN_LISTING,
-      // `null` rather than a placeholder: the account is gone, and saying so is
-      // more useful to whoever reads the log than inventing an actor.
-      removed_by_name: (row.removed_by && names.get(row.removed_by)) || null,
-    }));
+    return pageOf(
+      window,
+      rows.map((row) => ({
+        ...row,
+        author_name: (row.author_id && names.get(row.author_id)) || 'Unknown',
+        listing_title: titles.get(row.listing_id) ?? UNKNOWN_LISTING,
+        // `null` rather than a placeholder: the account is gone, and saying so
+        // is more useful to whoever reads the log than inventing an actor.
+        removed_by_name: (row.removed_by && names.get(row.removed_by)) || null,
+      })),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -2157,15 +2525,21 @@ export class SupabaseDataClient implements DataClient {
   }
 
   /** `reports_select_own` is the boundary; the filter here only orders. */
-  async listMyReports(actor: Actor): Promise<Report[]> {
+  async listMyReports(actor: Actor, page?: PageRequest): Promise<Page<Report>> {
     const ctx = await openAuthedContext(actor);
-    const { data, error } = await ctx.supabase
-      .from('reports')
-      .select('*')
-      .eq('reporter_id', ctx.userId)
-      .order('created_at', { ascending: false });
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.myReports, page?.cursor);
+
+    const { data, error, count } = await seek(
+      ctx.supabase.from('reports').select('*', { count: 'exact' }).eq('reporter_id', ctx.userId),
+      KEYSETS.myReports,
+      cursor,
+      limit,
+    );
     if (error) throwDataError(error, true);
-    return (data ?? []) as Report[];
+
+    const window = windowOf(KEYSETS.myReports, (data ?? []) as Report[], limit, byCreatedAt, totalOf(count));
+    return pageOf(window, window.rows);
   }
 
   /**
@@ -2180,18 +2554,27 @@ export class SupabaseDataClient implements DataClient {
    * be GONE: upholding a review report deletes the review, and the report has to
    * outlive it. Three reads, none of which can be a join for that reason.
    */
-  async listReports(actor: Actor, status?: ReportStatus): Promise<ReportWithContext[]> {
+  async listReports(
+    actor: Actor,
+    status?: ReportStatus,
+    page?: PageRequest,
+  ): Promise<Page<ReportWithContext>> {
     const ctx = await openAuthedContext(actor);
     await requireAdminProfile(ctx);
 
-    let query = ctx.supabase.from('reports').select('*').order('created_at', { ascending: false });
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.reports, page?.cursor);
+
+    let query = ctx.supabase.from('reports').select('*', { count: 'exact' });
     if (status) query = query.eq('status', status);
 
-    const { data, error } = await query;
+    // `count` is of THIS STATUS, which is what a queue's tab count is.
+    const { data, error, count } = await seek(query, KEYSETS.reports, cursor, limit);
     if (error) throwDataError(error, true);
 
-    const reports = (data ?? []) as Report[];
-    if (reports.length === 0) return [];
+    const window = windowOf(KEYSETS.reports, (data ?? []) as Report[], limit, byCreatedAt, totalOf(count));
+    const reports = window.rows;
+    if (reports.length === 0) return pageOf(window, []);
 
     const reviewIds = reports
       .map((r) => r.subject_review_id)
@@ -2239,7 +2622,9 @@ export class SupabaseDataClient implements DataClient {
       ),
     ]);
 
-    return reports.map((report) => {
+    return pageOf(
+      window,
+      reports.map((report) => {
       if (report.subject_type === 'review' && report.subject_review_id) {
         const row = live.get(report.subject_review_id);
         const gone = row ? null : archived.get(report.subject_review_id);
@@ -2269,7 +2654,8 @@ export class SupabaseDataClient implements DataClient {
         listing_title: null,
         resolved_by_name: (report.resolved_by && names.get(report.resolved_by)) || null,
       };
-    });
+      }),
+    );
   }
 
   /** Marks a report handled, through `public.resolve_report()`. */
@@ -2336,45 +2722,63 @@ export class SupabaseDataClient implements DataClient {
    * when somebody needs to find them. `profiles_select_admin` is what admits
    * this read.
    */
-  async listCoachesForAdmin(actor: Actor): Promise<Profile[]> {
+  async listCoachesForAdmin(actor: Actor, page?: PageRequest): Promise<Page<Profile>> {
     const ctx = await openAuthedContext(actor);
     await requireAdminProfile(ctx);
 
-    const { data, error } = await ctx.supabase
-      .from('profiles')
-      .select('*')
-      .neq('coach_status', 'none')
-      .is('deleted_at', null)
-      .order('created_at', { ascending: false });
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.adminCoaches, page?.cursor);
+
+    const { data, error, count } = await seek(
+      ctx.supabase
+        .from('profiles')
+        .select('*', { count: 'exact' })
+        .neq('coach_status', 'none')
+        .is('deleted_at', null),
+      KEYSETS.adminCoaches,
+      cursor,
+      limit,
+    );
     if (error) throwDataError(error, true);
-    return (data ?? []) as Profile[];
+
+    const window = windowOf(KEYSETS.adminCoaches, (data ?? []) as Profile[], limit, byCreatedAt, totalOf(count));
+    return pageOf(window, window.rows);
   }
 
   /** The audit log. `admin_actions_select_admin` is the policy. */
-  async listAdminActions(actor: Actor): Promise<AdminActionWithNames[]> {
+  async listAdminActions(actor: Actor, page?: PageRequest): Promise<Page<AdminActionWithNames>> {
     const ctx = await openAuthedContext(actor);
     await requireAdminProfile(ctx);
 
-    const { data, error } = await ctx.supabase
-      .from('admin_actions')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.adminActions, page?.cursor);
+
+    const { data, error, count } = await seek(
+      ctx.supabase.from('admin_actions').select('*', { count: 'exact' }),
+      KEYSETS.adminActions,
+      cursor,
+      limit,
+    );
     if (error) throwDataError(error, true);
 
-    const rows = (data ?? []) as AdminAction[];
-    if (rows.length === 0) return [];
+    const window = windowOf(KEYSETS.adminActions, (data ?? []) as AdminAction[], limit, byCreatedAt, totalOf(count));
+    const rows = window.rows;
+    if (rows.length === 0) return pageOf(window, []);
 
     const names = await displayNamesFor(
       ctx,
       rows.map((r) => r.actor_id).filter((id): id is string => typeof id === 'string'),
     );
-    return rows.map((row) => ({
+    return pageOf(
+      window,
+      rows.map((row) => ({
       ...row,
       // `null`, never a placeholder: the column is nullable because the FK is
       // ON DELETE SET NULL, and because bootstrapping the first administrator
       // has no actor at all.
-      actor_name: (row.actor_id && names.get(row.actor_id)) || null,
-    }));
+        actor_name: (row.actor_id && names.get(row.actor_id)) || null,
+      })),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -2412,16 +2816,31 @@ export class SupabaseDataClient implements DataClient {
     throw new DataError('conflict', 'That invite code could not be created. Please try again.');
   }
 
-  async listInvites(actor: Actor): Promise<Invite[]> {
+  async listInvites(actor: Actor, page?: PageRequest): Promise<Page<Invite>> {
     const ctx = await openAuthedContext(actor);
     await requireAdminProfile(ctx);
 
-    const { data, error } = await ctx.supabase
-      .from('invites')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.invites, page?.cursor);
+
+    // The tie-break is `code`, not `id` — `public.invites` has no `id` column.
+    // `KEYSETS.invites` carries that, and `seek` orders by whatever it names.
+    const { data, error, count } = await seek(
+      ctx.supabase.from('invites').select('*', { count: 'exact' }),
+      KEYSETS.invites,
+      cursor,
+      limit,
+    );
     if (error) throwDataError(error, true);
-    return (data ?? []) as Invite[];
+
+    const window = windowOf(
+      KEYSETS.invites,
+      (data ?? []) as Invite[],
+      limit,
+      (invite) => ({ key: invite.created_at, id: invite.code }),
+      totalOf(count),
+    );
+    return pageOf(window, window.rows);
   }
 
   async revokeInvite(actor: Actor, code: string): Promise<Invite> {
@@ -2494,6 +2913,48 @@ export class SupabaseDataClient implements DataClient {
   // Coach applications
   // -------------------------------------------------------------------------
 
+  /** The single form of the queue read. Same policy, same joined shape. */
+  async getCoachApplication(
+    actor: Actor,
+    applicationId: string,
+  ): Promise<CoachApplicationWithUser | null> {
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+    if (typeof applicationId !== 'string' || applicationId === '') return null;
+
+    const { data, error } = await ctx.supabase
+      .from('coach_applications')
+      .select('*')
+      .eq('id', applicationId)
+      .maybeSingle();
+    if (error) {
+      if (isMalformedId(error)) return null;
+      throwDataError(error, true);
+    }
+    if (!data) return null;
+
+    const application = data as CoachApplication;
+    // An admin reads `profiles` through `profiles_select_admin`, so the email is
+    // available — and this is an admin-only shape, which is why
+    // `CoachApplicationWithUser` may carry one at all.
+    const { data: profile, error: profileError } = await ctx.supabase
+      .from('profiles')
+      .select('full_name, email, coach_status')
+      .eq('id', application.user_id)
+      .maybeSingle();
+    if (profileError) throwDataError(profileError, true);
+
+    const user = profile as
+      | { full_name: string; email: string; coach_status: Profile['coach_status'] }
+      | null;
+    return {
+      ...application,
+      user_name: user?.full_name ?? 'Unknown user',
+      user_email: user?.email ?? '',
+      user_coach_status: user?.coach_status ?? 'none',
+    };
+  }
+
   /**
    * An RPC: it inserts the application AND sets the applicant's `coach_status`
    * to `pending_review`, and the second half is a privilege column.
@@ -2540,18 +3001,29 @@ export class SupabaseDataClient implements DataClient {
   async listCoachApplications(
     actor: Actor,
     filter?: CoachApplicationFilter,
-  ): Promise<CoachApplicationWithUser[]> {
+    page?: PageRequest,
+  ): Promise<Page<CoachApplicationWithUser>> {
     const ctx = await openAuthedContext(actor);
     await requireAdminProfile(ctx);
 
-    let query = ctx.supabase.from('coach_applications').select('*');
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.applications, page?.cursor);
+
+    let query = ctx.supabase.from('coach_applications').select('*', { count: 'exact' });
     if (filter?.status) query = query.eq('status', filter.status);
 
-    const { data, error } = await query.order('created_at', { ascending: false });
+    const { data, error, count } = await seek(query, KEYSETS.applications, cursor, limit);
     if (error) throwDataError(error, true);
 
-    const applications = (data ?? []) as CoachApplication[];
-    if (applications.length === 0) return [];
+    const window = windowOf(
+      KEYSETS.applications,
+      (data ?? []) as CoachApplication[],
+      limit,
+      byCreatedAt,
+      totalOf(count),
+    );
+    const applications = window.rows;
+    if (applications.length === 0) return pageOf(window, []);
 
     // An admin reads `profiles` through `profiles_select_admin`, so the email
     // is available here — and this is an admin-only shape, which is why
@@ -2573,15 +3045,18 @@ export class SupabaseDataClient implements DataClient {
       byId.set(row.id, { full_name: row.full_name, email: row.email, coach_status: row.coach_status });
     }
 
-    return applications.map((application) => {
-      const user = byId.get(application.user_id);
-      return {
-        ...application,
-        user_name: user?.full_name ?? 'Unknown user',
-        user_email: user?.email ?? '',
-        user_coach_status: user?.coach_status ?? 'none',
-      };
-    });
+    return pageOf(
+      window,
+      applications.map((application) => {
+        const user = byId.get(application.user_id);
+        return {
+          ...application,
+          user_name: user?.full_name ?? 'Unknown user',
+          user_email: user?.email ?? '',
+          user_coach_status: user?.coach_status ?? 'none',
+        };
+      }),
+    );
   }
 
   /**

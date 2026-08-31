@@ -31,12 +31,15 @@ export type {
   CreateListingInput,
   CreateReviewInput,
   ListingFilter,
+  ListingSort,
   SignInInput,
   SignUpInput,
   UpdateListingInput,
   UpdateMyCoachProfileInput,
 } from './client';
+export { isListingSort, LISTING_SORTS } from './client';
 export * from './types';
+export * from './pagination';
 
 let cached: DataClient | null = null;
 

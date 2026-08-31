@@ -6,6 +6,7 @@ import { redirect } from 'next/navigation';
 import { banAuthUser } from '@/lib/auth/account-deletion';
 import { destroySession, getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { drainAll } from '@/lib/data/pagination';
 import { isDataError } from '@/lib/data/types';
 import { fieldError, formError, toFormState, type FormState } from '@/lib/forms';
 import { consume, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
@@ -300,7 +301,10 @@ export async function deleteAccountAction(_prev: FormState, formData: FormData):
      * filter `deleted_at`, so it sees the already-withdrawn ones too, and
      * `softDeleteListing` would answer `conflict` for those.
      */
-    const mine = await db.listMyListings(actor);
+    // EVERY page, not the first. `delete_my_account()` refuses while any offer
+    // is still on sale, so a partial sweep would empty most of the shop and
+    // then fail — see `drainAll`.
+    const mine = await drainAll((page) => db.listMyListings(actor, page));
     for (const listing of mine) {
       if (listing.deleted_at === null) await db.softDeleteListing(actor, listing.id);
     }

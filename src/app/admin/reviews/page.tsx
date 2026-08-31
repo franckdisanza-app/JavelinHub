@@ -3,13 +3,16 @@ import Link from 'next/link';
 
 import { RemoveReviewForm } from '@/app/admin/reviews/remove-review-form';
 import { AdminNav } from '@/components/admin-nav';
+import { Pager } from '@/components/pager';
 import { Alert } from '@/components/ui/alert';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { getActor, getCurrentProfile, requireAdmin } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { DataErrorNotice, resolveDataError } from '@/lib/data-error';
+import type { Page } from '@/lib/data/pagination';
 import type { ModeratableReview, RemovedReviewWithNames } from '@/lib/data/types';
 import { formatDate } from '@/lib/format';
+import { firstValue } from '@/lib/search-params';
 
 /**
  * The same reasoning as `/admin/invites`: `generateMetadata` runs independently
@@ -37,23 +40,30 @@ export async function generateMetadata(): Promise<Metadata> {
  * reader. `0002_rls.sql` makes the same argument about a coach's listing copy;
  * `0016` drops the `reviews_update_admin` policy that would have allowed it.
  */
-export default async function AdminReviewsPage() {
+export default async function AdminReviewsPage({ searchParams }: PageProps<'/admin/reviews'>) {
   // Anonymous -> /login?next=/admin/reviews. Signed in but not an admin -> 404,
   // so the page's existence is not confirmed to someone poking at URLs. Both
   // reads below would refuse them regardless.
   await requireAdmin('/admin/reviews');
 
+  const params = await searchParams;
+  // TWO LISTS, TWO CURSORS. One shared `?after=` would move both at once, and
+  // each list's keyset would refuse the other's cursor (different `scope`), so
+  // one of the two would silently jump back to the top.
+  const queueCursor = firstValue(params.queue).trim();
+  const logCursor = firstValue(params.log).trim();
+
   const actor = await getActor();
   const db = getDataClient();
 
-  let reviews: ModeratableReview[];
-  let removed: RemovedReviewWithNames[];
+  let reviews: Page<ModeratableReview>;
+  let removed: Page<RemovedReviewWithNames>;
   try {
     // Sequential rather than `Promise.all`: if the queue read fails there is
     // nothing to moderate, and running the log read anyway would only produce a
     // second error to swallow.
-    reviews = await db.listReviewsForModeration(actor);
-    removed = await db.listRemovedReviews(actor);
+    reviews = await db.listReviewsForModeration(actor, { cursor: queueCursor || undefined });
+    removed = await db.listRemovedReviews(actor, { cursor: logCursor || undefined });
   } catch (error) {
     return (
       <Shell>
@@ -66,17 +76,17 @@ export default async function AdminReviewsPage() {
     <Shell>
       <section>
         <h2 className="text-xs font-semibold tracking-wide text-faint uppercase">
-          Published ({reviews.length})
+          Published ({reviews.total ?? reviews.items.length})
         </h2>
 
-        {reviews.length === 0 ? (
+        {reviews.items.length === 0 ? (
           <p className="mt-2 text-sm leading-relaxed text-muted">
             No reviews yet. They appear here the moment a buyer writes one — every review on the site,
             not only the reported ones, because a review can be wrong without anybody having said so.
           </p>
         ) : (
           <ul className="mt-3 flex flex-col gap-3">
-            {reviews.map((review) => (
+            {reviews.items.map((review) => (
               <li key={review.id}>
                 <Card>
                   <CardHeader
@@ -101,21 +111,33 @@ export default async function AdminReviewsPage() {
             ))}
           </ul>
         )}
+
+        <Pager
+          basePath="/admin/reviews"
+          params={{ log: logCursor || undefined }}
+          cursorParam="queue"
+          nextCursor={reviews.nextCursor}
+          onFirstPage={queueCursor === ''}
+          shown={reviews.items.length}
+          total={reviews.total}
+          noun="reviews"
+          className="mt-4"
+        />
       </section>
 
       {/* ------------------------------------------------------------- Log */}
       <section>
         <h2 className="text-xs font-semibold tracking-wide text-faint uppercase">
-          Removed ({removed.length})
+          Removed ({removed.total ?? removed.items.length})
         </h2>
 
-        {removed.length === 0 ? (
+        {removed.items.length === 0 ? (
           <p className="mt-2 text-sm leading-relaxed text-muted">
             Nothing has been removed. Anything taken down is copied here first, with who did it and why.
           </p>
         ) : (
           <ul className="mt-3 flex flex-col gap-3">
-            {removed.map((row) => (
+            {removed.items.map((row) => (
               <li key={row.id}>
                 <Card>
                   <CardHeader
@@ -148,6 +170,18 @@ export default async function AdminReviewsPage() {
             ))}
           </ul>
         )}
+
+        <Pager
+          basePath="/admin/reviews"
+          params={{ queue: queueCursor || undefined }}
+          cursorParam="log"
+          nextCursor={removed.nextCursor}
+          onFirstPage={logCursor === ''}
+          shown={removed.items.length}
+          total={removed.total}
+          noun="removals"
+          className="mt-4"
+        />
       </section>
     </Shell>
   );

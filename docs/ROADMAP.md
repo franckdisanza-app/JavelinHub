@@ -294,9 +294,25 @@ them twice is how the two diverge.
 
 ## 6. Scale and correctness
 
-* **No pagination anywhere.** `docs/DATA-LAYER.md` flags it: `listListings`
-  returns *everything*, newest first. `listReviewsForCoach` has the same
-  property and will hit it sooner. Add cursors before launch, not after.
+* ~~**No pagination anywhere.**~~ **Done.** Eighteen reads take a `PageRequest` and return a
+  `Page<T>`; `MAX_PAGE_SIZE` caps every one of them, so no caller can ask for a
+  table scan any more.
+
+  Keyset rather than offset, because `OFFSET` is unstable under writes — a row
+  inserted between two requests makes page 2 repeat one row and skip another,
+  which on a moderation queue is a review nobody ever sees. The cost is that
+  pages are only reachable in order, so the pager offers Next and Start again
+  rather than page numbers.
+
+  The interesting half was not the reads. Pagination turns "read the list and
+  `.find()` in it" from wasteful into WRONG, silently: five pages were doing
+  exactly that, and each now has a single-row read instead — see the table in
+  `docs/DATA-LAYER.md`. The coach profile's link-or-not decision moved into the
+  view (0026) for the same reason.
+
+  Filters landed with it: price floor, price ceiling, and three sorts on the
+  browse page. Each sort has its own keyset scope, so a cursor does not survive
+  a change of ordering.
 * ~~**The full-text index is dead weight.**~~ **Dropped** (0015). The choice was
   stated here as "implement `textSearch` or drop it", and dropping is the only
   option that keeps the two backends honest: full-text is not a faster substring

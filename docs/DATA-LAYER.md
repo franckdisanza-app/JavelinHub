@@ -816,6 +816,14 @@ and the coach's dashboard flags it as *Needs a file*.
 | `signUp`, `signInWithPassword` | none |
 | `updateMyPassword` | any signed-in actor, on their OWN password — there is no subject parameter to point elsewhere. Getting the session in the first place is where password reset does its work: see `src/lib/auth/password-reset.ts` |
 | `listMyOrders`, `createCoachApplication`, `getMyCoachApplication`, `redeemInviteCode` | any signed-in actor |
+| `getMyListing`, `getMyOrderForListing` | any signed-in actor, scoped to themselves — the subject is derived, not a parameter, so `null` covers both "no such row" and "not yours" |
+| `countOrdersForListing` | the offer's coach, or an admin |
+| `listPublicProfiles` | none — public, and carries no email |
+| `getCoachApplication` | the actor's **stored** `role` is `'admin'` |
+| `getMyListing`, `getMyOrderForListing` | any signed-in actor, scoped to themselves — the subject is derived, not a parameter, so `null` covers both "no such row" and "not yours" |
+| `countOrdersForListing` | the offer's coach, or an admin |
+| `listPublicProfiles` | none — public, and carries no email |
+| `getCoachApplication` | the actor's **stored** `role` is `'admin'` |
 | `createListing` | the actor's **stored** `coach_status` is `'approved'` |
 | `createInvite`, `listInvites`, `revokeInvite`, `listCoachApplications`, `reviewCoachApplication` | the actor's **stored** `role` is `'admin'` |
 | `reportReview` | signed in, **and the coach who owns the offer the review is about** — a join, not a column comparison. Everyone else, including the review's author and an admin, gets `not_found`, in the same words an unknown id gets |
@@ -945,6 +953,200 @@ administrator has no actor at all.
 > lines to the audit log until `0024`. **A function no client should call must
 > revoke from those three roles by name.** `scripts/probe-grants.mjs` sweeps every
 > client-reachable function for this, and `verify:supabase` pins this one.
+
+## Pagination
+
+Every read that grows without bound returns a `Page<T>`, not an array:
+
+```ts
+const page = await db.listListings({ q: 'javelin' }, { cursor, limit: 24 });
+page.items      // the rows
+page.nextCursor // pass back as `cursor`; null means this was the last page
+page.total      // rows matching the filter, IGNORING the cursor — or null
+```
+
+Eighteen reads take a `PageRequest`. The ones that do not are bounded by their
+caller (`listOfferStats`, `listCoachStats`, `listPublicProfiles` — all take an id
+array) or by the row they hang off (`listDeliverables`).
+
+### Keyset, not offset
+
+`LIMIT n OFFSET m` is one line and wrong twice. It is **unstable under writes**:
+every list here is newest-first, so a row inserted between two requests shifts
+everything down and page 2 repeats one row while skipping another — on a
+moderation queue, that is a review nobody ever sees. And it gets slower the
+deeper you go, because Postgres walks and discards the first `m` rows every time.
+
+The keyset asks `where (key, id) < (last key, last id)`, which is an index range
+scan at the same cost for every page. The price is that pages are only reachable
+in order, which is why the UI offers **Next** and the browser's own Back rather
+than page numbers.
+
+**The tie-break is not optional.** Every keyset is `(key, id)`, never `key`
+alone. Two rows sharing a `created_at` — or a price, under the browse sort — are
+otherwise ordered arbitrarily, and an arbitrary order is one that can change
+between two requests. `KEYSETS` in `pagination.ts` names the ordering column and
+the tie-break for all twenty reads, and both backends import it, so they cannot
+disagree about what page two starts with.
+
+Two of those specs are not `created_at`, and getting either wrong fails silently
+as a skipped row rather than loudly: `removed_reviews` is ordered by `removed_at`
+(when it was taken down, not when it was written), and `invites` ties on `code`,
+because that table has no `id` column at all.
+
+### A cursor is a position, never a capability
+
+The cursor carries an ordering value and a row id, base64url-encoded. It is
+**opaque but not secret** — everything in it was just rendered to the person
+holding it.
+
+**Every scope, filter and entitlement is re-derived from the actor and the
+arguments on every request.** A cursor taken from one person's `/purchases` and
+pasted into another's changes which rows are *skipped* and cannot change which
+rows *exist* to be skipped. Never put a coach id, a status filter or an actor in
+one.
+
+Anything malformed, truncated, or belonging to another list decodes to `null`,
+and `null` means "start at the beginning" — a hand-edited URL shows page one, not
+a 500. The `scope` field is what makes a cursor from the coach directory
+meaningless on the offer browse, and what makes a newest-first cursor refused
+after the reader switches to cheapest-first (position 24 is a different row in
+each ordering).
+
+### `total` is the whole list
+
+`page.total` counts rows matching the filter with the cursor ignored — it is
+"137 offers", not "113 left". Tab counts read it, and so does every "24 of 137"
+line. It is `null` when the backend could not produce one, and a caller must
+render that absence rather than printing `0`: "no offers" and "we did not count"
+are different sentences.
+
+### Five reads exist because a scan would now be wrong
+
+Pagination turned a class of quiet inefficiency into a class of quiet bug: a page
+that read a whole list and then `.find()` or `.some()` over it now reads twenty-
+four rows and answers confidently about the rest. Each of these replaces one:
+
+| Read | The scan it replaced | What the scan would get wrong |
+|---|---|---|
+| `getMyListing` | `listMyListings().find()` | the editor 404s on a coach's older offers |
+| `getMyOrderForListing` | `listMyOrders().some()` | a Claim button on something already owned |
+| `countOrdersForListing` | `listOrdersForCoach().some()` | unlocks a control the database refuses |
+| `listPublicProfiles` | `listCoaches()` as a Set | a coach past page 1 stops being a link |
+| `getCoachApplication` | the unfiltered queue read | no outcome banner after a decision |
+
+`PublicReviewWithListing.listing_published` (migration 0026) is the same fix in
+column form: the coach page used to intersect its review list with its offer
+list to decide whether a title could be a link, and a review on page 1 can be
+about an offer on page 3.
+
+### `drainAll`, and when it is right
+
+Two callers must act on **every** row, not a page: withdrawing all of a coach's
+offers before deleting or suspending them. Both `delete_my_account()` and
+`set_coach_status()` refuse while any offer is still on sale, so a first-page
+sweep would half-empty somebody's shop and then fail. `drainAll` walks every page
+at `MAX_PAGE_SIZE` and throws rather than returning a prefix.
+
+**It is for writers that need the whole set, never for rendering.** Anywhere a
+human is looking at the result, a page is the right answer.
+
+## Pagination
+
+Every read that grows without bound returns a `Page<T>`, not an array:
+
+```ts
+const page = await db.listListings({ q: 'javelin' }, { cursor, limit: 24 });
+page.items      // the rows
+page.nextCursor // pass back as `cursor`; null means this was the last page
+page.total      // rows matching the filter, IGNORING the cursor — or null
+```
+
+Eighteen reads take a `PageRequest`. The ones that do not are bounded by their
+caller (`listOfferStats`, `listCoachStats`, `listPublicProfiles` — all take an id
+array) or by the row they hang off (`listDeliverables`).
+
+### Keyset, not offset
+
+`LIMIT n OFFSET m` is one line and wrong twice. It is **unstable under writes**:
+every list here is newest-first, so a row inserted between two requests shifts
+everything down and page 2 repeats one row while skipping another — on a
+moderation queue, that is a review nobody ever sees. And it gets slower the
+deeper you go, because Postgres walks and discards the first `m` rows every time.
+
+The keyset asks `where (key, id) < (last key, last id)`, which is an index range
+scan at the same cost for every page. The price is that pages are only reachable
+in order, which is why the UI offers **Next** and the browser's own Back rather
+than page numbers.
+
+**The tie-break is not optional.** Every keyset is `(key, id)`, never `key`
+alone. Two rows sharing a `created_at` — or a price, under the browse sort — are
+otherwise ordered arbitrarily, and an arbitrary order is one that can change
+between two requests. `KEYSETS` in `pagination.ts` names the ordering column and
+the tie-break for all twenty reads, and both backends import it, so they cannot
+disagree about what page two starts with.
+
+Two of those specs are not `created_at`, and getting either wrong fails silently
+as a skipped row rather than loudly: `removed_reviews` is ordered by `removed_at`
+(when it was taken down, not when it was written), and `invites` ties on `code`,
+because that table has no `id` column at all.
+
+### A cursor is a position, never a capability
+
+The cursor carries an ordering value and a row id, base64url-encoded. It is
+**opaque but not secret** — everything in it was just rendered to the person
+holding it.
+
+**Every scope, filter and entitlement is re-derived from the actor and the
+arguments on every request.** A cursor taken from one person's `/purchases` and
+pasted into another's changes which rows are *skipped* and cannot change which
+rows *exist* to be skipped. Never put a coach id, a status filter or an actor in
+one.
+
+Anything malformed, truncated, or belonging to another list decodes to `null`,
+and `null` means "start at the beginning" — a hand-edited URL shows page one, not
+a 500. The `scope` field is what makes a cursor from the coach directory
+meaningless on the offer browse, and what makes a newest-first cursor refused
+after the reader switches to cheapest-first (position 24 is a different row in
+each ordering).
+
+### `total` is the whole list
+
+`page.total` counts rows matching the filter with the cursor ignored — it is
+"137 offers", not "113 left". Tab counts read it, and so does every "24 of 137"
+line. It is `null` when the backend could not produce one, and a caller must
+render that absence rather than printing `0`: "no offers" and "we did not count"
+are different sentences.
+
+### Five reads exist because a scan would now be wrong
+
+Pagination turned a class of quiet inefficiency into a class of quiet bug: a page
+that read a whole list and then `.find()` or `.some()` over it now reads twenty-
+four rows and answers confidently about the rest. Each of these replaces one:
+
+| Read | The scan it replaced | What the scan would get wrong |
+|---|---|---|
+| `getMyListing` | `listMyListings().find()` | the editor 404s on a coach's older offers |
+| `getMyOrderForListing` | `listMyOrders().some()` | a Claim button on something already owned |
+| `countOrdersForListing` | `listOrdersForCoach().some()` | unlocks a control the database refuses |
+| `listPublicProfiles` | `listCoaches()` as a Set | a coach past page 1 stops being a link |
+| `getCoachApplication` | the unfiltered queue read | no outcome banner after a decision |
+
+`PublicReviewWithListing.listing_published` (migration 0026) is the same fix in
+column form: the coach page used to intersect its review list with its offer
+list to decide whether a title could be a link, and a review on page 1 can be
+about an offer on page 3.
+
+### `drainAll`, and when it is right
+
+Two callers must act on **every** row, not a page: withdrawing all of a coach's
+offers before deleting or suspending them. Both `delete_my_account()` and
+`set_coach_status()` refuse while any offer is still on sale, so a first-page
+sweep would half-empty somebody's shop and then fail. `drainAll` walks every page
+at `MAX_PAGE_SIZE` and throws rather than returning a prefix.
+
+**It is for writers that need the whole set, never for rendering.** Anywhere a
+human is looking at the result, a page is the right answer.
 
 ## Server-only
 

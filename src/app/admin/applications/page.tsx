@@ -13,12 +13,15 @@ import {
 } from '@/app/admin/applications/filters';
 import { ReviewForm } from '@/app/admin/applications/review-form';
 import { AdminNav } from '@/components/admin-nav';
+import { Pager } from '@/components/pager';
 import { Alert } from '@/components/ui/alert';
 import { Badge, type BadgeTone } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { cn } from '@/components/ui/cn';
 import { getActor, getCurrentProfile, requireAdmin } from '@/lib/auth/session';
 import { DataErrorNotice, resolveDataError } from '@/lib/data-error';
+import type { Page } from '@/lib/data/pagination';
+import { firstValue } from '@/lib/search-params';
 import { getDataClient } from '@/lib/data';
 import type { CoachApplicationWithUser, CoachStatus } from '@/lib/data/types';
 import { formatDate } from '@/lib/format';
@@ -55,15 +58,44 @@ export default async function AdminApplicationsPage({
   const actor = await getActor();
   const db = getDataClient();
 
-  let all: CoachApplicationWithUser[];
-  let applications: CoachApplicationWithUser[];
+  const cursor = firstValue(params.after).trim();
+
+  let page: Page<CoachApplicationWithUser>;
+  let counts: Counts;
+  let reviewed: CoachApplicationWithUser | null;
   try {
-    // Unfiltered once, for the tab counts; then the filtered read the tab
-    // actually shows. `listCoachApplications` does the status filtering, rather
-    // than the page slicing a list it was not supposed to have.
-    all = await db.listCoachApplications(actor);
+    /*
+     * THREE COUNT READS, THEN ONE PAGE OF ROWS. Each count asks for `limit: 1`
+     * and uses only `page.total`, so it comes back as one row and a number
+     * rather than a table.
+     *
+     * This used to read every application and tally the statuses in memory,
+     * which pagination makes wrong rather than merely wasteful: the tally would
+     * have been of the first page, and the tabs would have said "Pending 24" no
+     * matter how many there were.
+     */
+    const [pendingCount, approvedCount, rejectedCount] = await Promise.all([
+      db.listCoachApplications(actor, { status: 'pending' }, { limit: 1 }),
+      db.listCoachApplications(actor, { status: 'approved' }, { limit: 1 }),
+      db.listCoachApplications(actor, { status: 'rejected' }, { limit: 1 }),
+    ]);
+    counts = {
+      pending: pendingCount.total ?? 0,
+      approved: approvedCount.total ?? 0,
+      rejected: rejectedCount.total ?? 0,
+      all: (pendingCount.total ?? 0) + (approvedCount.total ?? 0) + (rejectedCount.total ?? 0),
+    };
+
     const status = toStatusFilter(filter);
-    applications = status ? await db.listCoachApplications(actor, { status }) : all;
+    page = await db.listCoachApplications(actor, status ? { status } : undefined, {
+      cursor: cursor || undefined,
+    });
+
+    // ONE LOOKUP for the outcome banner. It used to be a `.find()` over the
+    // unfiltered list — which no longer exists, and would have been the wrong
+    // place to look anyway: approving an application takes it out of the
+    // `pending` tab the admin is standing in.
+    reviewed = reviewedId ? await db.getCoachApplication(actor, reviewedId) : null;
   } catch (error) {
     return (
       <Shell filter={filter} counts={emptyCounts()}>
@@ -72,13 +104,12 @@ export default async function AdminApplicationsPage({
     );
   }
 
-  const counts = countBy(all);
+  const applications = page.items;
 
   // The outcome banner is rebuilt from the store, not from the query string:
   // `?reviewed=<id>` only selects which row to report on, and a row that is
   // still pending reports nothing. Pasting the URL by hand therefore cannot
   // make this page claim a decision that was never recorded.
-  const reviewed = reviewedId ? (all.find((a) => a.id === reviewedId) ?? null) : null;
   const outcome = reviewed && reviewed.status !== 'pending' ? reviewed : null;
 
   return (
@@ -88,7 +119,7 @@ export default async function AdminApplicationsPage({
       <Card>
         <CardHeader
           title={`${FILTER_LABELS[filter]} applications`}
-          description={describe(filter, applications.length, counts.pending)}
+          description={describe(filter, page.total ?? applications.length, counts.pending)}
         />
         <CardBody className="py-0">
           {applications.length === 0 ? (
@@ -105,6 +136,18 @@ export default async function AdminApplicationsPage({
               ))}
             </ul>
           )}
+
+          <Pager
+            basePath={ADMIN_APPLICATIONS_PATH}
+            params={{ status: filter === DEFAULT_FILTER ? undefined : filter }}
+            cursorParam="after"
+            nextCursor={page.nextCursor}
+            onFirstPage={cursor === ''}
+            shown={applications.length}
+            total={page.total}
+            noun="applications"
+            className="py-4"
+          />
         </CardBody>
       </Card>
     </Shell>
@@ -342,15 +385,6 @@ function statusOf(application: CoachApplicationWithUser): { label: string; tone:
   if (application.status === 'approved') return { label: 'Approved', tone: 'success' };
   if (application.status === 'rejected') return { label: 'Rejected', tone: 'danger' };
   return { label: 'Pending', tone: 'brand' };
-}
-
-function countBy(all: CoachApplicationWithUser[]): Counts {
-  return {
-    pending: all.filter((a) => a.status === 'pending').length,
-    approved: all.filter((a) => a.status === 'approved').length,
-    rejected: all.filter((a) => a.status === 'rejected').length,
-    all: all.length,
-  };
 }
 
 function emptyCounts(): Counts {

@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { ListingCard } from '@/components/listing-card';
+import { Pager } from '@/components/pager';
 import { ReportForm } from '@/components/report-form';
 import { ReviewItem } from '@/components/review-item';
 import { Alert } from '@/components/ui/alert';
@@ -129,9 +130,14 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
     );
   }
 
-  const [stats, reviews, coach, coachOffers] = await Promise.all([
+  // This page has ONE paged list — the reviews — so it owns `?after=`. The
+  // cross-sell grid below is capped rather than paged: it is a teaser for the
+  // coach profile, which is where the full list lives.
+  const reviewCursor = firstValue(search.after).trim();
+
+  const [stats, reviewPage, coach, coachOffers] = await Promise.all([
     db.getOfferStats(listing.id),
-    db.listReviewsForListing(listing.id),
+    db.listReviewsForListing(listing.id, { cursor: reviewCursor || undefined }),
     // `null` for an unknown id AND for anyone who is not an approved coach —
     // the two are deliberately indistinguishable. It gates the cross-links
     // below rather than being rendered: a coach can be de-approved while their
@@ -141,10 +147,15 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
     db.getPublicCoach(listing.coach_id),
     // Public and published-only, like every other public listing read. The
     // actor argument exists for interface symmetry and does not widen it.
-    db.listListingsByCoach(null, listing.coach_id),
+    //
+    // ONE MORE THAN THE CAP, because this offer is almost always among them and
+    // is filtered out below — asking for exactly four would show three whenever
+    // it was.
+    db.listListingsByCoach(null, listing.coach_id, { limit: MORE_OFFERS_SHOWN + 1 }),
   ]);
 
-  const otherOffers = coachOffers.filter((offer) => offer.id !== listing.id);
+  const reviews = reviewPage.items;
+  const otherOffers = coachOffers.items.filter((offer) => offer.id !== listing.id);
   const shownOffers = otherOffers.slice(0, MORE_OFFERS_SHOWN);
   // Batched, and keyed by id rather than zipped by index: `listOfferStats`
   // drops ids it has no row for, so a positional zip would misalign and print
@@ -152,17 +163,19 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
   const shownOfferStats = await db.listOfferStats(shownOffers.map((offer) => offer.id));
   const shownStatsById = new Map(shownOfferStats.map((row) => [row.listing_id, row]));
 
-  // Have they already claimed this? It decides the claim control and widens
-  // nothing: `listMyOrders` is scoped to the actor by the data layer and
-  // returns [] for an anonymous viewer.
-  const myOrders = viewer ? await db.listMyOrders(viewer) : [];
-  const alreadyClaimed = myOrders.some((order) => order.listing_id === listing.id);
+  // Have they already claimed this? ONE LOOKUP, not a scan of their purchase
+  // history — which is now a page, so a scan would answer "no" for a buyer with
+  // more than a page of purchases and offer them a Claim button for something
+  // they already own. `getMyOrderForListing` derives the learner from the actor
+  // and so widens nothing.
+  const alreadyClaimed = viewer ? (await db.getMyOrderForListing(viewer, listing.id)) !== null : false;
   const isOwnOffer = viewer?.userId === listing.coach_id;
 
   // Set by createListingAction's redirect. Trusted only to show a message —
   // it grants nothing, and the listing above it is the real confirmation.
   const justPublished = firstValue(search.published) === '1';
 
+  const reviewTotal = reviewPage.total ?? reviews.length;
   const salesCount = stats?.sales_count ?? 0;
   // Nothing sold and nothing written at this epoch: the one state that reads
   // "New offer". An offer that HAS sold and simply has no reviews yet is a
@@ -368,8 +381,9 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
         {reviews.length > 0 ? (
           <>
             <p className="mt-4 text-sm text-muted">
-              {reviews.length === 1 ? '1 review' : `${reviews.length} reviews`} of this offer, newest
-              first.
+              {/* The TOTAL, not the number on screen — the pager below says how
+                  many of them are showing. */}
+              {reviewTotal === 1 ? '1 review' : `${reviewTotal} reviews`} of this offer, newest first.
             </p>
             <ul className="mt-3 flex flex-col gap-3">
               {reviews.map((review) => (
@@ -397,6 +411,18 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
                 </li>
               ))}
             </ul>
+
+            <Pager
+              basePath={`/offers/${listing.id}`}
+              params={{ q: firstValue(search.q).trim() || undefined }}
+              cursorParam="after"
+              nextCursor={reviewPage.nextCursor}
+              onFirstPage={reviewCursor === ''}
+              shown={reviews.length}
+              total={reviewPage.total}
+              noun="reviews"
+              className="mt-4"
+            />
           </>
         ) : (
           <div className="mt-4">

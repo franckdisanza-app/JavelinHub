@@ -2,17 +2,22 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { ListingCard } from '@/components/listing-card';
+import { Pager } from '@/components/pager';
 import { Alert } from '@/components/ui/alert';
 import { Button, linkButtonClass } from '@/components/ui/button';
 import { Field, fieldDescribedBy } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { getDataClient } from '@/lib/data';
+import { emptyPage } from '@/lib/data/pagination';
+import type { ListingWithCoach } from '@/lib/data/types';
 import {
   LISTING_CATEGORY_LABELS,
   isListingCategory,
   type ListingCategory,
 } from '@/lib/data/types';
+import { isListingSort, type ListingSort } from '@/lib/data';
+import { parsePriceToCents } from '@/lib/format';
 import { firstValue } from '@/lib/search-params';
 
 export const metadata: Metadata = { title: 'Browse offers' };
@@ -56,15 +61,46 @@ export default async function OffersPage({
   const category: ListingCategory | null = isListingCategory(rawCategory) ? rawCategory : null;
   const unknownCategory = rawCategory !== '' && category === null;
 
+  /*
+   * The price bounds arrive as whatever somebody typed. `parsePriceToCents` is
+   * the same parser the offer composer uses, so "12", "12.50" and "£12.50" all
+   * mean the same thing in the filter as they do in the form — and anything it
+   * cannot read becomes `null`, i.e. no bound, rather than zero. A filter that
+   * silently read a typo as "£0.00 and under" would return nothing and give the
+   * visitor no clue why.
+   */
+  const rawMin = firstValue(params.min).trim();
+  const rawMax = firstValue(params.max).trim();
+  const minPriceCents = rawMin === '' ? null : parsePriceToCents(rawMin);
+  const maxPriceCents = rawMax === '' ? null : parsePriceToCents(rawMax);
+
+  // Read once and narrowed once — calling `firstValue` twice would leave the
+  // second call outside the guard's narrowing, which is what the compiler
+  // objects to and is also a second parse of the same parameter.
+  const rawSort = firstValue(params.sort).trim();
+  const sort: ListingSort = isListingSort(rawSort) ? rawSort : 'newest';
+  const cursor = firstValue(params.after).trim();
+
   const db = getDataClient();
-  const [listings, categories] = await Promise.all([
-    // Short-circuited rather than queried: `listListings` would also return []
-    // for an out-of-taxonomy slug, but not asking is clearer than relying on it.
+  const [page, categories] = await Promise.all([
+    // Short-circuited rather than queried: `listListings` would also return an
+    // empty page for an out-of-taxonomy slug, but not asking is clearer than
+    // relying on it.
     unknownCategory
-      ? Promise.resolve([])
-      : db.listListings({ q: q || undefined, category: category ?? undefined }),
+      ? Promise.resolve(emptyPage<ListingWithCoach>())
+      : db.listListings(
+          {
+            q: q || undefined,
+            category: category ?? undefined,
+            minPriceCents: minPriceCents ?? undefined,
+            maxPriceCents: maxPriceCents ?? undefined,
+            sort,
+          },
+          { cursor: cursor || undefined },
+        ),
     db.listCategories(),
   ]);
+  const listings = page.items;
 
   // ---------------------------------------------------------------------------
   // Two batched reads, never N per card.
@@ -85,9 +121,13 @@ export default async function OffersPage({
   // assertion that was missing for it — but a caller that cannot be misaligned
   // at all is better than a caller that relies on a promise.
   // ---------------------------------------------------------------------------
-  const [offerStats, approvedCoaches] = await Promise.all([
+  const [offerStats, coachProfiles] = await Promise.all([
     db.listOfferStats(listings.map((listing) => listing.id)),
-    db.listCoaches(),
+    // BY THE IDS ON THIS PAGE, not the whole coach directory. The directory is
+    // itself a page now, so asking it would answer "is this coach approved?"
+    // with "they were not in the first 24", and a coach further down the list
+    // would silently stop being a link.
+    db.listPublicProfiles(listings.map((listing) => listing.coach_id)),
   ]);
   const statsById = new Map(offerStats.map((stats) => [stats.listing_id, stats]));
   // Which coach names may be links. `getPublicCoach` — and this directory read —
@@ -98,9 +138,21 @@ export default async function OffersPage({
   // sets `coach_status = 'rejected'` under them. Linking unconditionally would
   // 404. This is the same rule `/coaches/[id]` already applies to a review's
   // offer title: link only what a visitor can actually open.
-  const approvedCoachIds = new Set(approvedCoaches.map((coach) => coach.id));
+  const approvedCoachIds = new Set(
+    coachProfiles.filter((profile) => profile.is_approved_coach).map((profile) => profile.id),
+  );
 
-  const filtered = q !== '' || rawCategory !== '';
+  const filtered = q !== '' || rawCategory !== '' || rawMin !== '' || rawMax !== '' || sort !== 'newest';
+  // Everything the pager has to carry forward, so page two is still the same
+  // search. Written from the VALIDATED values, so a bogus `?sort=` is dropped
+  // rather than propagated.
+  const pagerParams = {
+    q: q || undefined,
+    category: category ?? undefined,
+    min: rawMin || undefined,
+    max: rawMax || undefined,
+    sort: sort === 'newest' ? undefined : sort,
+  };
 
   return (
     <div className="mx-auto w-full max-w-6xl px-4 py-10 sm:px-6 sm:py-14">
@@ -159,6 +211,36 @@ export default async function OffersPage({
           </Select>
         </Field>
 
+        <Field id="min" label="Min price" hint="In pounds." className="sm:w-28">
+          <Input
+            id="min"
+            name="min"
+            inputMode="decimal"
+            defaultValue={rawMin}
+            placeholder="0"
+            aria-describedby={fieldDescribedBy('min', { hint: true })}
+          />
+        </Field>
+
+        <Field id="max" label="Max price" hint="In pounds." className="sm:w-28">
+          <Input
+            id="max"
+            name="max"
+            inputMode="decimal"
+            defaultValue={rawMax}
+            placeholder="Any"
+            aria-describedby={fieldDescribedBy('max', { hint: true })}
+          />
+        </Field>
+
+        <Field id="sort" label="Sort" className="sm:w-44">
+          <Select id="sort" name="sort" defaultValue={sort}>
+            <option value="newest">Newest first</option>
+            <option value="price_asc">Cheapest first</option>
+            <option value="price_desc">Dearest first</option>
+          </Select>
+        </Field>
+
         <div className="flex gap-2">
           <Button type="submit" className="w-full sm:w-auto">
             Search
@@ -170,6 +252,17 @@ export default async function OffersPage({
           ) : null}
         </div>
       </form>
+
+      {/*
+        Said once, here, rather than beside each field: a bound that could not be
+        read is treated as no bound, and the visitor is told rather than being
+        shown a result set that quietly ignored half of what they asked for.
+      */}
+      {(rawMin !== '' && minPriceCents === null) || (rawMax !== '' && maxPriceCents === null) ? (
+        <p className="mt-3 text-body-15 text-danger" role="alert">
+          A price filter was not a number, so it was ignored. Use digits, like 12 or 12.50.
+        </p>
+      ) : null}
 
       {/*
         `break-words` is load-bearing: this line echoes the visitor's search
@@ -185,7 +278,7 @@ export default async function OffersPage({
         */}
         {unknownCategory
           ? '0 offers. That category is not one of the ones on offer.'
-          : describeResults(listings.length, q, category)}
+          : describeResults(page.total ?? listings.length, q, category, sort)}
       </p>
 
       {listings.length > 0 ? (
@@ -231,6 +324,18 @@ export default async function OffersPage({
             Nobody bought anything and nobody wrote any of the reviews behind these numbers.
           </p>
         ) : null}
+
+        <Pager
+          basePath="/offers"
+          params={pagerParams}
+          cursorParam="after"
+          nextCursor={page.nextCursor}
+          onFirstPage={cursor === ''}
+          shown={listings.length}
+          total={page.total}
+          noun="offers"
+          className="mt-6"
+        />
         </>
       ) : (
         <div className="mt-4">
@@ -283,17 +388,30 @@ function detailHref(id: string, q: string, category: ListingCategory | null): st
   const search = new URLSearchParams();
   if (q !== '') search.set('q', q);
   if (category !== null) search.set('category', category);
+  // The cursor is deliberately NOT carried into the detail page's back link. It
+  // would restore the right page of results, and it would also mean a link
+  // shared from an offer carried a stranger's scroll position in it — and a
+  // stale cursor outlives the row it names, so the "back" it restores can be a
+  // page that no longer starts where it did.
   const query = search.toString();
   return query === '' ? `/offers/${id}` : `/offers/${id}?${query}`;
 }
 
 /** The label goes in the sentence, never the slug — "in Video review", not "in video_review". */
-function describeResults(count: number, q: string, category: ListingCategory | null): string {
+function describeResults(
+  count: number,
+  q: string,
+  category: ListingCategory | null,
+  sort: ListingSort,
+): string {
   const noun = count === 1 ? 'offer' : 'offers';
   const bits: string[] = [];
   if (q !== '') bits.push(`matching “${q}”`);
   if (category !== null) bits.push(`in ${LISTING_CATEGORY_LABELS[category]}`);
-  return bits.length === 0
-    ? `${count} ${noun}. Newest first.`
-    : `${count} ${noun} ${bits.join(' ')}. Newest first.`;
+  // The ordering is named because it is a choice the visitor can make and
+  // therefore one they can forget having made. `count` is the TOTAL, not the
+  // number of cards below it — the pager says how many of them are on screen.
+  const order =
+    sort === 'price_asc' ? 'Cheapest first.' : sort === 'price_desc' ? 'Dearest first.' : 'Newest first.';
+  return bits.length === 0 ? `${count} ${noun}. ${order}` : `${count} ${noun} ${bits.join(' ')}. ${order}`;
 }

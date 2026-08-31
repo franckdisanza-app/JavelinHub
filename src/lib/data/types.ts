@@ -816,6 +816,17 @@ export interface PublicReview {
  */
 export interface PublicReviewWithListing extends PublicReview {
   listing_title: string;
+  /**
+   * Whether that offer is still on sale — i.e. whether linking its title from
+   * this review leads anywhere. A withdrawn offer is a 404 for the public.
+   *
+   * ON THE ROW rather than derived by the caller, and that is a correctness fix
+   * rather than a convenience. The coach profile used to intersect this list
+   * with the coach's offer list to decide; once both are paginated, that
+   * intersection is wrong by construction — a review on page 1 can be about an
+   * offer on page 3, and the title would silently stop being a link.
+   */
+  listing_published: boolean;
 }
 
 /**

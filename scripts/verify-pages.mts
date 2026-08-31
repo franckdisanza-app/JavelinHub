@@ -409,7 +409,7 @@ async function plantFixtures(): Promise<{
   // The review report is filed BY CORY, because only the coach whose offer a
   // review is about may report it — that entitlement is the thing the page's
   // assertions are checking is honoured, so the fixture has to satisfy it.
-  const reportedReview = (await db.listReviewsForListing(OFFER.fundamentals))[0];
+  const reportedReview = (await db.listReviewsForListing(OFFER.fundamentals)).items[0];
   if (!reportedReview) throw new Error('fixture: the seeded offer has no review to report');
   await db.reportReview(CORY, reportedReview.id, 'not_a_real_purchase', 'They never bought it.');
   await db.reportCoach(
@@ -1826,6 +1826,97 @@ try {
   // "Offer not found" for exactly the people entitled to read it.
   check('the entitled viewer’s tab title names the offer',
     /<title>[^<]*Video Analysis/i.test(tombstone.html), true);
+
+  // -------------------------------------------------------------------------
+  section('Browse filters and the pager — what survives a round trip through the URL');
+
+  /*
+   * WHAT THIS SECTION IS AND IS NOT. The keyset itself — that pages tile with
+   * nothing skipped or repeated, that a limit is clamped, that a cursor from one
+   * list is refused by another — is asserted in `verify:authz`, where every one
+   * of eleven hundred assertions now drains its list three rows at a time. What
+   * can only be checked HERE is the half that lives in the URL: that a filter
+   * survives being written into a query string and read back out, that a hostile
+   * `?after=` renders a page rather than a stack trace, and that the pager is
+   * absent when there is nothing to page.
+   */
+
+  const allOffers = await get('/offers');
+  check('browse renders', allOffers.status, 200);
+  // The seed fits on one page, so there is nothing to page and the component
+  // renders NOTHING — not a disabled button, not an empty nav.
+  check('no pager when everything fits on one page', allOffers.html.includes('Start again'), false);
+  check('...and no Next either', /aria-label="More offers"/.test(allOffers.html), false);
+
+  // --- the controls exist and are named after their params -------------------
+  check('the price floor is a real control', allOffers.html.includes('name="min"'), true);
+  check('...and the ceiling', allOffers.html.includes('name="max"'), true);
+  check('...and the sort', allOffers.html.includes('name="sort"'), true);
+
+  // --- filters narrow, and say so -------------------------------------------
+  // Seeded prices run £29 to £99, so £55 keeps some and drops others — the only
+  // shape of assertion that proves the bound is applied rather than ignored.
+  const dearOnly = await get('/offers?min=55');
+  check('a price floor narrows the grid', dearOnly.cards.size < allOffers.cards.size, true);
+  check('...without emptying it', dearOnly.cards.size > 0, true);
+  const cheapHalf = await get('/offers?max=54');
+  check('a ceiling narrows it from the other end', cheapHalf.cards.size > 0, true);
+  check(
+    '...and the two halves are disjoint',
+    [...dearOnly.cards.keys()].some((id) => cheapHalf.cards.has(id)),
+    false,
+  );
+
+  const cheapOnly = await get('/offers?max=1');
+  check('a low ceiling can empty the grid', cheapOnly.cards.size, 0);
+  check('...and says the filters matched nothing', cheapOnly.text.includes('Nothing matched those filters'), true);
+
+  // A bound that is not a number is IGNORED and the visitor is told, rather than
+  // being silently read as zero — which would return an empty grid with no
+  // explanation.
+  const junkPrice = await get('/offers?min=abc');
+  check('an unreadable price filter still renders the grid', junkPrice.cards.size, allOffers.cards.size);
+  check('...and says it was ignored', junkPrice.text.includes('was not a number'), true);
+
+  // --- the sort round-trips --------------------------------------------------
+  const cheapest = await get('/offers?sort=price_asc');
+  check('the sort is honoured', cheapest.text.includes('Cheapest first.'), true);
+  check('...and selected in the control it came from', /<option value="price_asc" selected/.test(cheapest.html), true);
+  const dearest = await get('/offers?sort=price_desc');
+  check('...both ways', dearest.text.includes('Dearest first.'), true);
+  // An unrecognised sort falls back to the default rather than 500ing or
+  // rendering an empty list — the same rule the category filter follows.
+  check('a nonsense sort falls back to newest', (await get('/offers?sort=banana')).text.includes('Newest first.'), true);
+
+  // --- a hostile cursor ------------------------------------------------------
+  // `?after=` arrives from a URL bar, so every shape of it has to land on a
+  // page. `decodeCursor` returns null for all of these, which means page one.
+  for (const bad of ['x', 'not-base64', '%%%', 'AAAA']) {
+    const hostile = await get(`/offers?after=${encodeURIComponent(bad)}`);
+    check(`a malformed ?after=${bad} still renders page one`, [hostile.status, hostile.cards.size],
+      [200, allOffers.cards.size]);
+  }
+  // A cursor minted for a DIFFERENT list decodes cleanly and means nothing here.
+  const coachesPage = await get('/coaches');
+  check('the coach directory renders', coachesPage.status, 200);
+
+  // --- filters survive the detail page's back link ---------------------------
+  // The cursor deliberately does NOT: a link shared from an offer should not
+  // carry somebody's scroll position, and a stale cursor outlives the row it
+  // names.
+  const filteredBrowse = await get('/offers?q=javelin&sort=price_asc&after=AAAA');
+  const firstCard = [...filteredBrowse.cards.keys()][0];
+  check('a filtered browse still has cards', typeof firstCard, 'string');
+  check(
+    'the detail link carries the keyword',
+    filteredBrowse.html.includes(`href="/offers/${firstCard}?q=javelin"`),
+    true,
+  );
+  check(
+    '...and never the cursor',
+    /href="\/offers\/[0-9a-f-]+\?[^"]*after=/.test(filteredBrowse.html),
+    false,
+  );
 
   // -------------------------------------------------------------------------
   section('/admin/reviews — moderation, and who is told it exists');

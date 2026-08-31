@@ -8,9 +8,12 @@ import { Alert } from '@/components/ui/alert';
 import { Badge, type BadgeTone } from '@/components/ui/badge';
 import { linkButtonClass } from '@/components/ui/button';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
+import { Pager } from '@/components/pager';
 import { getActor, requireUser } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { DataErrorNotice, resolveDataError } from '@/lib/data-error';
+import type { Page } from '@/lib/data/pagination';
+import { firstValue } from '@/lib/search-params';
 import { LISTING_CATEGORY_LABELS, type OwnedListing } from '@/lib/data/types';
 import { formatDate, formatPrice } from '@/lib/format';
 
@@ -49,9 +52,11 @@ export default async function CoachOffersPage({
     );
   }
 
-  let offers: OwnedListing[];
+  const cursor = firstValue(params.after).trim();
+
+  let page: Page<OwnedListing>;
   try {
-    offers = await getDataClient().listMyListings(await getActor());
+    page = await getDataClient().listMyListings(await getActor(), { cursor: cursor || undefined });
   } catch (error) {
     return (
       <Shell>
@@ -63,8 +68,17 @@ export default async function CoachOffersPage({
   // The flag names an offer that is actually ours, so it cannot be used to
   // probe for one that is not: an id we do not own is simply not in this list.
   const savedId = typeof params.saved === 'string' ? params.saved : null;
+  const offers = page.items;
   const savedOffer = savedId ? (offers.find((offer) => offer.id === savedId) ?? null) : null;
 
+  /*
+   * SPLIT WITHIN THE PAGE, not across the whole dashboard, and the headings say
+   * so. Both sections are drawn from the same newest-first page, because the
+   * alternative — two independently paged lists — would need two cursors in the
+   * URL and would still not let a coach see "all my withdrawn offers" without
+   * walking both. A coach with more than a page of offers pages through the
+   * whole list; the sections group what is on screen.
+   */
   const live = offers.filter((offer) => offer.deleted_at === null);
   const withdrawn = offers.filter((offer) => offer.deleted_at !== null);
 
@@ -97,6 +111,16 @@ export default async function CoachOffersPage({
               ))}
             </Section>
           ) : null}
+
+          <Pager
+            basePath={DASHBOARD_PATH}
+            cursorParam="after"
+            nextCursor={page.nextCursor}
+            onFirstPage={cursor === ''}
+            shown={offers.length}
+            total={page.total}
+            noun="offers"
+          />
         </>
       )}
     </Shell>

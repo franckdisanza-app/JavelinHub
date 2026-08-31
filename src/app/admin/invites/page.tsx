@@ -3,10 +3,12 @@ import type { Metadata } from 'next';
 import { CreateInviteForm } from '@/app/admin/invites/create-invite-form';
 import { CopyCodeButton, RevokeInviteForm } from '@/app/admin/invites/invite-actions';
 import { AdminNav } from '@/components/admin-nav';
+import { Pager } from '@/components/pager';
 import { Badge, type BadgeTone } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { getActor, getCurrentProfile, requireAdmin } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { firstValue } from '@/lib/search-params';
 import type { Invite } from '@/lib/data/types';
 
 /**
@@ -20,16 +22,20 @@ export async function generateMetadata(): Promise<Metadata> {
   return { title: profile?.role === 'admin' ? 'Invite codes' : 'Not found' };
 }
 
-export default async function AdminInvitesPage() {
+export default async function AdminInvitesPage({ searchParams }: PageProps<'/admin/invites'>) {
   // Anonymous -> /login?next=/admin/invites. Signed in but not an admin -> 404,
   // so the page's existence is not confirmed to someone poking at URLs. Either
   // way `listInvites` below would refuse them anyway: there is no non-admin
   // select policy on invites at all, in the mock or in SQL.
   await requireAdmin('/admin/invites');
 
+  const params = await searchParams;
+  const cursor = firstValue(params.after).trim();
+
   const actor = await getActor();
   const db = getDataClient();
-  const invites = await db.listInvites(actor);
+  const page = await db.listInvites(actor, { cursor: cursor || undefined });
+  const invites = page.items;
 
   // Redeemers are shown by name only. `getPublicProfile` is the right call
   // here even for an admin screen: an admin *may* read full profiles, but this
@@ -41,6 +47,13 @@ export default async function AdminInvitesPage() {
     ),
   );
 
+  /*
+   * COUNTED ON THIS PAGE, and the description below says so. "Still redeemable"
+   * cannot be counted across the whole table from here — `statusOf` derives it
+   * from three columns and an expiry comparison, which is a filter this read
+   * does not offer — and quietly printing a page's count as if it were the
+   * total would be worse than saying which it is.
+   */
   const active = invites.filter((invite) => statusOf(invite).kind === 'active').length;
 
   return (
@@ -67,7 +80,7 @@ export default async function AdminInvitesPage() {
             description={
               invites.length === 0
                 ? 'None yet.'
-                : `${invites.length} total, ${active} still redeemable. Newest first.`
+                : `${page.total ?? invites.length} total, ${active} of the ${invites.length} shown still redeemable. Newest first.`
             }
           />
           <CardBody className="py-0">
@@ -80,6 +93,17 @@ export default async function AdminInvitesPage() {
                 ))}
               </ul>
             )}
+
+            <Pager
+              basePath="/admin/invites"
+              cursorParam="after"
+              nextCursor={page.nextCursor}
+              onFirstPage={cursor === ''}
+              shown={invites.length}
+              total={page.total}
+              noun="codes"
+              className="py-4"
+            />
           </CardBody>
         </Card>
       </div>

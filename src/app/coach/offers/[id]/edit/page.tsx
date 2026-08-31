@@ -50,9 +50,18 @@ export default async function EditOfferPage({
   const actor = await getActor();
   const db = getDataClient();
 
-  let offers: OwnedListing[];
+  /*
+   * ONE OFFER, by id. This used to read the coach's whole dashboard and
+   * `.find()` the row — which was merely wasteful while that read was unbounded
+   * and is WRONG now that it is a page: a coach with more than a page of offers
+   * would get a 404 on the editor for any of their older ones.
+   *
+   * `null` covers "no such offer" and "not yours" alike, which is why the answer
+   * is `notFound()` either way.
+   */
+  let offer: OwnedListing | null;
   try {
-    offers = await db.listMyListings(actor);
+    offer = await db.getMyListing(actor, id);
   } catch (error) {
     return (
       <Shell id={id}>
@@ -61,7 +70,6 @@ export default async function EditOfferPage({
     );
   }
 
-  const offer = offers.find((candidate) => candidate.id === id);
   if (!offer) notFound();
 
   // Owner-or-admin, and we are the owner by construction — but a failure here
@@ -70,7 +78,11 @@ export default async function EditOfferPage({
   let revisions: ListingRevision[] = [];
   let revisionsFailed = false;
   try {
-    revisions = await db.listListingRevisions(actor, offer.id);
+    // The first page only. The history is context beside the form, not a list to
+    // walk — a coach who wants the whole thing has the page they are on, and
+    // paging it would put a second cursor in this URL for a panel nobody
+    // navigates. `total` below says how many there are in full.
+    revisions = (await db.listListingRevisions(actor, offer.id)).items;
   } catch (error) {
     if (!isDataError(error)) throw error;
     revisionsFailed = true;
@@ -92,8 +104,11 @@ export default async function EditOfferPage({
    */
   let claimed = true;
   try {
-    const sales = await db.listOrdersForCoach(actor, profile.id);
-    claimed = sales.some((order) => order.listing_id === offer.id);
+    // ONE COUNT, not a scan of every sale the coach has ever made — which is a
+    // page now, so the scan would answer "not claimed" for a busy coach and
+    // unlock a control the database refuses. `countOrdersForListing` counts
+    // every epoch, which is exactly what `guard_listing_update()` freezes on.
+    claimed = (await db.countOrdersForListing(actor, offer.id)) > 0;
   } catch (error) {
     if (!isDataError(error)) throw error;
   }

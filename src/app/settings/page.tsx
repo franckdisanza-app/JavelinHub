@@ -77,7 +77,11 @@ export default async function SettingsPage({
    * page is the profile, which `requireUser` already resolved — if this one
    * fails the session is broken and the error page is the honest outcome.
    */
-  const reports = await getDataClient().listMyReports(await getActor());
+  // The first page only, and it says so below. A reporter's own list is a
+  // record rather than a queue: nothing here is actionable, so a cursor in this
+  // URL would be navigation for its own sake.
+  const reportPage = await getDataClient().listMyReports(await getActor(), { limit: 10 });
+  const reports = reportPage.items;
 
   return (
     <Shell>
@@ -166,7 +170,11 @@ export default async function SettingsPage({
         <Card tone="raised">
           <CardHeader
             title="Reports you have filed"
-            description="What an administrator decided, if they have got to it yet."
+            description={
+              (reportPage.total ?? reports.length) > reports.length
+                ? `Your ${reports.length} most recent, of ${reportPage.total}. What an administrator decided, if they have got to it yet.`
+                : 'What an administrator decided, if they have got to it yet.'
+            }
           />
           <CardBody className="py-0">
             <ul className="divide-y divide-line">

@@ -67,6 +67,17 @@ import type {
   Review,
   Role,
 } from '../types';
+import { isListingSort } from '../client';
+import {
+  byCreatedAt,
+  emptyPage,
+  KEYSETS,
+  pageOf,
+  sliceWindow,
+  type Keyset,
+  type Page,
+  type PageRequest,
+} from '../pagination';
 import {
   COACH_BIO_MAX,
   COACH_HEADLINE_MAX,
@@ -534,6 +545,23 @@ function offerStats(db: MockDb, listing: Listing): OfferStats {
 }
 
 /**
+ * Cheapest-first or dearest-first, with `id` as the tie-break.
+ *
+ * The tie-break is not decoration: several seeded offers share a price, and a
+ * sort without one is stable only by accident of the input order — which the
+ * keyset then pages through as though it were total, skipping rows. `KEYSETS`
+ * names `id` for the same reason; the two have to agree.
+ */
+function byPriceThen(ascending: boolean) {
+  return (a: Listing, b: Listing): number => {
+    if (a.price_cents !== b.price_cents) {
+      return ascending ? a.price_cents - b.price_cents : b.price_cents - a.price_cents;
+    }
+    return ascending ? (a.id < b.id ? -1 : 1) : a.id < b.id ? 1 : -1;
+  };
+}
+
+/**
  * ACCOUNT-level rollup — mirrors the `public.coach_stats` view. Every offer,
  * every epoch.
  *
@@ -588,6 +616,21 @@ export class MockDataClient implements DataClient {
   // =========================================================================
   // Auth-shaped
   // =========================================================================
+
+  /** Mirrors a batched `select ... from public.public_profiles where id in (...)`. */
+  async listPublicProfiles(userIds: readonly string[]): Promise<PublicProfile[]> {
+    const unique = [...new Set(userIds)].filter((id) => typeof id === 'string' && id !== '');
+    if (unique.length === 0) return [];
+
+    return readDb((db) => {
+      const wanted = new Set(unique);
+      // Ids with no profile are DROPPED, matching the SQL `in (...)`. The caller
+      // matches by id; nothing here promises a row per id.
+      return db.profiles
+        .filter((p) => wanted.has(p.id) && p.deleted_at === null)
+        .map((p) => toPublicProfile(p));
+    });
+  }
 
   /**
    * ALWAYS `signed_in`. The mock has no mail transport and therefore no
@@ -753,15 +796,15 @@ export class MockDataClient implements DataClient {
   // in the page" would be a role enumerator that looks identical on screen.
   // =========================================================================
 
-  async listCoaches(filter?: CoachDirectoryFilter): Promise<PublicCoach[]> {
+  async listCoaches(filter?: CoachDirectoryFilter, page?: PageRequest): Promise<Page<PublicCoach>> {
     const q = typeof filter?.q === 'string' ? filter.q.trim().toLowerCase() : '';
 
     // Mirrors: `select * from public.public_coaches where full_name ilike $1`,
     // granted to anon + authenticated. The view carries the approval predicate
     // itself, exactly as this does — there is no un-scoped variant on either
     // side, so neither backend can be pointed at a wider row set.
-    return readDb((db) =>
-      db.profiles
+    return readDb((db) => {
+      const rows = db.profiles
         .filter((p) => {
           // THE line of this method. Everything else here is presentation.
           if (!isApprovedCoachProfile(p)) return false;
@@ -777,9 +820,14 @@ export class MockDataClient implements DataClient {
         // `order by full_name` is collation-dependent in Postgres and the mock
         // cannot reproduce that for non-ASCII names, so an alphabetical
         // directory would silently reorder at the backend swap.
-        .sort(byCreatedAtDesc)
-        .map(toPublicCoach),
-    );
+        .sort(byCreatedAtDesc);
+
+      // Sliced BEFORE `toPublicCoach`, because the projection drops
+      // `created_at` — deliberately, it is an ordering column and not something
+      // a directory card shows — and the cursor is built from it.
+      const window = sliceWindow(KEYSETS.coaches, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map(toPublicCoach));
+    });
   }
 
   async getPublicCoach(coachId: string): Promise<PublicCoach | null> {
@@ -965,14 +1013,17 @@ export class MockDataClient implements DataClient {
   }
 
   /** Mirrors policy `listings_select_admin`, which admits every row including withdrawn ones. */
-  async listListingsForAdmin(actor: Actor, coachId: string): Promise<ListingWithCoach[]> {
+  async listListingsForAdmin(
+    actor: Actor,
+    coachId: string,
+    page?: PageRequest,
+  ): Promise<Page<ListingWithCoach>> {
     return readDb((db) => {
       requireAdmin(db, actor);
-      if (typeof coachId !== 'string' || coachId === '') return [];
-      return db.listings
-        .filter((l) => l.coach_id === coachId)
-        .sort(byCreatedAtDesc)
-        .map((l) => withCoach(db, l));
+      if (typeof coachId !== 'string' || coachId === '') return emptyPage();
+      const rows = db.listings.filter((l) => l.coach_id === coachId).sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.adminListings, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map((l) => withCoach(db, l)));
     });
   }
 
@@ -1054,7 +1105,7 @@ export class MockDataClient implements DataClient {
     });
   }
 
-  async listListings(filter?: ListingFilter): Promise<ListingWithCoach[]> {
+  async listListings(filter?: ListingFilter, page?: PageRequest): Promise<Page<ListingWithCoach>> {
     const q = typeof filter?.q === 'string' ? filter.q.trim().toLowerCase() : '';
     // A category outside the taxonomy matches NOTHING, and specifically is not
     // treated as "no filter". Two reasons. In SQL the comparison is against an
@@ -1066,17 +1117,32 @@ export class MockDataClient implements DataClient {
     const rawCategory = typeof filter?.category === 'string' ? filter.category.trim() : '';
     const category: ListingCategory | null = isListingCategory(rawCategory) ? rawCategory : null;
     const impossibleCategory = rawCategory !== '' && category === null;
-    if (impossibleCategory) return [];
+    if (impossibleCategory) return emptyPage();
+
+    // Both bounds are inclusive, and an inverted pair (min above max)
+    // matches nothing rather than being silently swapped: somebody who
+    // typed them the wrong way round should see that, not a result set
+    // for a question they did not ask.
+    const minPrice = typeof filter?.minPriceCents === 'number' && Number.isFinite(filter.minPriceCents)
+      ? Math.max(0, Math.floor(filter.minPriceCents))
+      : null;
+    const maxPrice = typeof filter?.maxPriceCents === 'number' && Number.isFinite(filter.maxPriceCents)
+      ? Math.max(0, Math.floor(filter.maxPriceCents))
+      : null;
+    const sort = isListingSort(filter?.sort) ? filter.sort : 'newest';
 
     // Mirrors: policy `listings_select_public` — no actor, and the one
     // restriction: `using (deleted_at is null)`.
-    return readDb((db) =>
-      db.listings
+    return readDb((db) => {
+      const rows = db.listings
         .filter((listing) => {
           // A withdrawn offer is not on sale. This is the browse half of the
           // rule; every other public listing read carries the same filter.
           if (isWithdrawn(listing)) return false;
           if (category && listing.category !== category) return false;
+          // Inclusive both ends, matching the `.gte`/`.lte` on the SQL side.
+          if (minPrice !== null && listing.price_cents < minPrice) return false;
+          if (maxPrice !== null && listing.price_cents > maxPrice) return false;
           if (!q) return true;
           // Title + description ONLY, matching the columns Postgres indexes for
           // this query (`listings_title_trgm_idx`, `listings_description_trgm_idx`,
@@ -1088,9 +1154,26 @@ export class MockDataClient implements DataClient {
           // exact-match filter above.
           return listing.title.toLowerCase().includes(q) || listing.description.toLowerCase().includes(q);
         })
-        .sort(byCreatedAtDesc)
-        .map((listing) => withCoach(db, listing)),
-    );
+        .sort(sort === 'newest' ? byCreatedAtDesc : byPriceThen(sort === 'price_asc'));
+
+      // The keyset follows the sort, and each sort has its own `scope` — so a
+      // cursor minted while browsing newest-first is refused after switching to
+      // cheapest-first, and the reader starts again from the top. That is
+      // correct: position 24 means a different row in each ordering.
+      const spec =
+        sort === 'newest'
+          ? KEYSETS.listings
+          : sort === 'price_asc'
+            ? KEYSETS.listingsPriceAsc
+            : KEYSETS.listingsPriceDesc;
+      const keyOf =
+        sort === 'newest'
+          ? byCreatedAt
+          : (listing: Listing): Keyset => ({ key: String(listing.price_cents), id: listing.id });
+
+      const window = sliceWindow(spec, rows, page, keyOf);
+      return pageOf(window, window.rows.map((listing) => withCoach(db, listing)));
+    });
   }
 
   async getListing(id: string): Promise<ListingWithCoach | null> {
@@ -1162,8 +1245,12 @@ export class MockDataClient implements DataClient {
     return [...LISTING_CATEGORIES];
   }
 
-  async listListingsByCoach(actor: Actor, coachId: string): Promise<ListingWithCoach[]> {
-    if (typeof coachId !== 'string' || coachId === '') return [];
+  async listListingsByCoach(
+    actor: Actor,
+    coachId: string,
+    page?: PageRequest,
+  ): Promise<Page<ListingWithCoach>> {
+    if (typeof coachId !== 'string' || coachId === '') return emptyPage();
     // Mirrors: policy `listings_select_public` — public data, and therefore
     // `deleted_at is null` like every other public listing read. `actor` is not
     // consulted: this is the PUBLIC coach profile's offer list, and it stays
@@ -1171,15 +1258,16 @@ export class MockDataClient implements DataClient {
     // withdrawn offers. The owner's own view is listMyListings(), which derives
     // the coach id from the actor instead of taking it as a parameter.
     void actor;
-    return readDb((db) =>
-      db.listings
+    return readDb((db) => {
+      const rows = db.listings
         .filter((l) => l.coach_id === coachId && !isWithdrawn(l))
-        .sort(byCreatedAtDesc)
-        .map((listing) => withCoach(db, listing)),
-    );
+        .sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.coachListings, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map((listing) => withCoach(db, listing)));
+    });
   }
 
-  async listMyListings(actor: Actor): Promise<OwnedListing[]> {
+  async listMyListings(actor: Actor, page?: PageRequest): Promise<Page<OwnedListing>> {
     // Mirrors: policy `listings_select_own_coach` — using (coach_id = auth.uid()),
     // which is what lets a coach see past the `deleted_at is null` predicate on
     // their OWN rows.
@@ -1189,13 +1277,12 @@ export class MockDataClient implements DataClient {
     // offers. Same construction as listMyOrders(), for the same reason.
     return readDb((db) => {
       const profile = resolveProfile(db, actor);
-      return db.listings
-        .filter((l) => l.coach_id === profile.id)
-        .sort(byCreatedAtDesc)
-        // asOwned(), not withCoach(): the dashboard is the one surface that
-        // needs to know whether Restore will work, and it gets that as the
-        // derived `withdrawn_by_admin` boolean rather than as an admin's id.
-        .map((listing) => asOwned(db, listing));
+      const rows = db.listings.filter((l) => l.coach_id === profile.id).sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.myListings, rows, page, byCreatedAt);
+      // asOwned(), not withCoach(): the dashboard is the one surface that needs
+      // to know whether Restore will work, and it gets that as the derived
+      // `withdrawn_by_admin` boolean rather than as an admin's id.
+      return pageOf(window, window.rows.map((listing) => asOwned(db, listing)));
     });
   }
 
@@ -1394,6 +1481,47 @@ export class MockDataClient implements DataClient {
     });
   }
 
+  /** Mirrors policy `listings_select_own_coach`, narrowed to one id. */
+  async getMyListing(actor: Actor, listingId: string): Promise<OwnedListing | null> {
+    return readDb((db) => {
+      const profile = resolveProfile(db, actor);
+      if (typeof listingId !== 'string' || listingId === '') return null;
+
+      const listing = db.listings.find((l) => l.id === listingId && l.coach_id === profile.id);
+      // NOT filtered on `deleted_at`: the dashboard's single form, and a coach
+      // whose offer was taken down has to be able to open the editor.
+      return listing ? asOwned(db, listing) : null;
+    });
+  }
+
+  /** Owner-or-admin, every epoch. See the interface for why the epoch matters. */
+  async countOrdersForListing(actor: Actor, listingId: string): Promise<number> {
+    return readDb((db) => {
+      const profile = resolveProfile(db, actor);
+      if (typeof listingId !== 'string' || listingId === '') return 0;
+
+      const listing = db.listings.find((l) => l.id === listingId);
+      if (!listing) return 0;
+      if (listing.coach_id !== profile.id && profile.role !== 'admin') {
+        throw new DataError('forbidden', 'You can only view your own sales.');
+      }
+      return db.orders.filter((o) => o.listing_id === listing.id).length;
+    });
+  }
+
+  /** Mirrors policy `orders_select_own_learner`, narrowed to one offer. */
+  async getMyOrderForListing(actor: Actor, listingId: string): Promise<OrderWithListing | null> {
+    return readDb((db) => {
+      const profile = resolveProfile(db, actor);
+      if (typeof listingId !== 'string' || listingId === '') return null;
+
+      const order = db.orders.find(
+        (o) => o.learner_id === profile.id && o.listing_id === listingId,
+      );
+      return order ? withListing(db, order, profile.id) : null;
+    });
+  }
+
   /**
    * Attaches or clears an instant offer's downloadable file.
    *
@@ -1563,7 +1691,11 @@ export class MockDataClient implements DataClient {
     });
   }
 
-  async listListingRevisions(actor: Actor, listingId: string): Promise<ListingRevision[]> {
+  async listListingRevisions(
+    actor: Actor,
+    listingId: string,
+    page?: PageRequest,
+  ): Promise<Page<ListingRevision>> {
     const id = requireText(listingId, 'Offer', 200);
 
     // Mirrors: policies `listing_revisions_select_own_coach` +
@@ -1583,7 +1715,7 @@ export class MockDataClient implements DataClient {
         throw new DataError('forbidden', 'You can only view the edit history of your own offers.');
       }
 
-      return (
+      const rows =
         db.listing_revisions
           .filter((r) => r.listing_id === listing.id)
           // `.reverse()` before a STABLE sort is the tie-break, and it is not
@@ -1595,9 +1727,10 @@ export class MockDataClient implements DataClient {
           // alone. In SQL the equivalent is `order by created_at desc, id desc`
           // — see the note in supabase/README.md.
           .reverse()
-          .sort(byCreatedAtDesc)
-          .map(copy)
-      );
+          .sort(byCreatedAtDesc);
+
+      const window = sliceWindow(KEYSETS.revisions, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map(copy));
     });
   }
 
@@ -1683,8 +1816,8 @@ export class MockDataClient implements DataClient {
     );
   }
 
-  async listReviewsForListing(listingId: string): Promise<PublicReview[]> {
-    if (typeof listingId !== 'string' || listingId === '') return [];
+  async listReviewsForListing(listingId: string, page?: PageRequest): Promise<Page<PublicReview>> {
+    if (typeof listingId !== 'string' || listingId === '') return emptyPage();
     // Mirrors: `select * from public.public_reviews where listing_id = $1`.
     // The `reviews` TABLE has no anon policy at all; the view is what anon
     // reads, and it is the view that drops order_id / author_id / price_epoch.
@@ -1698,16 +1831,20 @@ export class MockDataClient implements DataClient {
     // profile through listReviewsForCoach(), which has no such filter.
     return readDb((db) => {
       const listing = db.listings.find((l) => l.id === listingId);
-      if (!listing || isWithdrawn(listing)) return [];
-      return db.reviews
+      if (!listing || isWithdrawn(listing)) return emptyPage();
+      const rows = db.reviews
         .filter((r) => r.listing_id === listing.id && r.price_epoch === listing.price_epoch)
-        .sort(byCreatedAtDesc)
-        .map((review) => toPublicReview(db, review));
+        .sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.listingReviews, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map((review) => toPublicReview(db, review)));
     });
   }
 
-  async listReviewsForCoach(coachId: string): Promise<PublicReviewWithListing[]> {
-    if (typeof coachId !== 'string' || coachId === '') return [];
+  async listReviewsForCoach(
+    coachId: string,
+    page?: PageRequest,
+  ): Promise<Page<PublicReviewWithListing>> {
+    if (typeof coachId !== 'string' || coachId === '') return emptyPage();
     // Mirrors: `public.public_reviews`, joined to listings for the offer title.
     // Every epoch, and — like coachStats() — resolved through the raw listings
     // table, so a soft delete keeps the review readable here while its offer
@@ -1718,14 +1855,24 @@ export class MockDataClient implements DataClient {
     // to coachStats(): adding one here would make a coach's public review list
     // disagree with their own review COUNT the moment they withdrew anything.
     return readDb((db) => {
+      const published = new Set(
+        db.listings.filter((l) => l.coach_id === coachId && !isWithdrawn(l)).map((l) => l.id),
+      );
       const listingIds = new Set(db.listings.filter((l) => l.coach_id === coachId).map((l) => l.id));
-      return db.reviews
-        .filter((r) => listingIds.has(r.listing_id))
-        .sort(byCreatedAtDesc)
-        .map((review) => ({
+      const rows = db.reviews.filter((r) => listingIds.has(r.listing_id)).sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.coachReviews, rows, page, byCreatedAt);
+      return pageOf(
+        window,
+        window.rows.map((review) => ({
           ...toPublicReview(db, review),
           listing_title: listingTitle(db, review.listing_id),
-        }));
+          // Whether the offer is still on sale, resolved HERE rather than by the
+          // caller intersecting this list with a page of offers. Once both lists
+          // are paginated that intersection is wrong by construction: a review on
+          // page 1 can be about an offer on page 3.
+          listing_published: published.has(review.listing_id),
+        })),
+      );
     });
   }
 
@@ -1752,20 +1899,23 @@ export class MockDataClient implements DataClient {
     });
   }
 
-  async listMyOrders(actor: Actor): Promise<OrderWithListing[]> {
+  async listMyOrders(actor: Actor, page?: PageRequest): Promise<Page<OrderWithListing>> {
     // Mirrors: policy `orders_select_own_learner` — using (learner_id = auth.uid()).
     // The buyer id comes from the resolved actor and is never a parameter, so
     // there is no shape of this call that reads somebody else's purchases.
     return readDb((db) => {
       const profile = resolveProfile(db, actor);
-      return db.orders
-        .filter((o) => o.learner_id === profile.id)
-        .sort(byCreatedAtDesc)
-        .map((order) => withListing(db, order, profile.id));
+      const rows = db.orders.filter((o) => o.learner_id === profile.id).sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.myOrders, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map((order) => withListing(db, order, profile.id)));
     });
   }
 
-  async listOrdersForCoach(actor: Actor, coachId: string): Promise<OrderWithListing[]> {
+  async listOrdersForCoach(
+    actor: Actor,
+    coachId: string,
+    page?: PageRequest,
+  ): Promise<Page<OrderWithListing>> {
     // Mirrors: policies `orders_select_own_coach` + `orders_select_admin`.
     //
     // This one takes an id rather than deriving it, so it needs the check: the
@@ -1774,14 +1924,13 @@ export class MockDataClient implements DataClient {
     // their coach id.
     return readDb((db) => {
       const profile = resolveProfile(db, actor);
-      if (typeof coachId !== 'string' || coachId === '') return [];
+      if (typeof coachId !== 'string' || coachId === '') return emptyPage();
       if (profile.id !== coachId && profile.role !== 'admin') {
         throw new DataError('forbidden', 'You can only view your own sales.');
       }
-      return db.orders
-        .filter((o) => o.coach_id === coachId)
-        .sort(byCreatedAtDesc)
-        .map((order) => withListing(db, order, profile.id));
+      const rows = db.orders.filter((o) => o.coach_id === coachId).sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.coachOrders, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map((order) => withListing(db, order, profile.id)));
     });
   }
 
@@ -1998,20 +2147,25 @@ export class MockDataClient implements DataClient {
    * exact opposite of what `toPublicReview()` does and is why this method is
    * admin-gated. See {@link ModeratableReview}.
    */
-  async listReviewsForModeration(actor: Actor): Promise<ModeratableReview[]> {
+  async listReviewsForModeration(
+    actor: Actor,
+    page?: PageRequest,
+  ): Promise<Page<ModeratableReview>> {
     return readDb((db) => {
       requireAdmin(db, actor);
-      return db.reviews
-        .slice()
-        .sort(byCreatedAtDesc)
-        .map((review) => ({
+      const rows = db.reviews.slice().sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.moderation, rows, page, byCreatedAt);
+      return pageOf(
+        window,
+        window.rows.map((review) => ({
           ...copy(review),
           author_name: db.profiles.find((p) => p.id === review.author_id)?.full_name ?? 'Unknown',
           // NO `deleted_at` FILTER, the same rule `listingTitle()` follows: a
           // review of a withdrawn offer is still a review, and a moderator who
           // could not see it could not take it down.
           listing_title: listingTitle(db, review.listing_id),
-        }));
+        })),
+      );
     });
   }
 
@@ -2067,13 +2221,25 @@ export class MockDataClient implements DataClient {
   }
 
   /** Mirrors: policy `removed_reviews_select_admin`. Newest first. */
-  async listRemovedReviews(actor: Actor): Promise<RemovedReviewWithNames[]> {
+  async listRemovedReviews(
+    actor: Actor,
+    page?: PageRequest,
+  ): Promise<Page<RemovedReviewWithNames>> {
     return readDb((db) => {
       requireAdmin(db, actor);
-      return db.removed_reviews
+      const rows = db.removed_reviews
         .slice()
-        .sort((a, b) => (a.removed_at < b.removed_at ? 1 : a.removed_at > b.removed_at ? -1 : 0))
-        .map((row) => ({
+        .sort((a, b) => (a.removed_at < b.removed_at ? 1 : a.removed_at > b.removed_at ? -1 : 0));
+      // Keyed on `removed_at`, NOT on the review's own `created_at`: this log is
+      // read in the order things were taken down. `KEYSETS.removedReviews` names
+      // the same column, and the two must agree or "Next" skips rows.
+      const window = sliceWindow(KEYSETS.removedReviews, rows, page, (row) => ({
+        key: row.removed_at,
+        id: row.id,
+      }));
+      return pageOf(
+        window,
+        window.rows.map((row) => ({
           ...copy(row),
           author_name: db.profiles.find((p) => p.id === row.author_id)?.full_name ?? 'Unknown',
           listing_title: listingTitle(db, row.listing_id),
@@ -2082,7 +2248,8 @@ export class MockDataClient implements DataClient {
           // that honestly rather than inventing an actor.
           removed_by_name:
             db.profiles.find((p) => p.id === row.removed_by)?.full_name ?? null,
-        }));
+        })),
+      );
     });
   }
 
@@ -2175,25 +2342,30 @@ export class MockDataClient implements DataClient {
   }
 
   /** Mirrors policy `reports_select_own`. */
-  async listMyReports(actor: Actor): Promise<Report[]> {
+  async listMyReports(actor: Actor, page?: PageRequest): Promise<Page<Report>> {
     return readDb((db) => {
       const profile = resolveProfile(db, actor);
-      return db.reports
-        .filter((r) => r.reporter_id === profile.id)
-        .sort(byCreatedAtDesc)
-        .map((r) => copy(r));
+      const rows = db.reports.filter((r) => r.reporter_id === profile.id).sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.myReports, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map((r) => copy(r)));
     });
   }
 
   /** Mirrors policy `reports_select_admin`, plus the context a queue renders. */
-  async listReports(actor: Actor, status?: ReportStatus): Promise<ReportWithContext[]> {
+  async listReports(
+    actor: Actor,
+    status?: ReportStatus,
+    page?: PageRequest,
+  ): Promise<Page<ReportWithContext>> {
     return readDb((db) => {
       requireAdmin(db, actor);
       const wanted = status ?? null;
-      return db.reports
+      const rows = db.reports
         .filter((r) => wanted === null || r.status === wanted)
-        .sort(byCreatedAtDesc)
-        .map((report) => withReportContext(db, report));
+        .sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.reports, rows, page, byCreatedAt);
+      // `total` counts THIS STATUS, which is what a queue's tab count is.
+      return pageOf(window, window.rows.map((report) => withReportContext(db, report)));
     });
   }
 
@@ -2276,30 +2448,47 @@ export class MockDataClient implements DataClient {
    * it filters to `approved`, so a suspended coach vanishes from it exactly when
    * somebody needs to find them.
    */
-  async listCoachesForAdmin(actor: Actor): Promise<Profile[]> {
+  async listCoachesForAdmin(actor: Actor, page?: PageRequest): Promise<Page<Profile>> {
     return readDb((db) => {
       requireAdmin(db, actor);
-      return db.profiles
+      const rows = db.profiles
         .filter((p) => p.coach_status !== 'none' && p.deleted_at === null)
-        .sort(byCreatedAtDesc)
-        .map((p) => copy(p));
+        .sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.adminCoaches, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map((p) => copy(p)));
+    });
+  }
+
+  /** Mirrors policy `coach_applications_select_admin`, narrowed to one id. */
+  async getCoachApplication(
+    actor: Actor,
+    applicationId: string,
+  ): Promise<CoachApplicationWithUser | null> {
+    return readDb((db) => {
+      requireAdmin(db, actor);
+      if (typeof applicationId !== 'string' || applicationId === '') return null;
+
+      const application = db.coach_applications.find((a) => a.id === applicationId);
+      return application ? withUser(db, application) : null;
     });
   }
 
   /** Mirrors policy `admin_actions_select_admin`. Newest first. */
-  async listAdminActions(actor: Actor): Promise<AdminActionWithNames[]> {
+  async listAdminActions(actor: Actor, page?: PageRequest): Promise<Page<AdminActionWithNames>> {
     return readDb((db) => {
       requireAdmin(db, actor);
-      return db.admin_actions
-        .slice()
-        .sort(byCreatedAtDesc)
-        .map((row) => ({
+      const rows = db.admin_actions.slice().sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.adminActions, rows, page, byCreatedAt);
+      return pageOf(
+        window,
+        window.rows.map((row) => ({
           ...copy(row),
           // `null`, not a placeholder: the column is nullable because the FK is
           // ON DELETE SET NULL, and because bootstrapping the first
           // administrator has no actor at all.
           actor_name: db.profiles.find((p) => p.id === row.actor_id)?.full_name ?? null,
-        }));
+        })),
+      );
     });
   }
 
@@ -2336,13 +2525,20 @@ export class MockDataClient implements DataClient {
     });
   }
 
-  async listInvites(actor: Actor): Promise<Invite[]> {
+  async listInvites(actor: Actor, page?: PageRequest): Promise<Page<Invite>> {
     // Mirrors: policy `invites_select_admin` — using (public.is_admin()).
     // There is no non-admin select policy at all, so a learner cannot even
     // enumerate codes.
     return readDb((db) => {
       requireAdmin(db, actor);
-      return db.invites.slice().sort(byCreatedAtDesc).map(copy);
+      const rows = db.invites.slice().sort(byCreatedAtDesc);
+      // `code`, not `id`: an invite has no `id` column. `KEYSETS.invites` names
+      // the same tie-break for the SQL side.
+      const window = sliceWindow(KEYSETS.invites, rows, page, (invite) => ({
+        key: invite.created_at,
+        id: invite.code,
+      }));
+      return pageOf(window, window.rows.map(copy));
     });
   }
 
@@ -2480,17 +2676,22 @@ export class MockDataClient implements DataClient {
     });
   }
 
-  async listCoachApplications(actor: Actor, filter?: CoachApplicationFilter): Promise<CoachApplicationWithUser[]> {
+  async listCoachApplications(
+    actor: Actor,
+    filter?: CoachApplicationFilter,
+    page?: PageRequest,
+  ): Promise<Page<CoachApplicationWithUser>> {
     const status = filter?.status;
 
     // Mirrors: policy `coach_applications_select_admin` —
     //   using (public.is_admin())
     return readDb((db) => {
       requireAdmin(db, actor);
-      return db.coach_applications
+      const rows = db.coach_applications
         .filter((a) => (status ? a.status === status : true))
-        .sort(byCreatedAtDesc)
-        .map((a) => withUser(db, a));
+        .sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.applications, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map((a) => withUser(db, a)));
     });
   }
 

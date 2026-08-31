@@ -72,6 +72,15 @@
 import nextEnv from '@next/env';
 
 import { FULFILMENT_MODES, LISTING_CATEGORIES } from '@/lib/data/types';
+import {
+  KEYSETS,
+  decodeCursor,
+  encodeCursor,
+  supabaseAscending,
+  supabaseKeysetFilter,
+  tieBreakColumn,
+  type KeysetSpec,
+} from '@/lib/data/pagination';
 
 // `.env.local` is not loaded for a bare Node script the way it is for `next`.
 // Same loader Next uses, so this reads exactly the file the app would — and it
@@ -756,6 +765,77 @@ const suspendedFilter = await rest('profiles?select=id&coach_status=eq.suspended
 expectEqual(
   'coach_status has the suspended member 0021 added',
   suspendedFilter.code !== '22P02',
+  true,
+);
+
+// ===========================================================================
+section('Keyset pagination — the hand-built or= filter has to PARSE');
+// ===========================================================================
+// PostgREST has no row-value comparison, so `(key, id) < (cursor)` is written
+// out as a string: `col.lt.X,and(col.eq.X,id.lt.Y)`. That string is assembled in
+// TypeScript and never seen by a type checker.
+//
+// A MALFORMED ONE FAILS AS 400 PGRST100, WHICH IS INVISIBLE FROM THE MOCK — and
+// worse, invisible from the app while a table is empty, because an empty result
+// and a rejected query both render "no offers". `verify:authz` proves the keyset
+// SEMANTICS against the mock; this proves the SQL grammar against the real
+// PostgREST, which is the half the mock cannot have an opinion about.
+//
+// Anon-readable relations only: a 42501 would mask the parse result.
+
+const KEYSET_PROBES: { spec: KeysetSpec; from: string }[] = [
+  { spec: KEYSETS.listings, from: 'listings' },
+  { spec: KEYSETS.listingsPriceAsc, from: 'listings' },
+  { spec: KEYSETS.listingsPriceDesc, from: 'listings' },
+  { spec: KEYSETS.coachListings, from: 'listings' },
+  { spec: KEYSETS.coaches, from: 'public_coaches' },
+  { spec: KEYSETS.listingReviews, from: 'public_listing_reviews' },
+  { spec: KEYSETS.coachReviews, from: 'public_coach_reviews' },
+];
+
+for (const { spec, from } of KEYSET_PROBES) {
+  // A cursor this suite mints itself, then decodes through the same path the
+  // app uses — so a `scope` or separator change breaks this before it breaks a
+  // page.
+  const cursor = encodeCursor(spec, {
+    key: spec.numeric ? '5000' : '2020-01-01T00:00:00.000Z',
+    id: '00000000-0000-4000-8000-000000000001',
+  });
+  const decoded = decodeCursor(spec, cursor);
+  if (!decoded) {
+    fail(`${spec.scope}: its own cursor round-trips`, 'decodeCursor rejected what encodeCursor produced');
+    continue;
+  }
+  ok(`${spec.scope}: its own cursor round-trips`);
+
+  const ascending = supabaseAscending(spec);
+  const params = new URLSearchParams();
+  params.set('select', 'id');
+  // Wrapped in parentheses exactly as supabase-js sends `.or()`.
+  params.set('or', `(${supabaseKeysetFilter(spec, decoded)})`);
+  params.append('order', `${spec.column}.${ascending ? 'asc' : 'desc'}`);
+  params.append('order', `${tieBreakColumn(spec)}.${ascending ? 'asc' : 'desc'}`);
+  params.set('limit', '3');
+
+  const result = await rest(`${from}?${params}`);
+  if (result.status === 200) {
+    ok(`${spec.scope}: the keyset filter parses against ${from}`, `${result.status}`);
+  } else {
+    fail(
+      `${spec.scope}: the keyset filter parses against ${from}`,
+      `${result.code ?? result.status} ${truncate(result.message)}`,
+    );
+  }
+}
+
+// The tie-break column has to EXIST on the relation it is used with, and the
+// classic way to get that wrong is `id` on a table keyed by something else.
+// `invites` is exactly that table, and it is admin-only — so this asks Postgres
+// about the column rather than about the rows.
+const invitesById = await rest('invites?select=code&order=id.desc&limit=1');
+expectEqual(
+  'invites has no id column, which is why its keyset ties on code',
+  invitesById.code === '42703' || invitesById.code === '42501',
   true,
 );
 
