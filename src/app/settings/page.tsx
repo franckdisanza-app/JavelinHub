@@ -3,7 +3,13 @@ import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
-import { AvatarForm, EmailForm, NameForm, PasswordForm } from '@/app/settings/settings-forms';
+import {
+  AvatarForm,
+  DeleteAccountForm,
+  EmailForm,
+  NameForm,
+  PasswordForm,
+} from '@/app/settings/settings-forms';
 import { Alert } from '@/components/ui/alert';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { requireUser } from '@/lib/auth/session';
@@ -137,17 +143,22 @@ export default async function SettingsPage({
       </Card>
 
       {/*
-        Still said plainly rather than left to be discovered. Deletion is a legal
-        obligation, and a settings page that silently lacks it reads as a page
-        where it is hidden somewhere.
+        LAST ON THE PAGE, and the only destructive thing on it. Its own card
+        rather than a line in a footer: burying the one irreversible action is a
+        different kind of dark pattern from making it too easy.
       */}
-      <Alert tone="info" title="Not here yet: deleting your account.">
-        <p>
-          There is no self-service way to delete an account. It is being built, and it will anonymise your
-          profile rather than erase your purchases — deleting those would rewrite other people&rsquo;s
-          sales and ratings. Until then, ask an administrator.
-        </p>
-      </Alert>
+      <Card>
+        <CardHeader
+          title="Delete your account"
+          description="Irreversible. Your purchases and reviews stay, anonymised."
+        />
+        <CardBody>
+          <DeleteAccountForm
+            isCoach={profile.coach_status === 'approved'}
+            isAdmin={profile.role === 'admin'}
+          />
+        </CardBody>
+      </Card>
     </Shell>
   );
 }
@@ -159,7 +170,7 @@ function Shell({ children }: { children: ReactNode }) {
     <div className="mx-auto w-full max-w-2xl px-4 py-10 sm:px-6 sm:py-14">
       <h1 className="text-2xl font-bold tracking-tight text-ink sm:text-3xl">Account settings</h1>
       <p className="mt-1.5 text-sm leading-relaxed text-muted">
-        Your name, your picture, your email and your password. Everyone has this page.
+        Your name, your picture, your email and your password — and the way out. Everyone has this page.
       </p>
       <div className="mt-8 flex flex-col gap-6">{children}</div>
     </div>

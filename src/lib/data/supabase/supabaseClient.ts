@@ -375,7 +375,25 @@ async function resolveProfile(ctx: AuthedCtx): Promise<Profile> {
     // makes this close to impossible, and it is not a state to paper over.
     throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
   }
-  return data as Profile;
+  const profile = data as Profile;
+  /*
+   * A DELETED ACCOUNT IS NOT AUTHENTICATED. One line, and it closes every
+   * actor-taking method to it at once.
+   *
+   * It matters more here than in the mock. `delete_my_account()` cannot touch
+   * `auth.users` — the privileged role holds no USAGE on that schema — so the
+   * GoTrue user survives the RPC and is banned separately by
+   * `src/lib/auth/account-deletion.ts`. A ban stops NEW tokens; it cannot
+   * recall one already issued. This is what closes the application during that
+   * window, and RLS on a direct PostgREST call is what remains open.
+   *
+   * The same sentence as a missing profile, so the two cannot be told apart by
+   * whoever is holding the cookie.
+   */
+  if (profile.deleted_at !== null) {
+    throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
+  }
+  return profile;
 }
 
 /** Mirrors `requireAdmin()` in the mock, and `public.is_admin()` in SQL. */
@@ -713,7 +731,23 @@ export class SupabaseDataClient implements DataClient {
     }
 
     if (!data.user) return null;
-    return this.getProfile({ userId: data.user.id }, data.user.id);
+
+    const profile = await this.getProfile({ userId: data.user.id }, data.user.id);
+    /*
+     * A DELETED ACCOUNT CANNOT SIGN IN, belt to the ban's braces.
+     *
+     * `banAuthUser` is what normally stops this, and it is the real mechanism —
+     * GoTrue refuses the credential before we ever see it. But that call can
+     * fail: the service-role key is deliberately blank in the example
+     * environment, so a deployment that never set it lands here with a live
+     * credential and an anonymised profile.
+     *
+     * `null`, not a throw, and the caller renders "Invalid email or password" —
+     * indistinguishable from a wrong password, so the form does not become an
+     * oracle for which accounts have been deleted.
+     */
+    if (profile?.deleted_at) return null;
+    return profile;
   }
 
   /**
@@ -981,6 +1015,33 @@ export class SupabaseDataClient implements DataClient {
      * The honest answer to the user is the same either way: check both inboxes.
      */
     return { status: 'confirm_email', email };
+  }
+
+  /**
+   * Anonymises the caller's own profile through `public.delete_my_account()`.
+   *
+   * AN RPC AND NOT AN UPDATE, because the write it performs is one no client
+   * role is allowed to make: it sets `role` and `coach_status`, which
+   * `guard_profile_privilege_columns` refuses from any API session, and it
+   * clears `email`, which that same guard pins. A SECURITY DEFINER function is
+   * the only shape that can do it, and it takes no id — the subject is
+   * `jwt_uid()` and cannot be forged.
+   *
+   * `resolveProfile` is deliberately NOT called first. It now refuses a deleted
+   * account, so calling it here would make a retry fail rather than succeed
+   * quietly, and the RPC is already idempotent.
+   */
+  async deleteMyAccount(actor: Actor): Promise<void> {
+    const ctx = await openAuthedContext(actor);
+
+    const { error } = await ctx.supabase.rpc('delete_my_account');
+    if (error) {
+      // Both refusals arrive here wearing their own sentences — "Take your
+      // offers off sale before deleting your account." (22023) and "An
+      // administrator account is removed by another administrator." (42501) —
+      // and `errors.ts` passes them through because neither looks internal.
+      throwDataError(error, true);
+    }
   }
 
   async setMyAvatar(actor: Actor, path: string | null): Promise<Profile> {

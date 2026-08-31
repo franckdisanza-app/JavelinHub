@@ -635,6 +635,31 @@ expectEqual('...and changes no row at all', rows(emailWrite).length, 0);
 // forgotten.
 
 // ===========================================================================
+section('Account deletion (0018)');
+// ===========================================================================
+// `delete_my_account()` anonymises the caller's own row rather than erasing it,
+// because the foreign-key graph makes erasure either impossible or destructive.
+// It takes NO PARAMETER, so there is no id to forge — the subject is
+// `jwt_uid()`. What is assertable without a session is the refusal.
+
+const deleteAnon = await rpc('delete_my_account', {});
+expectSqlState('delete_my_account refuses an anonymous caller', deleteAnon, '42501');
+expectEqual(
+  '...with the sentence 0018 wrote, not a Postgres one',
+  deleteAnon.message.includes('signed in'),
+  true,
+);
+
+// The column exists and is readable through the granted projection — a deleted
+// profile still renders on a review as "Deleted account", which is the whole
+// point of anonymising rather than erasing.
+expectEqual(
+  'public_profiles still serves a deleted account by name',
+  (await rest('public_profiles?select=id,full_name&limit=1')).status,
+  200,
+);
+
+// ===========================================================================
 section('The signed-in tier');
 // ===========================================================================
 

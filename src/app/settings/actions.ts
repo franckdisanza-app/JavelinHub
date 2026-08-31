@@ -3,7 +3,8 @@
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 
-import { getActor, loginPath } from '@/lib/auth/session';
+import { banAuthUser } from '@/lib/auth/account-deletion';
+import { destroySession, getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { isDataError } from '@/lib/data/types';
 import { fieldError, formError, toFormState, type FormState } from '@/lib/forms';
@@ -243,4 +244,84 @@ export async function changePasswordAction(_prev: FormState, formData: FormData)
   // re-render is how the new pair reaches the browser.
   revalidatePath('/', 'layout');
   return { status: 'success' };
+}
+
+/**
+ * Deletes the signed-in user's account.
+ *
+ * FOUR STEPS, IN THIS ORDER, and the order is the design:
+ *
+ *   1. **Withdraw their offers.** `delete_my_account()` refuses while any is
+ *      still on sale, and it refuses because it physically cannot withdraw them
+ *      itself: `guard_listing_update()` calls `auth.uid()`, which the privileged
+ *      role owning that function cannot reach. So the withdrawal happens here,
+ *      through the ordinary owner path where `auth.uid()` resolves — and the
+ *      database enforces the ordering rather than trusting this comment.
+ *   2. **Anonymise the profile**, through the RPC. From this moment
+ *      `resolveProfile` refuses the account in both backends, so every method
+ *      in the interface is closed to it.
+ *   3. **Ban the GoTrue user**, which is the only thing that kills the
+ *      credential — and which neither backend can do, because `auth.users`
+ *      lives in a schema the privileged role holds no USAGE on.
+ *   4. **Drop the session**, so the browser is not left holding a cookie for an
+ *      account that no longer answers.
+ *
+ * STEP 3 IS NOT ALLOWED TO FAIL THE FLOW. By the time it runs the profile is
+ * already anonymised and there is no going back; refusing to finish would leave
+ * somebody with an account that has lost its name and its picture and still
+ * lets them in. `banAuthUser` reports its own failure and returns false.
+ *
+ * THE CONFIRMATION IS THE WORD "DELETE", typed. Not a checkbox: this is the one
+ * irreversible action in the product, and the deliberate friction is the point.
+ */
+export async function deleteAccountAction(_prev: FormState, formData: FormData): Promise<FormState> {
+  const typed = String(formData.get('confirm') ?? '').trim();
+  if (typed.toLowerCase() !== 'delete') {
+    return {
+      status: 'error',
+      message: 'Type DELETE to confirm.',
+      fieldErrors: { confirm: 'Type DELETE to confirm.' },
+    };
+  }
+
+  const actor = await getActor();
+  if (!actor) redirect(loginPath(SETTINGS_PATH));
+
+  const db = getDataClient();
+
+  try {
+    /*
+     * Step 1. Sequential rather than `Promise.all`: each withdrawal fires the
+     * revision trigger and the guard, and a burst of concurrent updates to one
+     * coach's rows is a lock-ordering problem for no gain — there are never
+     * many.
+     *
+     * Only the ones still on sale. `listMyListings` is the read that does not
+     * filter `deleted_at`, so it sees the already-withdrawn ones too, and
+     * `softDeleteListing` would answer `conflict` for those.
+     */
+    const mine = await db.listMyListings(actor);
+    for (const listing of mine) {
+      if (listing.deleted_at === null) await db.softDeleteListing(actor, listing.id);
+    }
+
+    // Step 2.
+    await db.deleteMyAccount(actor);
+  } catch (error) {
+    if (!isDataError(error)) throw error;
+    if (error.code === 'unauthorized') redirect(loginPath(SETTINGS_PATH));
+    // `forbidden` is the administrator refusal; `invalid` is an offer still on
+    // sale, which step 1 should have prevented and which is worth surfacing
+    // verbatim if it somehow did not.
+    return toFormState(error);
+  }
+
+  // Step 3. Deliberately outside the try: a failure here is reported inside
+  // `banAuthUser` and must not undo or block what has already happened.
+  await banAuthUser(actor.userId);
+
+  // Step 4.
+  await destroySession();
+  revalidatePath('/', 'layout');
+  redirect('/?deleted=1');
 }

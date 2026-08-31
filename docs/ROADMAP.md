@@ -197,10 +197,33 @@ the buyer reviews it. What is left in §1 is the money.
   the link from configuration and never from the request's `Host` header,
   precisely so that a crafted request cannot make us email a valid reset link
   pointing somewhere else.
-* ~~**No email change**~~ **done**, and **no account deletion** — the one thing
-  `/settings` still says plainly it cannot do, rather than leaving a reader to
-  hunt for it. Name, picture, email and password all live there now, for
-  everyone.
+* ~~**No email change and no account deletion.**~~ **Both done.** Name, picture,
+  email, password and the way out all live at `/settings`, for everyone.
+
+  **Deletion ANONYMISES rather than erases**, because the foreign-key graph
+  leaves no honest alternative: `listings.coach_id` cascades while
+  `orders.listing_id` is `ON DELETE RESTRICT`, so a coach who has ever sold
+  could not be removed at all — and a learner who could would take their
+  purchases and reviews with them, reducing some coach's sales count and rating.
+  One person's departure must not rewrite another's history. The row survives
+  with its personal data replaced; `verify:authz` asserts that a third party's
+  numbers do not move.
+
+  Three things fell out of it that were not obvious from the outside.
+  `delete_my_account()` **cannot withdraw the user's offers** —
+  `guard_listing_update()` calls `auth.uid()` and the privileged role owning the
+  function cannot reach that schema — so it REFUSES while any is on sale, and
+  the ordering becomes an invariant rather than a convention. It **cannot touch
+  `auth.users`** either, so the GoTrue user is banned separately; deleting it
+  would cascade `profiles` and undo the whole design. And an **administrator
+  cannot delete themselves**, because `invites.created_by` is `ON DELETE
+  RESTRICT` and an invite records who granted somebody coach status.
+
+  The residual, stated rather than hidden: an access token already issued stays
+  valid until it expires, so for up to an hour a deleted account's raw token
+  would still satisfy RLS on a direct PostgREST call. The refresh token is
+  revoked, and `resolveProfile` refuses the account in both backends, so every
+  path through the application is closed immediately.
 
   The email change needed `0017` before it needed any UI. `profiles.email` is a
   copy of `auth.users.email` written ONCE by an `AFTER INSERT` trigger, and

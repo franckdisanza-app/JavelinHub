@@ -635,6 +635,44 @@ export interface DataClient {
    */
   requestEmailChange(actor: Actor, newEmail: string): Promise<EmailChangeResult>;
 
+  /**
+   * Deletes the actor's own account, by ANONYMISING it rather than erasing it.
+   *
+   * The foreign-key graph makes erasure either impossible or destructive:
+   * `listings.coach_id` cascades while `orders.listing_id` is `ON DELETE
+   * RESTRICT`, so a coach who has ever sold cannot be removed at all — and a
+   * learner who could would take their purchases and reviews with them,
+   * reducing some coach's sales count and rating. Deleting one person's data
+   * must not rewrite another's history. `0018_delete_my_account.sql` works
+   * through the whole graph.
+   *
+   * So: the row survives with its personal data replaced. Name, email, picture
+   * and the three coach columns go; role and coach status drop to
+   * learner/none, which removes a departed coach from the directory with no
+   * extra predicate anywhere; `deleted_at` is stamped.
+   *
+   * **REFUSES WHILE ANY OF THEIR OFFERS IS STILL ON SALE.** The caller withdraws
+   * them first. That is not politeness — the SQL function physically cannot
+   * withdraw them, because `guard_listing_update()` calls `auth.uid()` and the
+   * privileged role that owns the function cannot reach the `auth` schema. The
+   * refusal turns the ordering into an invariant the database enforces rather
+   * than a convention the caller remembers.
+   *
+   * **AN ADMINISTRATOR CANNOT DELETE THEMSELVES**, and that is the accepted
+   * answer: `invites.created_by` is `ON DELETE RESTRICT` because an invite is
+   * the record of who granted somebody coach status, and weakening that to
+   * enable a rare flow is the wrong trade. One administrator removes another.
+   *
+   * Idempotent. A second call on an already-deleted account succeeds silently,
+   * so a retry after a partial failure is safe.
+   *
+   * **This does NOT kill the credential.** Neither backend can: on Supabase the
+   * GoTrue user lives in a schema the privileged role cannot reach, and on the
+   * mock the session is a cookie this app signs. `src/lib/auth/account-deletion.ts`
+   * bans the one, and `resolveProfile` refusing a deleted profile closes both.
+   */
+  deleteMyAccount(actor: Actor): Promise<void>;
+
 
   // ---------------------------------------------------------------------------
   // Listings

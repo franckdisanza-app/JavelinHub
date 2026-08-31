@@ -1,10 +1,11 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useState } from 'react';
 
 import {
   changeEmailAction,
   changePasswordAction,
+  deleteAccountAction,
   updateAvatarAction,
   updateNameAction,
 } from '@/app/settings/actions';
@@ -16,9 +17,9 @@ import { Input } from '@/components/ui/input';
 import { idleFormState } from '@/lib/forms';
 
 /**
- * The four account forms.
+ * The five account forms.
  *
- * FOUR FORMS AND FOUR ACTIONS, not one of each. They fail independently and
+ * FIVE FORMS AND FIVE ACTIONS, not one of each. They fail independently and
  * for unrelated reasons — a rejected picture must not discard a name the user
  * just typed, and a wrong current password must not make them re-pick a
  * picture. It is the same reasoning `AvatarForm` used when it was split out of
@@ -299,6 +300,104 @@ export function PasswordForm() {
       <div>
         <Button type="submit" variant="secondary" disabled={pending}>
           {pending ? 'Changing…' : 'Change password'}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * Deletes the account.
+ *
+ * TWO STEPS AND A TYPED WORD, which is more friction than anything else in the
+ * product and is meant to be. Everything else here is reversible: a name can be
+ * renamed, a picture replaced, a password changed again. This cannot, and the
+ * person doing it is often upset.
+ *
+ * THE PANEL SAYS WHAT SURVIVES, because "delete my account" and what actually
+ * happens are not the same thing and the difference is theirs to know before
+ * they choose. Their purchases and reviews stay — removing them would rewrite
+ * some coach's sales count and rating, which is one person's departure changing
+ * another person's history.
+ */
+export function DeleteAccountForm({ isCoach, isAdmin }: { isCoach: boolean; isAdmin: boolean }) {
+  const [state, formAction, pending] = useActionState(deleteAccountAction, idleFormState);
+  const [confirming, setConfirming] = useState(false);
+  const errors = state.fieldErrors ?? {};
+
+  /*
+   * An administrator is told before they try, not after. `delete_my_account()`
+   * refuses them — `invites.created_by` is ON DELETE RESTRICT, so an invite is
+   * an audit record that outlives its author — and rendering a control whose
+   * only outcome is a refusal is the thing the dashboard's Restore button
+   * already declines to do.
+   */
+  if (isAdmin) {
+    return (
+      <Alert tone="info" title="An administrator cannot delete their own account.">
+        Invite codes record which administrator granted somebody coach status, and that record outlives the
+        account that made it. Ask another administrator to remove yours.
+      </Alert>
+    );
+  }
+
+  if (!confirming) {
+    return (
+      <div className="flex flex-col items-start gap-3">
+        <p className="text-sm leading-relaxed text-muted">
+          Your name, picture and email are replaced and you are signed out for good.{' '}
+          <strong className="font-medium text-ink">
+            Your purchases and any reviews you wrote stay
+          </strong>{' '}
+          — removing them would change other people&rsquo;s sales and ratings.
+          {isCoach ? ' Your offers are taken off sale first.' : ''}
+        </p>
+        <Button variant="secondary" size="sm" onClick={() => setConfirming(true)}>
+          Delete my account
+        </Button>
+        {state.status === 'error' && state.message ? (
+          <p role="alert" className="text-xs font-medium text-danger">
+            {state.message}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <form action={formAction} className="flex flex-col gap-4 border border-danger p-3">
+      <p className="text-sm leading-relaxed text-ink">
+        <strong className="font-semibold">This cannot be undone.</strong> You will not be able to sign in
+        again, and this account cannot be restored by anybody — including an administrator.
+      </p>
+
+      <Field
+        id="confirm-delete"
+        label="Type DELETE to confirm"
+        error={errors.confirm}
+      >
+        <Input
+          id="confirm-delete"
+          name="confirm"
+          type="text"
+          autoComplete="off"
+          required
+          placeholder="DELETE"
+          invalid={Boolean(errors.confirm)}
+          aria-describedby={fieldDescribedBy('confirm-delete', { error: errors.confirm })}
+        />
+      </Field>
+
+      {state.status === 'error' && state.message && !errors.confirm ? (
+        <Alert tone="error">{state.message}</Alert>
+      ) : null}
+
+      <div className="flex flex-wrap gap-2">
+        <Button type="submit" variant="danger" size="sm" disabled={pending}>
+          {pending ? 'Deleting…' : 'Delete my account'}
+        </Button>
+        <Button type="button" variant="secondary" size="sm" onClick={() => setConfirming(false)} disabled={pending}>
+          Cancel
         </Button>
       </div>
     </form>

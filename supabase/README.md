@@ -1,7 +1,7 @@
 # `supabase/` — schema, RLS, and the mock → Postgres swap path
 
 **Applied.** Project ref `trocsdetpwyqcgyfclir`, PostgreSQL 17, migrations
-**0001-0017** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
+**0001-0018** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
 pages off it.
 
 **Bootstrapped.** An administrator exists, minted an invite code, and that code
@@ -15,7 +15,7 @@ been run, so there is no fabricated data.
 somebody re-ran by hand: `npm run verify:supabase`. It asks PostgREST and
 GoTrue directly, with the same anon key a browser gets, and it is READ-ONLY by
 default because it runs against whatever `NEXT_PUBLIC_SUPABASE_URL` names —
-here, the live project. Last run: **61 passed, 0 failed**, with the write tiers
+here, the live project. Last run: **64 passed, 0 failed**, with the write tiers
 skipped — see below, they can no longer provision fixtures against a project
 that validates email domains.
 
@@ -72,8 +72,8 @@ PostgREST request arrives as `authenticator`, service-role included. The suite
 confirms that rather than assuming it — `grant_admin` anonymously answers
 `42501 Only an administrator can grant administrator access.`
 
-The mock remains the code twin and is still what `npm run verify:authz` (967
-assertions) and `npm run verify:pages` (299) exercise — both hard-set
+The mock remains the code twin and is still what `npm run verify:authz` (995
+assertions) and `npm run verify:pages` (303) exercise — both hard-set
 `DATA_BACKEND=mock`, so **neither of those two covers `SupabaseDataClient`.**
 
 The app itself was separately checked serving real pages off this project:
@@ -106,6 +106,7 @@ MAIL has not.
 | `migrations/0015_drop_dead_search_index.sql` | drops `listings_search_tsv_idx`, which no query has ever used — see its header for why implementing the full-text variant was the wrong fix |
 | `migrations/0016_review_moderation.sql` | `removed_reviews`, `remove_review()`, and the DROP of `reviews_update_admin` and `reviews_delete_admin` — both were routes around the audited one |
 | `migrations/0017_sync_profile_email.sql` | the `AFTER UPDATE OF email` trigger on `auth.users` — the only writer of `profiles.email` after signup, and without it an email change desyncs the copy forever |
+| `migrations/0018_delete_my_account.sql` | `profiles.deleted_at` and `delete_my_account()` — anonymise rather than erase, and the two refusals that fall out of what the privileged role cannot reach |
 | `seed.sql` | demo fixtures — the SQL mirror of `seedDatabase()` in `src/lib/data/mock/store.ts`. **Fabricated purchases and reviews; do not load into a project real users will see.** Flags everything it inserts as `is_demo` |
 
 ### Finding fabricated data

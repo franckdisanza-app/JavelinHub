@@ -108,6 +108,22 @@ function resolveProfile(db: MockDb, actor: Actor): Profile {
     // A session pointing at a user that no longer exists is not authenticated.
     throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
   }
+  /*
+   * A DELETED ACCOUNT IS NOT AUTHENTICATED, and this ONE line is what closes
+   * every actor-taking method to it at once — there are forty of them and none
+   * needs its own check.
+   *
+   * The row survives a deletion, anonymised, because orders and reviews point
+   * at it (see `Profile.deleted_at`). So "the profile exists" stopped being
+   * enough to mean "this person may act", and this is where the two came apart.
+   *
+   * The same sentence as a missing profile, deliberately: both are "your
+   * session is over", and telling them apart would say something about an
+   * account to whoever is holding the cookie.
+   */
+  if (profile.deleted_at !== null) {
+    throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
+  }
   return profile;
 }
 
@@ -537,6 +553,12 @@ export class MockDataClient implements DataClient {
         coach_bio: null,
         coach_years_coaching: null,
         avatar_path: null,
+        // Written explicitly rather than left off, for the same reason
+        // `deleted_at` is on a listing: a row missing the column would still
+        // BEHAVE correctly (every consumer tests for null) but would fail the
+        // profile shape assertions, and "absent" and "null" must not be two
+        // different rows in the store.
+        deleted_at: null,
         created_at: timestamp,
         updated_at: timestamp,
       };
@@ -556,7 +578,24 @@ export class MockDataClient implements DataClient {
       if (!user) return null;
       if (!verifyPassword(input.password, user.password_hash, user.password_salt)) return null;
       const profile = db.profiles.find((p) => p.id === user.id);
-      return profile ? copy(profile) : null;
+      if (!profile) return null;
+      /*
+       * A DELETED ACCOUNT CANNOT SIGN IN, and this is the mock's analogue of
+       * banning the GoTrue user — which is what Supabase does, because
+       * `delete_my_account()` cannot reach `auth.users` at all.
+       *
+       * `deleteMyAccount` anonymises `profiles.email` and deliberately leaves
+       * `auth_users.email` alone, so the OLD address and the OLD password still
+       * match here. Without this line they would sign in successfully, get a
+       * session, and then be refused by `resolveProfile` on every subsequent
+       * call — a login that works followed by an app that does not.
+       *
+       * `null`, not a throw: it must be indistinguishable from a wrong password,
+       * or the login form becomes an oracle for which accounts have been
+       * deleted.
+       */
+      if (profile.deleted_at !== null) return null;
+      return copy(profile);
     });
   }
 
@@ -840,6 +879,64 @@ export class MockDataClient implements DataClient {
       profile.updated_at = nowIso();
 
       return { status: 'changed', profile: copy(profile) };
+    });
+  }
+
+  /**
+   * Mirrors `public.delete_my_account()` (0018), rule for rule and message for
+   * message — including the two refusals, which are the interesting part.
+   *
+   * ANONYMISE, DO NOT ERASE. The row stays because orders and reviews point at
+   * it, and removing it would reduce some coach's sales count and rating as a
+   * side effect of somebody else leaving.
+   */
+  async deleteMyAccount(actor: Actor): Promise<void> {
+    return mutateDb((db) => {
+      // NOT `resolveProfile`: that now refuses a deleted account, which would
+      // make this method fail on the second call rather than being idempotent.
+      const userId = requireActorId(actor);
+      const profile = db.profiles.find((p) => p.id === userId);
+      if (!profile) {
+        throw new DataError('unauthorized', 'Your session is no longer valid. Please sign in again.');
+      }
+
+      // Idempotent. A retry after the ban step failed must not look like a new
+      // failure to somebody who is trying to leave.
+      if (profile.deleted_at !== null) return;
+
+      // Mirrors the invariant the SQL function enforces because it cannot
+      // withdraw offers itself. The mock COULD, and deliberately does not: a
+      // rule the two backends enforce differently is a rule that will diverge.
+      if (db.listings.some((l) => l.coach_id === profile.id && !isWithdrawn(l))) {
+        throw new DataError('invalid', 'Take your offers off sale before deleting your account.');
+      }
+
+      if (profile.role === 'admin') {
+        throw new DataError(
+          'forbidden',
+          'An administrator account is removed by another administrator.',
+        );
+      }
+
+      profile.full_name = 'Deleted account';
+      // `.invalid` is reserved by RFC 2606 and can never route. Unique per
+      // account, because `signUp` checks the credential table for duplicates.
+      profile.email = `deleted+${profile.id}@javelinhub.invalid`;
+      profile.avatar_path = null;
+      profile.coach_headline = null;
+      profile.coach_bio = null;
+      profile.coach_years_coaching = null;
+      // A departed coach stops being one, which is what removes them from the
+      // directory: every coach read filters `coach_status === 'approved'`.
+      profile.role = 'learner';
+      profile.coach_status = 'none';
+      profile.deleted_at = nowIso();
+      profile.updated_at = profile.deleted_at;
+
+      // THE CREDENTIAL IS NOT TOUCHED HERE, mirroring the SQL function, which
+      // cannot reach `auth.users` at all. On the mock the session is a signed
+      // cookie this app issues, and `resolveProfile` refusing the deleted
+      // profile is what ends it.
     });
   }
 

@@ -346,6 +346,13 @@ const PROFILE_COLUMNS = [
   'coach_bio',
   'coach_years_coaching',
   'avatar_path',
+  // Added with account deletion. IN THE LIST for the same reason `deleted_at`
+  // is on a listing row: a stored profile missing it would still READ as active
+  // everywhere (every consumer tests for `null`), so its absence is invisible
+  // to every behavioural assertion here — and `resolveProfile` refuses on
+  // `!== null`, where `undefined !== null` is TRUE. An unrepaired row would
+  // lock its owner out of all forty methods at once, silently.
+  'deleted_at',
   'created_at',
   'updated_at',
 ] as const;
@@ -4430,6 +4437,166 @@ expectEqual('...stored under their own id', learnerAvatar?.avatar_path, `${setti
 await refuses("...but never under somebody else's", 'forbidden', () =>
   db.setMyAvatar(SETTINGS_ACTOR, `${COACH!.userId}/portrait.png`),
 );
+
+// ---------------------------------------------------------------------------
+section('Deleting an account — anonymise, and close every door');
+// ---------------------------------------------------------------------------
+// The row SURVIVES, anonymised, because orders and reviews point at it: erasing
+// it would reduce some coach's sales count and rating as a side effect of
+// somebody else leaving. What is asserted is that the personal data goes, that
+// the account can no longer act, and that nobody else's numbers moved.
+
+// A coach with a published offer, so the "withdraw first" invariant has
+// something to bite on.
+const doomedCoach = await allows(
+  'a fixture coach for the deletion section',
+  () => signUpProfile({ email: 'doomed@javelin.test', password: 'doomed-password-1', fullName: 'Dara Doomed' }),
+  (p) => p.id,
+);
+const DOOMED: Actor = { userId: doomedCoach!.id };
+// A FRESH code, minted here: the two seeded ones are single-use and earlier
+// sections have already spent them.
+const doomedInvite = await allows(
+  '...given a freshly minted invite code',
+  () => db.createInvite(ADMIN, { note: 'deletion fixture' }),
+  (i) => i.code,
+);
+await allows(
+  '...which promotes them',
+  () => db.redeemInviteCode(DOOMED, doomedInvite!.code),
+  (p) => p.coach_status,
+);
+const doomedOffer = await allows(
+  '...who publishes an offer',
+  () =>
+    db.createListing(DOOMED, {
+      title: 'Offer that outlives its coach',
+      description: 'Published so the withdraw-before-delete invariant has something to refuse over.',
+      price_cents: 4100,
+      category: 'training_plan',
+    }),
+  (r) => r.id,
+);
+
+// --- the invariant ---------------------------------------------------------
+// THE RULE THE SQL FUNCTION ENFORCES BECAUSE IT CANNOT DO THE WORK ITSELF:
+// `guard_listing_update()` calls `auth.uid()`, which the privileged role owning
+// `delete_my_account()` cannot reach. So the refusal is what makes "deleted the
+// account, left the offers selling" unreachable however a caller sequences
+// their requests — and the mock refuses identically rather than helpfully
+// withdrawing, because a rule enforced differently is a rule that will diverge.
+await refuses('an account with an offer still on sale cannot be deleted', 'invalid', () =>
+  db.deleteMyAccount(DOOMED),
+);
+expectEqual(
+  '...and nothing was anonymised by the attempt',
+  (await db.getProfile(DOOMED, doomedCoach!.id))?.full_name,
+  'Dara Doomed',
+);
+
+await allows('withdrawing the offer first', () => db.softDeleteListing(DOOMED, doomedOffer!.id), (r) => r.title);
+
+// --- administrators cannot ------------------------------------------------
+// `invites.created_by` is ON DELETE RESTRICT because an invite records who
+// granted somebody coach status, and that record outlives its author. Checked
+// on the ROLE rather than on holding invites, so the rule is predictable.
+await refuses('an administrator cannot delete themselves', 'forbidden', () =>
+  db.deleteMyAccount(ADMIN),
+);
+expectEqual(
+  '...and is still an administrator afterwards',
+  (await db.getProfile(ADMIN, ADMIN!.userId))?.role,
+  'admin',
+);
+
+// --- the deletion ----------------------------------------------------------
+const coachStatsBefore = await db.getCoachStats(COACH!.userId);
+await allows('the account deletes itself', () => db.deleteMyAccount(DOOMED), () => 'deleted');
+
+// EVERY ACTOR-TAKING METHOD IS NOW CLOSED, through one line in resolveProfile.
+// Three different shapes of call, so this is about the resolver rather than
+// about one method remembering.
+await refuses('a deleted account cannot read its own profile', 'unauthorized', () =>
+  db.getProfile(DOOMED, doomedCoach!.id),
+);
+await refuses('...nor publish', 'unauthorized', () =>
+  db.createListing(DOOMED, {
+    title: 'Published from beyond',
+    description: 'Should never reach the store, because the actor no longer resolves.',
+    price_cents: 1000,
+    category: 'other',
+  }),
+);
+await refuses('...nor rename itself back', 'unauthorized', () =>
+  db.updateMyProfile(DOOMED, { full_name: 'Dara Doomed' }),
+);
+// And the credential is dead on the mock too — not because anything touched
+// `auth_users`, but because a session for a deleted profile resolves to nobody.
+/*
+ * THE CREDENTIAL IS DEAD TOO, and this assertion is why it is: it failed first.
+ *
+ * `deleteMyAccount` anonymises `profiles.email` and deliberately leaves
+ * `auth_users.email` alone — mirroring Supabase, where the RPC cannot reach
+ * `auth.users` at all. So the OLD address and the OLD password still MATCH, and
+ * without an explicit refusal the login succeeded: a session was issued, and
+ * every call after it was refused by `resolveProfile`. A login that works
+ * followed by an app that does not.
+ *
+ * `null`, indistinguishable from a wrong password, so the form does not become
+ * an oracle for which accounts have been deleted.
+ */
+expectEqual(
+  'the old password still matches, and buys nothing',
+  await db.signInWithPassword({ email: 'doomed@javelin.test', password: 'doomed-password-1' }),
+  null,
+);
+// The control: the same call for a LIVE account still works, so the refusal
+// above is about deletion rather than about sign-in being broken.
+expectEqual(
+  'control: a live account still signs in',
+  (await db.signInWithPassword({ email: 'coach@javelin.test', password: 'coach1234' }))?.id,
+  COACH!.userId,
+);
+
+// --- what the row looks like afterwards ------------------------------------
+const anonymised = await mutateDb((store) => {
+  const row = store.profiles.find((p) => p.id === doomedCoach!.id);
+  return row ? { ...row } : null;
+});
+expectEqual('the name is gone', anonymised?.full_name, 'Deleted account');
+// `.invalid` is reserved by RFC 2606 and can never route anywhere.
+expectEqual('the address is an unroutable tombstone', anonymised?.email, `deleted+${doomedCoach!.id}@javelinhub.invalid`);
+expectEqual('...and is unique per account, so signUp can still check duplicates',
+  anonymised?.email.includes(doomedCoach!.id), true);
+expectEqual('the picture is cleared', anonymised?.avatar_path, null);
+expectEqual('the coach columns are cleared', anonymised?.coach_bio, null);
+// A departed coach stops being one, which is what removes them from the
+// directory: every coach read filters on `approved`, so no extra predicate is
+// needed anywhere.
+expectEqual('they are no longer an approved coach', anonymised?.coach_status, 'none');
+expectEqual('...nor a coach at all', anonymised?.role, 'learner');
+expectEqual('and the row is marked deleted', typeof anonymised?.deleted_at, 'string');
+expectEqual(
+  'the departed coach is out of the directory',
+  (await db.listCoaches()).some((c) => c.id === doomedCoach!.id),
+  false,
+);
+
+// --- nobody else moved -----------------------------------------------------
+// THE ASSERTION THE WHOLE DESIGN EXISTS FOR. Erasing the row would have taken
+// this person's orders and reviews with it, changing a coach's public numbers
+// because somebody else left.
+const coachStatsAfter = await db.getCoachStats(COACH!.userId);
+expectEqual('another coach’s sales are untouched', coachStatsAfter.sales_count, coachStatsBefore.sales_count);
+expectEqual('...and their review count', coachStatsAfter.review_count, coachStatsBefore.review_count);
+expectEqual('...and their rating', coachStatsAfter.rating_average, coachStatsBefore.rating_average);
+
+// --- idempotent ------------------------------------------------------------
+// A retry after the ban step failed must not look like a new failure to
+// somebody who is trying to leave. It cannot go through `deleteMyAccount`'s own
+// actor resolution either, which is why that method deliberately does not call
+// `resolveProfile`.
+await allows('deleting twice is a no-op, not an error', () => db.deleteMyAccount(DOOMED), () => 'no-op');
 
 // ---------------------------------------------------------------------------
 section('Review moderation — admin only, and the row really goes');

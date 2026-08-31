@@ -508,6 +508,11 @@ function upsertUser(
     // No seeded avatar: the mock backend has no file storage at all, so a path
     // here would name an object that cannot exist. Renders as initials.
     avatar_path: null,
+    // No seeded account is deleted. A deleted fixture would change every
+    // account-level count the suites pin, for a state they already build at
+    // runtime through deleteMyAccount() — the same rule the seed follows for
+    // withdrawn listings.
+    deleted_at: null,
     created_at,
     updated_at: created_at,
   });
@@ -728,6 +733,20 @@ export function seedDatabase(db: MockDb): void {
   // fixture: a moderation log entry asserts that an administrator took an
   // action, and inventing one would be inventing an accusation.
   if (!Array.isArray(db.removed_reviews)) db.removed_reviews = [];
+
+  // `deleted_at` on a PROFILE arrived with account deletion. Backfilled rather
+  // than bumping DB_VERSION, like every column above — and `null` is the only
+  // honest value: a row written before the column existed belongs to somebody
+  // who never deleted their account.
+  //
+  // Normalising a MISSING key to `null` rather than leaving it `undefined` is
+  // what keeps the column present on every row handed out, which the profile
+  // shape assertions depend on — and it matters more here than for most,
+  // because `resolveProfile` refuses on `!== null` and `undefined !== null` is
+  // TRUE. An unrepaired row would lock its owner out of every method at once.
+  for (const profile of db.profiles) {
+    if (typeof profile.deleted_at !== 'string' || profile.deleted_at === '') profile.deleted_at = null;
+  }
 
   // The three coach columns arrived after the first stores were written, so a
   // real `data/db.json` is holding profile rows with no such keys at all.

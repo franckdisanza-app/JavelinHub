@@ -194,6 +194,26 @@ export interface Profile {
    * and the path discloses only the owner id those shapes already carry.
    */
   avatar_path: string | null;
+  /**
+   * When the owner deleted their account, or `null`.
+   *
+   * THE ROW SURVIVES A DELETION and is ANONYMISED — `full_name` becomes
+   * "Deleted account", the address becomes an unroutable `.invalid` tombstone,
+   * the picture and the three coach columns are cleared, and role/coach status
+   * drop to learner/none. Erasing the row instead would cascade into listings,
+   * orders and reviews, which is one person's departure rewriting another
+   * person's sales count and rating. `0018_delete_my_account.sql` works through
+   * the foreign keys that force this.
+   *
+   * IT IS AN AUTHORIZATION FACT, not merely a flag: `resolveProfile` in BOTH
+   * backends refuses a deleted profile with `unauthorized`, so every method on
+   * this interface is closed to the account from the moment it is set. On
+   * Supabase the GoTrue user is banned separately — the privileged role cannot
+   * reach the `auth` schema — and until an already-issued access token expires,
+   * that token still satisfies RLS on a direct PostgREST call. See
+   * `src/lib/auth/account-deletion.ts`.
+   */
+  deleted_at: string | null;
 }
 
 /**

@@ -1666,11 +1666,40 @@ try {
    * gaps — one of them is a legal obligation — and a settings page that simply
    * lacked them would read as a page where they are hidden somewhere.
    */
-  check('the page says what it cannot do yet',
-    learnerSettings.text.includes('deleting your account'), true);
-  // ...and no longer claims email is missing, now that it is not.
-  check('...and no longer lists the email change as missing',
-    /Not here yet:[^.]*email/i.test(learnerSettings.text), false);
+  /*
+   * DELETION IS ON THE PAGE NOW, not a note about a missing feature. Its own
+   * card, last, and behind a typed confirmation — burying the one irreversible
+   * action is a different kind of dark pattern from making it too easy.
+   */
+  check('the page offers account deletion', learnerSettings.text.includes('Delete your account'), true);
+  check('...saying what survives it',
+    learnerSettings.text.includes('Your purchases and any reviews you wrote stay'), true);
+  /*
+   * The typed confirmation is revealed by the first click, so it is NOT in the
+   * served markup — the same two-step shape the review-removal form uses, and
+   * for the same reason.
+   *
+   * Matched on the ID rather than the NAME: the password form has a `confirm`
+   * field of its own, so `name="confirm"` is on this page either way and an
+   * assertion using it would pass whatever the delete form did.
+   */
+  check('...behind a first click rather than one button',
+    learnerSettings.html.includes('id="confirm-delete"'), false);
+  // And nothing on the page still advertises a gap that has been closed.
+  check('...and nothing still says these are missing',
+    /Not here yet/i.test(learnerSettings.text), false);
+
+  /*
+   * AN ADMINISTRATOR IS TOLD BEFORE THEY TRY. `delete_my_account()` refuses
+   * them — `invites.created_by` is ON DELETE RESTRICT, so an invite outlives its
+   * author — and rendering a control whose only outcome is a refusal is what
+   * the dashboard's Restore button already declines to do.
+   */
+  const adminSettings = await getAs('/settings', fixtures.adminId);
+  check('an admin is told they cannot delete themselves',
+    adminSettings.text.includes('cannot delete their own account'), true);
+  check('...and gets no delete control at all',
+    adminSettings.text.includes('Delete my account'), false);
 
   /*
    * THE CONFIRMATION LANDING. `/auth/callback` sends an email-change link here
