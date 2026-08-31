@@ -155,10 +155,12 @@
 
 import type {
   Actor,
+  AdminActionWithNames,
   ApplicationStatus,
   CoachApplication,
   CoachApplicationWithUser,
   CoachStats,
+  CoachStatus,
   FulfilmentMode,
   Invite,
   ListingCategory,
@@ -177,6 +179,10 @@ import type {
   PublicReview,
   PublicReviewWithListing,
   RemovedReviewWithNames,
+  Report,
+  ReportReason,
+  ReportStatus,
+  ReportWithContext,
   Review,
 } from './types';
 
@@ -743,6 +749,29 @@ export interface DataClient {
   listListingsByCoach(actor: Actor, coachId: string): Promise<ListingWithCoach[]>;
 
   /**
+   * Every listing owned by one coach, **withdrawn ones included** — the read
+   * `/admin/coaches` renders, and the third listing-by-coach shape in this
+   * interface. The other two exist for different callers and neither can serve
+   * this one: {@link listListingsByCoach} is public and hides withdrawn offers,
+   * and {@link listMyListings} derives the coach id from the actor so it cannot
+   * be pointed at somebody else.
+   *
+   * WHY AN ADMIN NEEDS THE WITHDRAWN ONES. Suspending a coach takes every offer
+   * they have on sale down, and an ADMIN takedown is one the coach may not lift
+   * themselves (see {@link restoreListing}'s table). So without this read, a
+   * reinstated coach would be left with a shelf of offers nobody could put back
+   * — the suspension would be reversible in name only.
+   *
+   * `deleted_at` is what to branch on. No `withdrawn_by_admin` here: an admin
+   * may restore either way, so the flag would answer a question this caller
+   * never asks.
+   *
+   * @throws DataError `unauthorized` when anonymous, `forbidden` for anyone who
+   * is not an admin.
+   */
+  listListingsForAdmin(actor: Actor, coachId: string): Promise<ListingWithCoach[]>;
+
+  /**
    * The actor's OWN offers, newest first, **including withdrawn ones** — the
    * read a coach dashboard renders from. Branch on `deleted_at !== null` to
    * show a withdrawn row with a Restore control.
@@ -1148,6 +1177,103 @@ export interface DataClient {
    * the accounts it names.
    */
   listRemovedReviews(actor: Actor): Promise<RemovedReviewWithNames[]>;
+
+  // ---------------------------------------------------------------------------
+  // Reports — the queue `/admin/reviews` was pretending to be
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Reports a review. **The coach whose offer it is about, and nobody else.**
+   *
+   * Not the buyer who wrote it — an author reporting their own review is not a
+   * thing — and not a passing visitor, which would turn the queue into a voting
+   * mechanism on other people's opinions.
+   *
+   * "No such review" and "not your offer" are ONE message. Telling them apart
+   * would let somebody probe which review ids exist, and a review id is
+   * otherwise never published: `PublicReview` carries none.
+   *
+   * One OPEN report per coach per review, not one ever — a coach whose first
+   * report was dismissed must be able to say so again if the behaviour escalates.
+   */
+  reportReview(actor: Actor, reviewId: string, reason: ReportReason, note?: string | null): Promise<Report>;
+
+  /**
+   * Reports a coach. **Anybody signed in**, and the asymmetry with the above is
+   * the point: a review report is about a specific piece of text on a specific
+   * offer, so its owner is the natural reporter, while a coach report is about
+   * conduct and the person who experiences that is whoever it was done to.
+   *
+   * Without this, the only reportable thing on the site would be criticism OF a
+   * coach — a moderation system that protects sellers only.
+   *
+   * Signed in rather than anonymous: a report with no accountable author costs
+   * nothing to file and the rate limiter has nothing to key on.
+   */
+  reportCoach(actor: Actor, coachId: string, reason: ReportReason, note?: string | null): Promise<Report>;
+
+  /** The actor's own reports, newest first, so "did anything happen?" is answerable. */
+  listMyReports(actor: Actor): Promise<Report[]>;
+
+  /**
+   * The queue. ADMIN ONLY, newest first, open ones by default.
+   *
+   * `subject_summary` is resolved at read time rather than stored, and that is
+   * what the subject columns not being foreign keys buys: upholding a review
+   * report deletes the review, so by the time anybody reads the report the text
+   * may be gone — and the row says so rather than vanishing with it.
+   */
+  listReports(actor: Actor, status?: ReportStatus): Promise<ReportWithContext[]>;
+
+  /**
+   * Marks a report upheld or dismissed. ADMIN ONLY.
+   *
+   * **It does not perform the consequence.** Removing the review is
+   * `removeReview`; suspending the coach is `setCoachStatus`. An administrator
+   * upholding a report has decided the report was RIGHT, which is not the same
+   * decision as what to do about it — and keeping them apart means the audit log
+   * records each independently, rather than one implying the other.
+   */
+  resolveReport(actor: Actor, reportId: string, status: ReportStatus, note?: string | null): Promise<Report>;
+
+  // ---------------------------------------------------------------------------
+  // Coach standing — admin only
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Suspends, reinstates or demotes a coach. ADMIN ONLY.
+   *
+   * Only `approved`, `suspended` and `none` are reachable. `pending_review` and
+   * `rejected` belong to the application flow and are written by
+   * `reviewCoachApplication`; hand-setting them would produce a
+   * `pending_review` with no application behind it, which every read of that
+   * status assumes cannot happen.
+   *
+   * **REFUSES WHILE ANY OF THEIR OFFERS IS STILL ON SALE**, for stopping
+   * statuses. The caller withdraws them first, as the administrator — the SQL
+   * function cannot, because `guard_listing_update()` calls `auth.uid()` and the
+   * privileged role that owns it cannot reach that schema. Same invariant, same
+   * reason, as `deleteMyAccount`.
+   *
+   * A useful side effect of the caller doing it: `deleted_by` ends up being the
+   * administrator, which is the state `withdrawn_by_admin` reports — so a
+   * reinstated coach cannot quietly put them back on sale themselves.
+   */
+  setCoachStatus(actor: Actor, userId: string, status: CoachStatus, reason?: string | null): Promise<Profile>;
+
+  /**
+   * Every coach an administrator might act on — approved and suspended alike.
+   * ADMIN ONLY.
+   *
+   * `listCoaches` cannot serve this: it is the public directory and filters to
+   * `approved`, so a suspended coach disappears from it the moment they are
+   * suspended — which is correct for visitors and useless for the administrator
+   * who has to reinstate them.
+   */
+  listCoachesForAdmin(actor: Actor): Promise<Profile[]>;
+
+  /** The audit log, newest first. ADMIN ONLY. */
+  listAdminActions(actor: Actor): Promise<AdminActionWithNames[]>;
 
   // ---------------------------------------------------------------------------
   // Invites (admin-minted, one-shot coach fast-track codes)

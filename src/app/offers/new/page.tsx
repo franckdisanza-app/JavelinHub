@@ -76,6 +76,27 @@ export default async function NewListingPage() {
  * has never applied staring at the same dead end.
  */
 function NotApprovedYet({ status }: { status: CoachStatus }) {
+  /*
+   * SUSPENDED FIRST, because the fall-through at the bottom of this function is
+   * "here are the two ways to become a coach" — and neither of them lifts a
+   * suspension. A suspended coach following that advice would file an
+   * application nobody can act on, or spend an invite code for nothing.
+   *
+   * The compiler did not catch this: the branch below is a catch-all, so adding
+   * a fifth `coach_status` type-checked while silently giving the worst possible
+   * answer to the one person the new status exists for.
+   */
+  if (status === 'suspended') {
+    return (
+      <Alert tone="warn" title="Your coaching account is suspended">
+        <p>
+          You cannot publish while it is, and your existing offers have been taken off sale. Only an
+          administrator can lift this — applying again or redeeming an invite code will not.
+        </p>
+      </Alert>
+    );
+  }
+
   if (status === 'pending_review') {
     return (
       <Alert tone="info" title="Your application is under review">

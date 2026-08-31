@@ -11,8 +11,11 @@ import {
   PasswordForm,
 } from '@/app/settings/settings-forms';
 import { Alert } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
-import { requireUser } from '@/lib/auth/session';
+import { getActor, requireUser } from '@/lib/auth/session';
+import { getDataClient } from '@/lib/data';
+import { formatDate } from '@/lib/format';
 import { firstValue } from '@/lib/search-params';
 import { avatarCacheBuster, avatarPublicUrl, avatarStorageAvailable } from '@/lib/storage/avatars';
 
@@ -64,6 +67,17 @@ export default async function SettingsPage({
    * same path would otherwise keep serving the CDN's copy of the old one.
    */
   const avatarUrl = avatarCacheBuster(avatarPublicUrl(profile.avatar_path), profile.updated_at);
+
+  /*
+   * Reports this person has filed. Read here rather than on a page of their own
+   * because there is nothing to do with them: a reporter cannot withdraw, edit
+   * or chase a report, so a whole route would be a page you visit once.
+   *
+   * Deliberately NOT wrapped in a try/catch of its own. Every other read on this
+   * page is the profile, which `requireUser` already resolved — if this one
+   * fails the session is broken and the error page is the honest outcome.
+   */
+  const reports = await getDataClient().listMyReports(await getActor());
 
   return (
     <Shell>
@@ -141,6 +155,61 @@ export default async function SettingsPage({
           <PasswordForm />
         </CardBody>
       </Card>
+
+      {/*
+        ONLY WHEN THERE IS SOMETHING TO SHOW. An empty "Reports you have filed"
+        card on everybody's settings page would advertise a feature most people
+        never touch, on the one page where every line is supposed to be about
+        them.
+      */}
+      {reports.length > 0 ? (
+        <Card tone="raised">
+          <CardHeader
+            title="Reports you have filed"
+            description="What an administrator decided, if they have got to it yet."
+          />
+          <CardBody className="py-0">
+            <ul className="divide-y divide-line">
+              {reports.map((report) => (
+                <li key={report.id} className="flex flex-col gap-1 py-3">
+                  <p className="flex flex-wrap items-center gap-2 text-body-15 text-ink">
+                    <Badge
+                      tone={
+                        report.status === 'open'
+                          ? 'warn'
+                          : report.status === 'upheld'
+                            ? 'success'
+                            : 'neutral'
+                      }
+                    >
+                      {report.status}
+                    </Badge>
+                    <span>
+                      {report.subject_type === 'review' ? 'A review' : 'A coach'}
+                      <span aria-hidden="true"> · </span>
+                      {formatDate(report.created_at)}
+                    </span>
+                  </p>
+                  {/*
+                    The subject is deliberately not named. A reporter is told
+                    what they reported and what came of it, and nothing about
+                    the other person's account — `listMyReports` returns the row
+                    rather than the admin queue's context shape for exactly that
+                    reason.
+                  */}
+                  <p className="text-body-15 leading-relaxed text-muted">
+                    {report.status === 'open'
+                      ? 'Nobody has looked at this yet. You are not notified either way — this page is where the answer appears.'
+                      : report.status === 'upheld'
+                        ? 'An administrator agreed with you.'
+                        : 'An administrator looked and decided to leave it as it is.'}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </CardBody>
+        </Card>
+      ) : null}
 
       {/*
         LAST ON THE PAGE, and the only destructive thing on it. Its own card

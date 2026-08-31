@@ -107,6 +107,14 @@ export const LIMITS = {
    * and because the same endpoint is a convenient thing to hammer.
    */
   redeemIp: { limit: 10, windowSeconds: 60 * 60 },
+  /**
+   * Per USER, not per IP — the one limit here keyed that way. Reporting needs an
+   * account, `signupIp` already prices accounts, and the partial unique index on
+   * `reports` caps repeats against any one subject at a single open report. So
+   * the account is the scarce input, and an IP key would only punish everybody
+   * sharing one office router.
+   */
+  reportUser: { limit: 20, windowSeconds: 60 * 60 },
 } as const;
 
 export type LimitName = keyof typeof LIMITS;

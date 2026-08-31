@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 
 import { RemoveReviewForm } from '@/app/admin/reviews/remove-review-form';
+import { AdminNav } from '@/components/admin-nav';
 import { Alert } from '@/components/ui/alert';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { getActor, getCurrentProfile, requireAdmin } from '@/lib/auth/session';
@@ -70,8 +71,8 @@ export default async function AdminReviewsPage() {
 
         {reviews.length === 0 ? (
           <p className="mt-2 text-sm leading-relaxed text-muted">
-            No reviews yet. They appear here the moment a buyer writes one — every review on the site, not
-            just reported ones, because nothing on this site can be reported yet.
+            No reviews yet. They appear here the moment a buyer writes one — every review on the site,
+            not only the reported ones, because a review can be wrong without anybody having said so.
           </p>
         ) : (
           <ul className="mt-3 flex flex-col gap-3">
@@ -164,17 +165,15 @@ function Shell({ children }: { children: React.ReactNode }) {
         purpose: it is somebody&rsquo;s opinion published under their name.
       </p>
 
+      <AdminNav current="reviews" />
+
       <Alert tone="info" className="mt-6" title="The author is not notified.">
-        Nothing in this app sends email yet, so a removal is silent. If somebody needs to hear about it, that
-        is a conversation to have outside the product.{' '}
-        <Link href="/admin/invites" className="font-medium text-brand underline underline-offset-2">
-          Invite codes
+        Nothing in this app sends email yet, so a removal is silent. If somebody needs to hear about it,
+        that is a conversation to have outside the product. A review somebody has{' '}
+        <Link href="/admin/reports" className="font-medium text-brand underline underline-offset-2">
+          reported
         </Link>{' '}
-        and{' '}
-        <Link href="/admin/applications" className="font-medium text-brand underline underline-offset-2">
-          applications
-        </Link>{' '}
-        are the other two admin surfaces.
+        is removed here, in a second deliberate step — upholding a report does not delete anything.
       </Alert>
 
       <div className="mt-8 flex flex-col gap-10">{children}</div>

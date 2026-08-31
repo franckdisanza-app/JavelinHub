@@ -93,12 +93,15 @@ function navLinksFor(profile: Profile | null): NavLink[] {
   links.push({ href: '/settings', label: 'Settings' });
 
   if (profile.role === 'admin') {
-    links.push({ href: '/admin/invites', label: 'Admin' });
-    links.push({ href: '/admin/applications', label: 'Applications' });
-    // One word, like the rest of the row. "Reviews" rather than "Moderation"
-    // because it names the thing rather than the activity, which is how every
-    // other item in this list is written.
-    links.push({ href: '/admin/reviews', label: 'Reviews' });
+    // ONE ENTRY, not one per surface. There are five admin pages now, and the
+    // row this header is designed around does not hold five more items on top
+    // of an admin who is also a coach. `AdminNav` sits at the top of every one
+    // of those pages and carries the rest, so this only has to be the way in.
+    //
+    // It points at the report queue rather than at invites, because the queue
+    // is the surface with work waiting in it — the others are places you go
+    // when you already have a reason.
+    links.push({ href: '/admin/reports', label: 'Admin' });
   }
 
   return links;

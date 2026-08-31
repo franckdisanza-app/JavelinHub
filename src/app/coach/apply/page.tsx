@@ -69,6 +69,15 @@ export default async function CoachApplyPage({
     <Shell>
       {status === 'approved' ? (
         <ApprovedPanel viaApplication={application?.status === 'approved'} application={application} />
+      ) : status === 'suspended' ? (
+        /*
+          BEFORE the fall-through, which offers a fresh application form. A
+          suspended coach filing one would put a row in the queue that an
+          administrator cannot usefully act on — approving it would not lift the
+          suspension, because `set_coach_status` and `review_coach_application`
+          write the same column from different decisions.
+        */
+        <SuspendedPanel />
       ) : status === 'pending_review' ? (
         <PendingPanel application={application} justSubmitted={justSubmitted} />
       ) : status === 'rejected' ? (
@@ -144,6 +153,31 @@ function PendingPanel({ application, justSubmitted }: { application: CoachApplic
 
       <InviteShortcut className="text-sm text-muted" />
     </>
+  );
+}
+
+/**
+ * A suspended coach.
+ *
+ * NO FORM AND NO ROUTE ONWARD, deliberately. This page's other three states all
+ * end in something to do — apply, wait, apply again — and offering any of them
+ * here would be advice that cannot work: an application does not lift a
+ * suspension, and neither does an invite code.
+ */
+function SuspendedPanel() {
+  return (
+    <Card>
+      <CardHeader
+        title="Your coaching account is suspended"
+        description="An administrator has stopped your coaching account. Your offers are off sale and you cannot publish."
+      />
+      <CardBody>
+        <p className="text-sm leading-relaxed text-muted">
+          Only an administrator can lift this. Filing another application will not — it would sit in a queue
+          where approving it changes nothing about the suspension.
+        </p>
+      </CardBody>
+    </Card>
   );
 }
 

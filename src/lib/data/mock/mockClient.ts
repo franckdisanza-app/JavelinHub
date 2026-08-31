@@ -36,11 +36,18 @@ import type {
 } from '../client';
 import type {
   Actor,
+  AdminActionKind,
+  AdminActionWithNames,
   Deliverable,
   CoachApplication,
   CoachApplicationWithUser,
   CoachStats,
+  CoachStatus,
   Invite,
+  Report,
+  ReportReason,
+  ReportStatus,
+  ReportWithContext,
   Listing,
   ListingCategory,
   ListingDetail,
@@ -66,6 +73,7 @@ import {
   DataError,
   LISTING_CATEGORIES,
   isListingCategory,
+  isReportReason,
 } from '../types';
 import {
   hashPassword,
@@ -318,6 +326,80 @@ function withdrawnByAdmin(listing: Listing): boolean {
   return (
     isWithdrawn(listing) && typeof listing.deleted_by === 'string' && listing.deleted_by !== listing.coach_id
   );
+}
+
+/** Mirrors the closed `public.report_reason` enum. Same treatment as the category. */
+function requireReportReason(value: unknown): ReportReason {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!isReportReason(trimmed)) {
+    throw new DataError('invalid', 'Choose a reason from the list.');
+  }
+  return trimmed;
+}
+
+/** Mirrors `public.record_admin_action()`. The one writer of the audit table. */
+function recordAdminAction(
+  db: MockDb,
+  actorId: string,
+  action: AdminActionKind,
+  subjectId: string | null,
+  reason: string | null,
+): void {
+  db.admin_actions.push({
+    id: newId(),
+    actor_id: actorId,
+    action,
+    subject_id: subjectId,
+    reason: reason && reason.trim() !== '' ? reason.trim() : null,
+    created_at: nowIso(),
+  });
+}
+
+/**
+ * Resolves the names and text a moderation queue renders.
+ *
+ * THE SUBJECT MAY BE GONE, and that is the whole reason neither subject column
+ * is a foreign key: upholding a review report DELETES the review, so by the time
+ * anybody reads the report the text may not exist. It says so rather than
+ * rendering an empty row — and rather than the report vanishing with the thing
+ * it was about, which a cascade would have done.
+ */
+function withReportContext(db: MockDb, report: Report): ReportWithContext {
+  const reporter = db.profiles.find((p) => p.id === report.reporter_id);
+  const resolver = db.profiles.find((p) => p.id === report.resolved_by);
+
+  if (report.subject_type === 'review') {
+    const review = db.reviews.find((r) => r.id === report.subject_review_id);
+    const author = review ? db.profiles.find((p) => p.id === review.author_id) : undefined;
+    const archived = review
+      ? null
+      : db.removed_reviews.find((r) => r.review_id === report.subject_review_id);
+    return {
+      ...copy(report),
+      reporter_name: reporter?.full_name ?? 'Unknown',
+      subject_name: author?.full_name ?? 'Unknown',
+      subject_summary: review
+        ? review.body
+        : archived
+          ? 'This review has since been removed.'
+          : 'This review no longer exists.',
+      listing_title: listingTitle(db, review?.listing_id ?? archived?.listing_id ?? ''),
+      resolved_by_name: resolver?.full_name ?? null,
+    };
+  }
+
+  const coach = db.profiles.find((p) => p.id === report.subject_coach_id);
+  return {
+    ...copy(report),
+    reporter_name: reporter?.full_name ?? 'Unknown',
+    subject_name: coach?.full_name ?? 'Unknown',
+    subject_summary: coach?.coach_headline ?? 'No headline.',
+    // A coach report is not about an offer, so there is no title to show. `null`
+    // rather than an empty string, so a renderer branches rather than printing a
+    // blank line where a title would be.
+    listing_title: null,
+    resolved_by_name: resolver?.full_name ?? null,
+  };
 }
 
 /**
@@ -879,6 +961,18 @@ export class MockDataClient implements DataClient {
       profile.updated_at = nowIso();
 
       return { status: 'changed', profile: copy(profile) };
+    });
+  }
+
+  /** Mirrors policy `listings_select_admin`, which admits every row including withdrawn ones. */
+  async listListingsForAdmin(actor: Actor, coachId: string): Promise<ListingWithCoach[]> {
+    return readDb((db) => {
+      requireAdmin(db, actor);
+      if (typeof coachId !== 'string' || coachId === '') return [];
+      return db.listings
+        .filter((l) => l.coach_id === coachId)
+        .sort(byCreatedAtDesc)
+        .map((l) => withCoach(db, l));
     });
   }
 
@@ -1963,6 +2057,12 @@ export class MockDataClient implements DataClient {
       // correct with no filter added anywhere, which is the entire argument for
       // archiving rather than flagging. See 0016.
       db.reviews.splice(index, 1);
+
+      // Mirrors the `perform public.record_admin_action(...)` 0020 retrofitted
+      // onto `remove_review()`. The archive row above says what was removed;
+      // this says it alongside every other thing an administrator has done, in
+      // one list, which is a different question.
+      recordAdminAction(db, admin.id, 'remove_review', review.id, note);
     });
   }
 
@@ -1982,6 +2082,223 @@ export class MockDataClient implements DataClient {
           // that honestly rather than inventing an actor.
           removed_by_name:
             db.profiles.find((p) => p.id === row.removed_by)?.full_name ?? null,
+        }));
+    });
+  }
+
+  // =========================================================================
+  // Reports and coach standing
+  // =========================================================================
+
+  /** Mirrors `public.report_review()` (0020), rule for rule. */
+  async reportReview(actor: Actor, reviewId: string, reason: ReportReason, note?: string | null): Promise<Report> {
+    const id = requireText(reviewId, 'Review', 200);
+    const why = requireReportReason(reason);
+    const body = optionalText(note, 'Note', 2000);
+
+    return mutateDb((db) => {
+      const profile = resolveProfile(db, actor);
+
+      const review = db.reviews.find((r) => r.id === id);
+      const listing = review ? db.listings.find((l) => l.id === review.listing_id) : undefined;
+      // ONE MESSAGE for "no such review" and "not your offer" -- telling them
+      // apart would let somebody probe which review ids exist, and a review id
+      // is otherwise never published.
+      if (!review || !listing || listing.coach_id !== profile.id) {
+        throw new DataError('not_found', 'That review could not be found.');
+      }
+
+      // Mirrors the partial unique index: one OPEN report per reporter per
+      // subject, so a dismissed report does not block a later one.
+      if (db.reports.some((r) => r.subject_review_id === id && r.reporter_id === profile.id && r.status === 'open')) {
+        throw new DataError('conflict', 'You have already reported this review.');
+      }
+
+      const report: Report = {
+        id: newId(),
+        subject_type: 'review',
+        subject_review_id: id,
+        subject_coach_id: null,
+        reporter_id: profile.id,
+        reason: why,
+        note: body,
+        status: 'open',
+        resolved_by: null,
+        resolved_at: null,
+        resolution_note: null,
+        created_at: nowIso(),
+      };
+      db.reports.push(report);
+      return copy(report);
+    });
+  }
+
+  /** Mirrors `public.report_coach()` (0020). Anybody signed in, unlike the above. */
+  async reportCoach(actor: Actor, coachId: string, reason: ReportReason, note?: string | null): Promise<Report> {
+    const id = requireText(coachId, 'Coach', 200);
+    const why = requireReportReason(reason);
+    const body = optionalText(note, 'Note', 2000);
+
+    return mutateDb((db) => {
+      const profile = resolveProfile(db, actor);
+      if (profile.id === id) throw new DataError('forbidden', 'You cannot report yourself.');
+
+      // An APPROVED coach, not merely an account: every action an administrator
+      // can take from this queue is about selling, so a report about somebody
+      // who does not sell is one nobody can act on.
+      const subject = db.profiles.find((p) => p.id === id);
+      if (!subject || subject.coach_status !== 'approved' || subject.deleted_at !== null) {
+        throw new DataError('not_found', 'That coach could not be found.');
+      }
+
+      if (db.reports.some((r) => r.subject_coach_id === id && r.reporter_id === profile.id && r.status === 'open')) {
+        throw new DataError('conflict', 'You have already reported this coach.');
+      }
+
+      const report: Report = {
+        id: newId(),
+        subject_type: 'coach',
+        subject_review_id: null,
+        subject_coach_id: id,
+        reporter_id: profile.id,
+        reason: why,
+        note: body,
+        status: 'open',
+        resolved_by: null,
+        resolved_at: null,
+        resolution_note: null,
+        created_at: nowIso(),
+      };
+      db.reports.push(report);
+      return copy(report);
+    });
+  }
+
+  /** Mirrors policy `reports_select_own`. */
+  async listMyReports(actor: Actor): Promise<Report[]> {
+    return readDb((db) => {
+      const profile = resolveProfile(db, actor);
+      return db.reports
+        .filter((r) => r.reporter_id === profile.id)
+        .sort(byCreatedAtDesc)
+        .map((r) => copy(r));
+    });
+  }
+
+  /** Mirrors policy `reports_select_admin`, plus the context a queue renders. */
+  async listReports(actor: Actor, status?: ReportStatus): Promise<ReportWithContext[]> {
+    return readDb((db) => {
+      requireAdmin(db, actor);
+      const wanted = status ?? null;
+      return db.reports
+        .filter((r) => wanted === null || r.status === wanted)
+        .sort(byCreatedAtDesc)
+        .map((report) => withReportContext(db, report));
+    });
+  }
+
+  /** Mirrors `public.resolve_report()` (0020), including the audit row. */
+  async resolveReport(actor: Actor, reportId: string, status: ReportStatus, note?: string | null): Promise<Report> {
+    const id = requireText(reportId, 'Report', 200);
+    const body = optionalText(note, 'Note', 2000);
+    if (status !== 'upheld' && status !== 'dismissed') {
+      throw new DataError('invalid', 'A report is resolved as upheld or dismissed.');
+    }
+
+    return mutateDb((db) => {
+      const admin = requireAdmin(db, actor);
+
+      const report = db.reports.find((r) => r.id === id);
+      if (!report) throw new DataError('not_found', 'That report could not be found.');
+      // Mirrors the `and status = 'open'` in the UPDATE, which is what makes
+      // double-resolution impossible under concurrency in Postgres.
+      if (report.status !== 'open') {
+        throw new DataError('conflict', 'That report has already been resolved.');
+      }
+
+      report.status = status;
+      report.resolved_by = admin.id;
+      report.resolved_at = nowIso();
+      report.resolution_note = body;
+
+      recordAdminAction(db, admin.id, 'resolve_report', report.id, status);
+
+      // DELIBERATELY NOT PERFORMING THE CONSEQUENCE. Removing the review is
+      // `removeReview`, suspending the coach is `setCoachStatus` -- deciding a
+      // report was right is not the same decision as what to do about it.
+      return copy(report);
+    });
+  }
+
+  /** Mirrors `public.set_coach_status()` (0022), including its two refusals. */
+  async setCoachStatus(actor: Actor, userId: string, status: CoachStatus, reason?: string | null): Promise<Profile> {
+    const id = requireText(userId, 'Account', 200);
+    const why = optionalText(reason, 'Reason', 1000);
+    if (status !== 'approved' && status !== 'suspended' && status !== 'none') {
+      throw new DataError('invalid', 'A coach can be reinstated, suspended, or removed as a coach.');
+    }
+
+    return mutateDb((db) => {
+      const admin = requireAdmin(db, actor);
+      if (admin.id === id) throw new DataError('forbidden', 'You cannot change your own standing.');
+
+      const subject = db.profiles.find((p) => p.id === id);
+      if (!subject) throw new DataError('not_found', 'That account could not be found.');
+      if (subject.deleted_at !== null) throw new DataError('invalid', 'That account has been deleted.');
+
+      // The invariant the SQL function enforces because it cannot withdraw
+      // offers itself. The mock COULD and deliberately does not: a rule the two
+      // backends enforce differently is a rule that will diverge.
+      if (
+        (status === 'suspended' || status === 'none') &&
+        db.listings.some((l) => l.coach_id === id && !isWithdrawn(l))
+      ) {
+        throw new DataError('invalid', 'Take their offers off sale first.');
+      }
+
+      subject.coach_status = status;
+      // An administrator's role is never touched: standing as a coach and the
+      // admin role are independent axes.
+      if (subject.role !== 'admin') {
+        if (status === 'none') subject.role = 'learner';
+        else if (status === 'approved') subject.role = 'coach';
+      }
+      subject.updated_at = nowIso();
+
+      recordAdminAction(db, admin.id, 'set_coach_status', id, why ? `${why} — ${status}` : status);
+
+      return copy(subject);
+    });
+  }
+
+  /**
+   * Every coach an administrator might act on. `listCoaches` cannot serve this:
+   * it filters to `approved`, so a suspended coach vanishes from it exactly when
+   * somebody needs to find them.
+   */
+  async listCoachesForAdmin(actor: Actor): Promise<Profile[]> {
+    return readDb((db) => {
+      requireAdmin(db, actor);
+      return db.profiles
+        .filter((p) => p.coach_status !== 'none' && p.deleted_at === null)
+        .sort(byCreatedAtDesc)
+        .map((p) => copy(p));
+    });
+  }
+
+  /** Mirrors policy `admin_actions_select_admin`. Newest first. */
+  async listAdminActions(actor: Actor): Promise<AdminActionWithNames[]> {
+    return readDb((db) => {
+      requireAdmin(db, actor);
+      return db.admin_actions
+        .slice()
+        .sort(byCreatedAtDesc)
+        .map((row) => ({
+          ...copy(row),
+          // `null`, not a placeholder: the column is nullable because the FK is
+          // ON DELETE SET NULL, and because bootstrapping the first
+          // administrator has no actor at all.
+          actor_name: db.profiles.find((p) => p.id === row.actor_id)?.full_name ?? null,
         }));
     });
   }
@@ -2258,6 +2575,18 @@ export class MockDataClient implements DataClient {
         }
         applicant.updated_at = timestamp;
       }
+
+      // Mirrors the audit line 0023 added to `review_coach_application()`.
+      // Approving somebody is the most consequential thing an administrator
+      // does here — it lets a stranger take money from buyers — so it belongs
+      // in the same log as every removal and suspension.
+      recordAdminAction(
+        db,
+        admin.id,
+        'review_application',
+        application.user_id,
+        reviewNote ? `${decision} — ${reviewNote}` : decision,
+      );
 
       return copy(application);
     });

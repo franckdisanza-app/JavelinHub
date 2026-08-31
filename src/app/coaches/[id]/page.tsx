@@ -5,11 +5,13 @@ import { notFound } from 'next/navigation';
 import { ListingCard } from '@/components/listing-card';
 import { InitialsAvatar } from '@/components/initials-avatar';
 import { avatarPublicUrl } from '@/lib/storage/avatars';
+import { ReportForm } from '@/components/report-form';
 import { ReviewItem } from '@/components/review-item';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardBody } from '@/components/ui/card';
 import { Rating, Stat, StatEmpty } from '@/components/ui/stat';
+import { getActor } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import type { PublicReviewWithListing } from '@/lib/data/types';
 import { firstValue } from '@/lib/search-params';
@@ -87,6 +89,13 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
 
   const search = await searchParams;
   const backHref = buildBackHref(firstValue(search.q).trim());
+
+  // Only for deciding whether to offer the report control. Deliberately NOT
+  // passed to any of the reads above: this page is the same page for everybody,
+  // and a viewer-dependent read here is how a public profile quietly becomes a
+  // private one.
+  const viewer = await getActor();
+  const canReport = viewer !== null && viewer.userId !== coach.id;
 
   // Which of the reviewed offers a visitor can still open. A withdrawn offer is
   // a 404 for the public, so linking its title from here would be a dead end —
@@ -280,6 +289,28 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
             Nobody bought anything and nobody wrote any of this. Payments are not part of this proof
             of concept.
           </p>
+        ) : null}
+        {/*
+          THE LAST THING ON THE PAGE, under the reviews and the demo-data note,
+          and that placement is the whole design: a report control near the top
+          would read as an accusation the page is making, and this one is a
+          remedy that a visitor goes looking for rather than trips over.
+
+          Signed in only, and never about yourself. Anonymous visitors get a
+          sentence instead of a form — filing needs an account, because a report
+          with no reporter is one nobody can weigh or come back to.
+        */}
+        {canReport ? (
+          <div className="mt-8 border-t border-line pt-5">
+            <h3 className="text-xs font-semibold tracking-wide text-faint uppercase">
+              Something wrong?
+            </h3>
+            <p className="mt-1.5 mb-3 max-w-2xl text-body-15 leading-relaxed text-muted">
+              If {coach.full_name} took payment outside JavelinHub, is pretending to be somebody
+              else, or has been abusive, tell an administrator.
+            </p>
+            <ReportForm subject="coach" id={coach.id} subjectName={coach.full_name} />
+          </div>
         ) : null}
       </section>
     </div>

@@ -598,6 +598,168 @@ expectEqual(
 );
 
 // ===========================================================================
+section('Reports, standing and the audit log (0019-0023)');
+// ===========================================================================
+// The same shape as the moderation section above, and for the same reason: the
+// interesting half is signed-in and this suite cannot mint an admin session, so
+// what is asserted here is the ANONYMOUS boundary plus the existence and the
+// sentences of the four RPCs. `verify:authz` covers the entitlements against
+// the mock; this covers that the real database agrees about who is refused.
+
+// --- the tables -------------------------------------------------------------
+// Both are TABLES anon has no business reaching under any predicate, so the
+// grant is revoked and the answer is 42501 rather than an empty admitted read.
+// The distinction from `owned_listings` (a view whose auth.uid() predicate IS
+// the boundary) is the one 0007 drew and 0016 followed.
+expectSqlState('reports is refused outright for anon', await rest('reports?select=id&limit=1'), '42501');
+expectSqlState(
+  'admin_actions likewise',
+  await rest('admin_actions?select=id&limit=1'),
+  '42501',
+);
+expectSqlState(
+  'anon cannot INSERT a report — every one goes through an RPC',
+  await rest('reports', { method: 'POST', body: {}, prefer: 'return=minimal' }),
+  '42501',
+);
+// NO UPDATE POLICY FOR ANY ROLE on either table. A report is resolved by
+// `resolve_report()` and an audit row is never edited at all — a log somebody
+// can rewrite is not a log.
+expectSqlState(
+  'anon cannot UPDATE a report',
+  await rest('reports?id=eq.00000000-0000-4000-8000-0000000000ff', {
+    method: 'PATCH',
+    body: { status: 'dismissed' },
+    prefer: 'return=minimal',
+  }),
+  '42501',
+);
+expectSqlState(
+  'anon cannot UPDATE the audit log',
+  await rest('admin_actions?id=eq.00000000-0000-4000-8000-0000000000ff', {
+    method: 'PATCH',
+    body: { reason: 'rewritten' },
+    prefer: 'return=minimal',
+  }),
+  '42501',
+);
+expectSqlState(
+  'anon cannot DELETE from the audit log',
+  await rest('admin_actions?id=eq.00000000-0000-4000-8000-0000000000ff', {
+    method: 'DELETE',
+    prefer: 'return=minimal',
+  }),
+  '42501',
+);
+
+// --- the enums --------------------------------------------------------------
+// Same technique as the listing enums above: a value outside the type is a cast
+// error that NAMES the type, which proves it exists under the name the client
+// assumes. The client's `REPORT_REASONS` is the list a `<select>` is built from,
+// so a member that is not in the Postgres enum would fail only at write time.
+const badReason = await rest('reports?select=id&reason=eq.__not_a_reason__');
+expectEqual(
+  'report_reason is an enum, so an unknown value is a cast error',
+  badReason.code === '22P02' || badReason.status >= 400,
+  true,
+);
+const badStatus = await rest('reports?select=id&status=eq.__not_a_status__');
+expectEqual('report_status likewise', badStatus.code === '22P02' || badStatus.status >= 400, true);
+const badAction = await rest('admin_actions?select=id&action=eq.__not_an_action__');
+expectEqual('admin_action_kind likewise', badAction.code === '22P02' || badAction.status >= 400, true);
+
+// --- the RPCs ---------------------------------------------------------------
+// Each must exist, be callable under the name and argument list the client
+// uses, and answer with ITS OWN sentence rather than a Postgres one. A missing
+// function answers 404/PGRST202 instead, which is what a typo in a parameter
+// name looks like — and that is exactly the failure 0013 taught this suite to
+// look for.
+const reportReviewAnon = await rpc('report_review', {
+  p_review_id: '00000000-0000-4000-8000-0000000000ff',
+  p_reason: 'spam',
+  p_note: null,
+});
+expectSqlState('report_review refuses an anonymous caller', reportReviewAnon, '42501');
+expectEqual(
+  '...with the sentence 0020 wrote',
+  reportReviewAnon.message.includes('signed in to report a review'),
+  true,
+);
+
+const reportCoachAnon = await rpc('report_coach', {
+  p_coach_id: '00000000-0000-4000-8000-0000000000ff',
+  p_reason: 'scam',
+  p_note: null,
+});
+expectSqlState('report_coach refuses an anonymous caller', reportCoachAnon, '42501');
+
+const resolveAnon = await rpc('resolve_report', {
+  p_report_id: '00000000-0000-4000-8000-0000000000ff',
+  p_status: 'upheld',
+  p_note: null,
+});
+expectSqlState('resolve_report refuses an anonymous caller', resolveAnon, '42501');
+expectEqual(
+  '...naming the administrator rule rather than a permission error',
+  resolveAnon.message.includes('administrator'),
+  true,
+);
+
+const standingAnon = await rpc('set_coach_status', {
+  p_user_id: '00000000-0000-4000-8000-0000000000ff',
+  p_status: 'suspended',
+  p_reason: null,
+});
+expectSqlState('set_coach_status refuses an anonymous caller', standingAnon, '42501');
+expectEqual(
+  '...with 0022\'s sentence',
+  standingAnon.message.includes('administrator'),
+  true,
+);
+
+/*
+ * THE ASSERTION THAT PAID FOR THIS WHOLE SUITE, a second time.
+ *
+ * `record_admin_action()` is the one writer of `admin_actions` and is not for
+ * clients. `0019` ended with `revoke all ... from public`, which is the correct
+ * incantation on a stock Postgres — and did nothing here, because a Supabase
+ * project's bootstrap runs `alter default privileges in schema public grant all
+ * on functions to anon, authenticated, service_role`, and revoking from the
+ * PUBLIC pseudo-role does not touch an explicit grant to a named role.
+ *
+ * So for five migrations, anybody on the internet could POST to this endpoint
+ * with the browser key and append a forged line to the audit log. `0024` is the
+ * revoke that actually closes it; this is what makes it stay closed.
+ *
+ * A permission error SPECIFICALLY, not merely a 4xx: a missing or renamed
+ * function answers PGRST202 with no sqlstate, and that would pass a `>= 400`
+ * check while proving nothing about the grant.
+ */
+const forge = await rpc('record_admin_action', {
+  p_action: 'grant_admin',
+  p_subject_id: '00000000-0000-4000-8000-0000000000ff',
+  p_reason: 'forged',
+});
+expectSqlState('record_admin_action is not executable by a client at all (0024)', forge, '42501');
+expectEqual(
+  '...refused by the GRANT, not by a guard inside the function',
+  forge.message.includes('permission denied for function'),
+  true,
+);
+
+// --- 0021, the enum value the whole feature rests on -------------------------
+// `suspended` had to be added in its own migration because ALTER TYPE ... ADD
+// VALUE cannot run in the transaction that uses it. If 0021 were ever skipped,
+// every other part of this feature would still compile and `set_coach_status`
+// would fail at runtime with a cast error.
+const suspendedFilter = await rest('profiles?select=id&coach_status=eq.suspended&limit=1');
+expectEqual(
+  'coach_status has the suspended member 0021 added',
+  suspendedFilter.code !== '22P02',
+  true,
+);
+
+// ===========================================================================
 section('The email sync trigger (0017)');
 // ===========================================================================
 // `profiles.email` is a copy of `auth.users.email` written ONCE, by an

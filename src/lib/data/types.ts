@@ -8,11 +8,30 @@
  */
 
 export type Role = 'learner' | 'coach' | 'admin';
-export type CoachStatus = 'none' | 'pending_review' | 'approved' | 'rejected';
+/**
+ * `public.coach_status`.
+ *
+ * `rejected` and `suspended` are NOT the same state and must not be collapsed.
+ * `rejected` is an application decision — an administrator read the application
+ * and said no — and `/coach/apply` renders a re-application prompt for it.
+ * `suspended` is somebody who WAS approved and has been stopped; telling them
+ * their application was rejected and inviting them to file another would be
+ * both wrong and an invitation to work around the suspension.
+ *
+ * Only `approved` satisfies `is_approved_coach()`, so a suspended coach cannot
+ * publish or edit — the gate needed no change to cover them.
+ */
+export type CoachStatus = 'none' | 'pending_review' | 'approved' | 'rejected' | 'suspended';
 export type ApplicationStatus = 'pending' | 'approved' | 'rejected';
 
 export const ROLES: readonly Role[] = ['learner', 'coach', 'admin'];
-export const COACH_STATUSES: readonly CoachStatus[] = ['none', 'pending_review', 'approved', 'rejected'];
+export const COACH_STATUSES: readonly CoachStatus[] = [
+  'none',
+  'pending_review',
+  'approved',
+  'rejected',
+  'suspended',
+];
 export const APPLICATION_STATUSES: readonly ApplicationStatus[] = ['pending', 'approved', 'rejected'];
 
 /**
@@ -1015,4 +1034,145 @@ export function dataErrorStatus(code: DataErrorCode): number {
     case 'conflict':
       return 409;
   }
+}
+
+/**
+ * `public.report_subject` — what a report is about.
+ *
+ * TWO SUBJECTS, ONE QUEUE. A review is reported by the coach whose offer it is
+ * about; a coach is reported by anybody signed in. The asymmetry is deliberate:
+ * a review report is about a specific piece of text on a specific offer, so its
+ * owner is the natural reporter, while a coach report is about conduct and the
+ * person who experiences that is whoever it was done to.
+ *
+ * Without the second, the only reportable thing on the site would be criticism
+ * OF a coach — a moderation system that protects sellers only.
+ */
+export type ReportSubject = 'review' | 'coach';
+
+/** `public.report_status`. `open` is the queue; the other two are resolved. */
+export type ReportStatus = 'open' | 'upheld' | 'dismissed';
+
+/**
+ * `public.report_reason` — a CLOSED list, for the same reason the offer taxonomy
+ * is one: free text cannot be filtered, counted or triaged, and two spellings of
+ * "spam" are two categories. `other` carries the note.
+ */
+export type ReportReason =
+  | 'spam'
+  | 'abusive'
+  | 'off_topic'
+  | 'not_a_real_purchase'
+  | 'scam'
+  | 'impersonation'
+  | 'other';
+
+export const REPORT_REASONS: readonly ReportReason[] = [
+  'spam',
+  'abusive',
+  'off_topic',
+  'not_a_real_purchase',
+  'scam',
+  'impersonation',
+  'other',
+];
+
+/**
+ * Labels, split by subject: the same enum member means a different thing about a
+ * review than about a coach, and one label list would have to be vague enough to
+ * cover both.
+ */
+export const REVIEW_REPORT_LABELS: Partial<Record<ReportReason, string>> = {
+  spam: 'Spam or advertising',
+  abusive: 'Abusive or harassing',
+  off_topic: 'Not about this offer',
+  not_a_real_purchase: 'Not a real purchase',
+  other: 'Something else',
+};
+
+export const COACH_REPORT_LABELS: Partial<Record<ReportReason, string>> = {
+  scam: 'Scam or fraud',
+  not_a_real_purchase: 'Took payment outside JavelinHub',
+  impersonation: 'Pretending to be someone else',
+  abusive: 'Abusive or harassing',
+  other: 'Something else',
+};
+
+export function isReportReason(value: unknown): value is ReportReason {
+  return typeof value === 'string' && (REPORT_REASONS as readonly string[]).includes(value);
+}
+
+/**
+ * `public.reports` — one row in the moderation queue.
+ *
+ * NEITHER SUBJECT COLUMN IS A FOREIGN KEY, and that is deliberate: upholding a
+ * review report DELETES the review, and a report that a cascade removes at the
+ * moment it is acted on is a report nobody can audit. The CHECK constraint
+ * `reports_subject_shape` is what keeps the discriminator and the two columns
+ * consistent instead — exactly one is set, and it matches `subject_type`.
+ */
+export interface Report {
+  id: string;
+  subject_type: ReportSubject;
+  /** Set iff `subject_type === 'review'`. Not a foreign key — see above. */
+  subject_review_id: string | null;
+  /** Set iff `subject_type === 'coach'`. */
+  subject_coach_id: string | null;
+  reporter_id: string;
+  reason: ReportReason;
+  note: string | null;
+  status: ReportStatus;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  resolution_note: string | null;
+  created_at: string;
+}
+
+/**
+ * A report with the names and text a queue has to render.
+ *
+ * `subject_summary` is resolved at read time rather than stored: for a review it
+ * is the review's own body, which may have been REMOVED by the time anybody
+ * reads the report — in which case it says so rather than rendering nothing.
+ * That is the whole reason the subject is not a foreign key.
+ */
+export interface ReportWithContext extends Report {
+  reporter_name: string;
+  /** The reported coach's name, or the author of the reported review. */
+  subject_name: string;
+  /** The reported review's body, the coach's headline, or a note that it is gone. */
+  subject_summary: string;
+  /** The offer a reported review is about. `null` for a coach report. */
+  listing_title: string | null;
+  resolved_by_name: string | null;
+}
+
+/**
+ * `public.admin_actions` — who did what, to whom, when and why.
+ *
+ * FACTS, NEVER CONTENT. `removed_reviews` keeps the text of a removed review so
+ * somebody can be shown what was taken down, and it has its own erasure path
+ * because that text is sometimes exactly what must not persist. This table has
+ * neither, and no client role may write it at all — an audit row an
+ * administrator can edit is not an audit row.
+ */
+export type AdminActionKind =
+  | 'grant_admin'
+  | 'review_application'
+  | 'remove_review'
+  | 'resolve_report'
+  | 'set_coach_status';
+
+export interface AdminAction {
+  id: string;
+  /** `null` when that administrator's account is gone, or for a bootstrap. */
+  actor_id: string | null;
+  action: AdminActionKind;
+  subject_id: string | null;
+  reason: string | null;
+  created_at: string;
+}
+
+export interface AdminActionWithNames extends AdminAction {
+  actor_name: string | null;
 }

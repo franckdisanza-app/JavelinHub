@@ -82,10 +82,14 @@ import {
   DataError,
   LISTING_CATEGORIES,
   isListingCategory,
+  isReportReason,
   type Actor,
   type CoachApplication,
   type CoachApplicationWithUser,
+  type AdminAction,
+  type AdminActionWithNames,
   type CoachStats,
+  type CoachStatus,
   type Deliverable,
   type FulfilmentMode,
   type Invite,
@@ -103,6 +107,10 @@ import {
   type PublicProfile,
   type PublicReview,
   type PublicReviewWithListing,
+  type Report,
+  type ReportReason,
+  type ReportStatus,
+  type ReportWithContext,
   type RemovedReview,
   type RemovedReviewWithNames,
   type Review,
@@ -538,6 +546,52 @@ async function withListingTitles(ctx: Ctx, orders: readonly Order[]): Promise<Or
     listing_fulfilment: modes.get(order.listing_id) ?? 'personalised',
     asset_path: assets.get(order.listing_id) ?? null,
   }));
+}
+
+/**
+ * Coach headlines by id, for the moderation queue's coach reports.
+ *
+ * Reads `public_coaches`, which projects the headline and no email — the same
+ * rule every other name lookup here follows. A suspended coach is absent from
+ * that view, so the caller falls back to "No headline."; that is correct rather
+ * than unfortunate, since by then the queue is showing a coach who has already
+ * been acted on.
+ */
+async function coachHeadlinesFor(ctx: Ctx, coachIds: readonly string[]): Promise<Map<string, string>> {
+  const unique = [...new Set(coachIds)].filter((id) => typeof id === 'string' && id !== '');
+  if (unique.length === 0) return new Map();
+
+  const { data, error } = await ctx.supabase
+    .from('public_coaches')
+    .select('id, coach_headline')
+    .in('id', unique);
+  if (error) throwDataError(error, ctx.userId !== null);
+
+  const headlines = new Map<string, string>();
+  for (const row of (data ?? []) as { id: string; coach_headline: string | null }[]) {
+    if (row.coach_headline) headlines.set(row.id, row.coach_headline);
+  }
+  return headlines;
+}
+
+/** Mirrors the closed `public.report_reason` enum, shared with the mock's copy. */
+function requireReportReason(value: unknown): ReportReason {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!isReportReason(trimmed)) {
+    throw new DataError('invalid', 'Choose a reason from the list.');
+  }
+  return trimmed;
+}
+
+/**
+ * PostgREST returns a function's composite result either bare or wrapped in an
+ * array depending on the shape; every RPC here that returns a row needs the same
+ * two lines, so they live in one place.
+ */
+function oneRow<T>(data: unknown, whenMissing: string): T {
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) throw new DataError('invalid', whenMissing);
+  return row as T;
 }
 
 /** The narrow listing projection `withListingTitles` reads. Both columns are granted. */
@@ -1113,6 +1167,32 @@ export class SupabaseDataClient implements DataClient {
     }
     if (!data) return null;
     return withCoachName(ctx, data as ListingRow);
+  }
+
+  /**
+   * Every listing of one coach, withdrawn included.
+   *
+   * `requireAdminProfile` runs first because `listings_select_admin` renders a
+   * refusal as ZERO ROWS overlapping `listings_select_public` — without it, a
+   * coach asking about a rival would get that rival's published offers back and
+   * read the empty withdrawn set as "they have none". Same construction, same
+   * reason, as `listReports`.
+   */
+  async listListingsForAdmin(actor: Actor, coachId: string): Promise<ListingWithCoach[]> {
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+    if (typeof coachId !== 'string' || coachId === '') return [];
+
+    const { data, error } = await ctx.supabase
+      .from('listings')
+      .select(LISTING_COLUMNS)
+      .eq('coach_id', coachId)
+      .order('created_at', { ascending: false });
+    if (error) {
+      if (isMalformedId(error)) return [];
+      throwDataError(error, true);
+    }
+    return withCoachNames(ctx, (data ?? []) as ListingRow[]);
   }
 
   /**
@@ -2012,6 +2092,288 @@ export class SupabaseDataClient implements DataClient {
       // `null` rather than a placeholder: the account is gone, and saying so is
       // more useful to whoever reads the log than inventing an actor.
       removed_by_name: (row.removed_by && names.get(row.removed_by)) || null,
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Reports and coach standing
+  // -------------------------------------------------------------------------
+
+  /**
+   * Files a report about a review, through `public.report_review()`.
+   *
+   * AN RPC RATHER THAN AN INSERT, and the reason is the entitlement: only the
+   * coach whose offer the review is about may file one, which is a JOIN through
+   * `listings` rather than a column comparison. A `with check` could express it,
+   * but then "no such review" and "not your offer" would both surface as the
+   * same anonymous RLS violation, and the function can say the one sentence that
+   * reveals neither.
+   */
+  async reportReview(
+    actor: Actor,
+    reviewId: string,
+    reason: ReportReason,
+    note?: string | null,
+  ): Promise<Report> {
+    const id = requireText(reviewId, 'Review', 200);
+    const why = requireReportReason(reason);
+    const body = optionalText(note, 'Note', 2000);
+
+    const ctx = await openAuthedContext(actor);
+    const { data, error } = await ctx.supabase.rpc('report_review', {
+      p_review_id: id,
+      p_reason: why,
+      p_note: body,
+    });
+    if (error) {
+      if (isMalformedId(error)) throw new DataError('not_found', 'That review could not be found.');
+      throwDataError(error, true);
+    }
+    return oneRow<Report>(data, 'That report could not be filed.');
+  }
+
+  /** Files a report about a coach, through `public.report_coach()`. */
+  async reportCoach(
+    actor: Actor,
+    coachId: string,
+    reason: ReportReason,
+    note?: string | null,
+  ): Promise<Report> {
+    const id = requireText(coachId, 'Coach', 200);
+    const why = requireReportReason(reason);
+    const body = optionalText(note, 'Note', 2000);
+
+    const ctx = await openAuthedContext(actor);
+    const { data, error } = await ctx.supabase.rpc('report_coach', {
+      p_coach_id: id,
+      p_reason: why,
+      p_note: body,
+    });
+    if (error) {
+      if (isMalformedId(error)) throw new DataError('not_found', 'That coach could not be found.');
+      throwDataError(error, true);
+    }
+    return oneRow<Report>(data, 'That report could not be filed.');
+  }
+
+  /** `reports_select_own` is the boundary; the filter here only orders. */
+  async listMyReports(actor: Actor): Promise<Report[]> {
+    const ctx = await openAuthedContext(actor);
+    const { data, error } = await ctx.supabase
+      .from('reports')
+      .select('*')
+      .eq('reporter_id', ctx.userId)
+      .order('created_at', { ascending: false });
+    if (error) throwDataError(error, true);
+    return (data ?? []) as Report[];
+  }
+
+  /**
+   * The queue.
+   *
+   * `reports_select_admin` renders a refusal as ZERO ROWS, so
+   * `requireAdminProfile` runs first — otherwise a coach asking for this would
+   * get "there are no reports" rather than "this is not yours to see". Same
+   * construction, same reason, as `listReviewsForModeration`.
+   *
+   * The context is assembled here rather than in a view because the subject may
+   * be GONE: upholding a review report deletes the review, and the report has to
+   * outlive it. Three reads, none of which can be a join for that reason.
+   */
+  async listReports(actor: Actor, status?: ReportStatus): Promise<ReportWithContext[]> {
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    let query = ctx.supabase.from('reports').select('*').order('created_at', { ascending: false });
+    if (status) query = query.eq('status', status);
+
+    const { data, error } = await query;
+    if (error) throwDataError(error, true);
+
+    const reports = (data ?? []) as Report[];
+    if (reports.length === 0) return [];
+
+    const reviewIds = reports
+      .map((r) => r.subject_review_id)
+      .filter((id): id is string => typeof id === 'string');
+
+    const [reviewsResult, archivedResult] = await Promise.all([
+      reviewIds.length
+        ? ctx.supabase.from('reviews').select('id, listing_id, author_id, body').in('id', reviewIds)
+        : Promise.resolve({ data: [], error: null }),
+      reviewIds.length
+        ? ctx.supabase
+            .from('removed_reviews')
+            .select('review_id, listing_id, author_id, body')
+            .in('review_id', reviewIds)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    if (reviewsResult.error) throwDataError(reviewsResult.error, true);
+    if (archivedResult.error) throwDataError(archivedResult.error, true);
+
+    type SubjectRow = { listing_id: string; author_id: string | null; body: string };
+    const live = new Map<string, SubjectRow>();
+    for (const row of (reviewsResult.data ?? []) as ({ id: string } & SubjectRow)[]) {
+      live.set(row.id, row);
+    }
+    const archived = new Map<string, SubjectRow>();
+    for (const row of (archivedResult.data ?? []) as ({ review_id: string } & SubjectRow)[]) {
+      archived.set(row.review_id, row);
+    }
+
+    const people = [
+      ...reports.map((r) => r.reporter_id),
+      ...reports.map((r) => r.resolved_by),
+      ...reports.map((r) => r.subject_coach_id),
+      ...[...live.values(), ...archived.values()].map((r) => r.author_id),
+    ].filter((id): id is string => typeof id === 'string');
+
+    const listingIds = [...live.values(), ...archived.values()].map((r) => r.listing_id);
+
+    const [names, titles, headlines] = await Promise.all([
+      displayNamesFor(ctx, people),
+      listingTitlesFor(ctx, listingIds),
+      coachHeadlinesFor(
+        ctx,
+        reports.map((r) => r.subject_coach_id).filter((id): id is string => typeof id === 'string'),
+      ),
+    ]);
+
+    return reports.map((report) => {
+      if (report.subject_type === 'review' && report.subject_review_id) {
+        const row = live.get(report.subject_review_id);
+        const gone = row ? null : archived.get(report.subject_review_id);
+        const source = row ?? gone ?? null;
+        return {
+          ...report,
+          reporter_name: names.get(report.reporter_id) ?? 'Unknown',
+          subject_name: (source?.author_id && names.get(source.author_id)) || 'Unknown',
+          subject_summary: row
+            ? row.body
+            : gone
+              ? 'This review has since been removed.'
+              : 'This review no longer exists.',
+          listing_title: source ? (titles.get(source.listing_id) ?? UNKNOWN_LISTING) : null,
+          resolved_by_name: (report.resolved_by && names.get(report.resolved_by)) || null,
+        };
+      }
+
+      return {
+        ...report,
+        reporter_name: names.get(report.reporter_id) ?? 'Unknown',
+        subject_name: (report.subject_coach_id && names.get(report.subject_coach_id)) || 'Unknown',
+        subject_summary:
+          (report.subject_coach_id && headlines.get(report.subject_coach_id)) || 'No headline.',
+        // A coach report is not about an offer. `null` rather than an empty
+        // string, so a renderer branches rather than printing a blank line.
+        listing_title: null,
+        resolved_by_name: (report.resolved_by && names.get(report.resolved_by)) || null,
+      };
+    });
+  }
+
+  /** Marks a report handled, through `public.resolve_report()`. */
+  async resolveReport(
+    actor: Actor,
+    reportId: string,
+    status: ReportStatus,
+    note?: string | null,
+  ): Promise<Report> {
+    const id = requireText(reportId, 'Report', 200);
+    const body = optionalText(note, 'Note', 2000);
+    if (status !== 'upheld' && status !== 'dismissed') {
+      throw new DataError('invalid', 'A report is resolved as upheld or dismissed.');
+    }
+
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    const { data, error } = await ctx.supabase.rpc('resolve_report', {
+      p_report_id: id,
+      p_status: status,
+      p_note: body,
+    });
+    if (error) {
+      if (isMalformedId(error)) throw new DataError('not_found', 'That report could not be found.');
+      throwDataError(error, true);
+    }
+    return oneRow<Report>(data, 'That report could not be resolved.');
+  }
+
+  /** Suspends, reinstates or demotes, through `public.set_coach_status()`. */
+  async setCoachStatus(
+    actor: Actor,
+    userId: string,
+    status: CoachStatus,
+    reason?: string | null,
+  ): Promise<Profile> {
+    const id = requireText(userId, 'Account', 200);
+    const why = optionalText(reason, 'Reason', 1000);
+    if (status !== 'approved' && status !== 'suspended' && status !== 'none') {
+      throw new DataError('invalid', 'A coach can be reinstated, suspended, or removed as a coach.');
+    }
+
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    const { data, error } = await ctx.supabase.rpc('set_coach_status', {
+      p_user_id: id,
+      p_status: status,
+      p_reason: why,
+    });
+    if (error) {
+      if (isMalformedId(error)) throw new DataError('not_found', 'That account could not be found.');
+      throwDataError(error, true);
+    }
+    return oneRow<Profile>(data, 'That account could not be updated.');
+  }
+
+  /**
+   * Every coach an administrator might act on.
+   *
+   * Reads `profiles` rather than `public_coaches`, and that is the point: the
+   * view filters to `approved`, so a suspended coach disappears from it exactly
+   * when somebody needs to find them. `profiles_select_admin` is what admits
+   * this read.
+   */
+  async listCoachesForAdmin(actor: Actor): Promise<Profile[]> {
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    const { data, error } = await ctx.supabase
+      .from('profiles')
+      .select('*')
+      .neq('coach_status', 'none')
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false });
+    if (error) throwDataError(error, true);
+    return (data ?? []) as Profile[];
+  }
+
+  /** The audit log. `admin_actions_select_admin` is the policy. */
+  async listAdminActions(actor: Actor): Promise<AdminActionWithNames[]> {
+    const ctx = await openAuthedContext(actor);
+    await requireAdminProfile(ctx);
+
+    const { data, error } = await ctx.supabase
+      .from('admin_actions')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) throwDataError(error, true);
+
+    const rows = (data ?? []) as AdminAction[];
+    if (rows.length === 0) return [];
+
+    const names = await displayNamesFor(
+      ctx,
+      rows.map((r) => r.actor_id).filter((id): id is string => typeof id === 'string'),
+    );
+    return rows.map((row) => ({
+      ...row,
+      // `null`, never a placeholder: the column is nullable because the FK is
+      // ON DELETE SET NULL, and because bootstrapping the first administrator
+      // has no actor at all.
+      actor_name: (row.actor_id && names.get(row.actor_id)) || null,
     }));
   }
 

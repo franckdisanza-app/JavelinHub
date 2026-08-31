@@ -23,7 +23,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Actor, CoachApplication, ListingCategory, Profile } from '@/lib/data/types';
+import type { Actor, CoachApplication, ListingCategory, Profile, ReportReason } from '@/lib/data/types';
 import { COACH_STATUSES, LISTING_CATEGORIES, ROLES, listingCategoryLabel } from '@/lib/data/types';
 import { initialsOf } from '@/lib/initials';
 
@@ -300,6 +300,43 @@ const REMOVED_REVIEW_COLUMNS = [
   'listing_title',
   'removed_by_name',
 ] as const;
+/** `public.reports` — the row a reporter gets back, and the one they may read. */
+const REPORT_COLUMNS = [
+  'id',
+  'subject_type',
+  'subject_review_id',
+  'subject_coach_id',
+  'reporter_id',
+  'reason',
+  'note',
+  'status',
+  'resolved_by',
+  'resolved_at',
+  'resolution_note',
+  'created_at',
+] as const;
+
+/** The queue's shape: the row plus the five names and texts a moderator reads. */
+const REPORT_WITH_CONTEXT_COLUMNS = [
+  ...REPORT_COLUMNS,
+  'reporter_name',
+  'subject_name',
+  'subject_summary',
+  'listing_title',
+  'resolved_by_name',
+] as const;
+
+/** `public.admin_actions`, plus the actor's name — nullable, see the assertions. */
+const ADMIN_ACTION_COLUMNS = [
+  'id',
+  'actor_id',
+  'action',
+  'subject_id',
+  'reason',
+  'created_at',
+  'actor_name',
+] as const;
+
 /** An order as its buyer, its seller or an admin sees it. No buyer NAME, ever. */
 const ORDER_COLUMNS = [
   'id',
@@ -4753,6 +4790,428 @@ const secondOrder = await allows(
 await allows('...removed with a blank reason', () => db.removeReview(ADMIN, secondOrder!.id, '   '), () => 'removed');
 const blank = (await db.listRemovedReviews(ADMIN)).find((row) => row.review_id === secondOrder!.id);
 expectEqual('a whitespace-only reason is stored as null', blank?.reason, null);
+
+// ---------------------------------------------------------------------------
+section('Reports — who may file one, who may read them, and what upholding does NOT do');
+// ---------------------------------------------------------------------------
+// Purpose-built fixtures again, and for a sharper reason than the moderation
+// section's: reporting a review is entitled to the OFFER'S COACH, which is a
+// join rather than a column comparison, so the test needs an offer whose owner
+// it knows and a review it did not write.
+
+const repOffer = await allows(
+  'a fixture offer for the reports section',
+  () =>
+    db.createListing(COACH, {
+      title: 'Reports fixture offer',
+      description: 'Published so a review of it can be reported by the coach who owns it.',
+      price_cents: 4400,
+      category: 'training_plan',
+    }),
+  (r) => r.id,
+);
+await allows('...claimed by a learner', () => db.createOrder(AISHA, repOffer!.id), (o) => o.id);
+const repOrder = (await db.listMyOrders(AISHA)).find((o) => o.listing_id === repOffer!.id);
+const repReview = await allows(
+  '...and reviewed',
+  () =>
+    db.createReview(AISHA, {
+      order_id: repOrder!.id,
+      rating: 1,
+      body: 'A review written so that it can be reported.',
+    }),
+  (r) => r.id,
+);
+
+// --- reporting a review: the entitlement -----------------------------------
+await refuses('an anonymous caller cannot report a review', 'unauthorized', () =>
+  db.reportReview(ANON, repReview!.id, 'spam'),
+);
+// THE ONE THAT MATTERS. A learner — including the author — is not the offer's
+// coach, and the refusal is `not_found` rather than `forbidden` on purpose:
+// telling "no such review" apart from "not your offer" would turn this into an
+// oracle for which review ids exist, and a review id is never published.
+await refuses('the author of the review cannot report it', 'not_found', () =>
+  db.reportReview(AISHA, repReview!.id, 'spam'),
+);
+await refuses('an unrelated learner cannot report it', 'not_found', () =>
+  db.reportReview(MARCUS, repReview!.id, 'spam'),
+);
+await refuses('another coach cannot report it', 'not_found', () =>
+  db.reportReview(NILS, repReview!.id, 'spam'),
+);
+await refuses('...and neither can an admin, who owns no offers', 'not_found', () =>
+  db.reportReview(ADMIN, repReview!.id, 'spam'),
+);
+await refuses('an unknown review id is not_found, in the same words', 'not_found', () =>
+  db.reportReview(COACH, '00000000-0000-4000-8000-0000000000fe', 'spam'),
+);
+await refuses('a reason outside the enum is refused', 'invalid', () =>
+  db.reportReview(COACH, repReview!.id, 'because-i-said-so' as ReportReason),
+);
+
+const reviewReport = await allows(
+  'the coach who OWNS the offer may report the review',
+  () => db.reportReview(COACH, repReview!.id, 'not_a_real_purchase', '  They never bought it.  '),
+  (r) => `${r.status} ${r.reason}`,
+);
+expectShape('...and gets the row back', reviewReport, REPORT_COLUMNS);
+expectEqual('...as an open report', reviewReport?.status, 'open');
+expectEqual('...about the review', reviewReport?.subject_review_id, repReview?.id);
+// The CHECK constraint's shape: exactly one subject column is set, and it
+// matches the discriminator.
+expectEqual('...with the coach column left null', reviewReport?.subject_coach_id, null);
+expectEqual('...naming the reporter', reviewReport?.reporter_id, COACH!.userId);
+expectEqual('...with the note trimmed', reviewReport?.note, 'They never bought it.');
+expectEqual('...and nothing resolved yet', reviewReport?.resolved_by, null);
+
+// Mirrors the partial unique index: one OPEN report per reporter per subject.
+await refuses('the same coach cannot file a second open report on it', 'conflict', () =>
+  db.reportReview(COACH, repReview!.id, 'spam'),
+);
+
+// --- reporting a coach ------------------------------------------------------
+await refuses('an anonymous caller cannot report a coach', 'unauthorized', () =>
+  db.reportCoach(ANON, COACH!.userId, 'scam'),
+);
+await refuses('nobody can report themselves', 'forbidden', () =>
+  db.reportCoach(COACH, COACH!.userId, 'scam'),
+);
+// An APPROVED coach, not merely an account: every lever this queue offers is
+// about selling, so a report about somebody who does not sell is one nobody
+// could act on.
+await refuses('a learner is not a reportable coach', 'not_found', () =>
+  db.reportCoach(AISHA, MARCUS!.userId, 'scam'),
+);
+await refuses('...and neither is an unknown id', 'not_found', () =>
+  db.reportCoach(AISHA, '00000000-0000-4000-8000-0000000000fd', 'scam'),
+);
+
+const coachReport = await allows(
+  'any signed-in person may report a coach',
+  () => db.reportCoach(AISHA, COACH!.userId, 'scam', 'Asked me to pay by bank transfer.'),
+  (r) => `${r.status} ${r.reason}`,
+);
+expectEqual('...naming the coach', coachReport?.subject_coach_id, COACH!.userId);
+expectEqual('...with the review column left null', coachReport?.subject_review_id, null);
+expectEqual('...and the reporter', coachReport?.reporter_id, AISHA!.userId);
+await refuses('the same person cannot file a second open report on that coach', 'conflict', () =>
+  db.reportCoach(AISHA, COACH!.userId, 'abusive'),
+);
+// A DIFFERENT reporter is not blocked by somebody else's open report — the
+// index is per reporter, and two people seeing the same problem is the normal
+// case rather than a duplicate.
+await allows(
+  'a different person may report the same coach',
+  () => db.reportCoach(MARCUS, COACH!.userId, 'impersonation'),
+  (r) => r.id,
+);
+
+// --- who may read -----------------------------------------------------------
+for (const [who, actor] of [
+  ['an anonymous caller', null],
+  ['a learner', MARCUS],
+  ['an approved coach', COACH],
+] as Array<[string, Actor]>) {
+  await refuses(`${who} cannot read the queue`, actor === null ? 'unauthorized' : 'forbidden', () =>
+    db.listReports(actor),
+  );
+  await refuses(`${who} cannot read the audit log`, actor === null ? 'unauthorized' : 'forbidden', () =>
+    db.listAdminActions(actor),
+  );
+  await refuses(`${who} cannot resolve a report`, actor === null ? 'unauthorized' : 'forbidden', () =>
+    db.resolveReport(actor, reviewReport!.id, 'dismissed'),
+  );
+}
+// THE CONTROL: the coach refused above FILED one of these reports. Being the
+// reporter is not being a moderator.
+expectEqual('...and the refused coach really did file one', reviewReport?.reporter_id, COACH!.userId);
+
+// `listMyReports` is the reporter's own view, and it is scoped by the actor
+// rather than by an argument — there is no shape of the call that reads
+// somebody else's.
+const mine = await allows(
+  'a reporter reads their OWN reports',
+  () => db.listMyReports(COACH),
+  (rows) => `${rows.length} report(s)`,
+);
+expectEqual('...which includes the one they filed', mine?.some((r) => r.id === reviewReport!.id), true);
+expectEqual(
+  '...and none that they did not',
+  mine?.some((r) => r.reporter_id !== COACH!.userId),
+  false,
+);
+expectEqual(
+  'a reporter does not see a report somebody else filed',
+  (await db.listMyReports(AISHA)).some((r) => r.id === reviewReport!.id),
+  false,
+);
+
+// --- the queue --------------------------------------------------------------
+const reportQueue = await allows(
+  'an ADMIN reads the queue',
+  () => db.listReports(ADMIN),
+  (rows) => `${rows.length} report(s)`,
+);
+const queuedReview = reportQueue?.find((r) => r.id === reviewReport!.id);
+expectShape('...with the context a moderator needs', queuedReview, REPORT_WITH_CONTEXT_COLUMNS);
+expectEqual('...naming the reporter', queuedReview?.reporter_name, 'Cory Vaughn');
+expectEqual('...quoting the review verbatim', queuedReview?.subject_summary, 'A review written so that it can be reported.');
+expectEqual('...and the offer it is about', queuedReview?.listing_title, 'Reports fixture offer');
+const queuedCoach = reportQueue?.find((r) => r.id === coachReport!.id);
+// A coach report is not about an offer, so there is no title. `null` rather
+// than an empty string, so a renderer branches rather than printing a gap.
+expectEqual('a coach report carries no listing title', queuedCoach?.listing_title, null);
+expectEqual('...and summarises the coach by their headline', typeof queuedCoach?.subject_summary, 'string');
+
+expectEqual(
+  'the status filter is honoured',
+  (await db.listReports(ADMIN, 'upheld')).length,
+  0,
+);
+expectEqual(
+  '...and the open filter finds them',
+  (await db.listReports(ADMIN, 'open')).some((r) => r.id === reviewReport!.id),
+  true,
+);
+
+// --- resolving --------------------------------------------------------------
+await refuses('a report cannot be resolved to "open"', 'invalid', () =>
+  db.resolveReport(ADMIN, reviewReport!.id, 'open'),
+);
+await refuses('an unknown report id is not_found', 'not_found', () =>
+  db.resolveReport(ADMIN, '00000000-0000-4000-8000-0000000000fc', 'upheld'),
+);
+
+const reviewsBefore = (await db.listReviewsForListing(repOffer!.id)).length;
+await allows(
+  'an ADMIN upholds the review report',
+  () => db.resolveReport(ADMIN, reviewReport!.id, 'upheld', '  They are right.  '),
+  (r) => r.status,
+);
+
+// THE ASSERTION THIS SPLIT EXISTS FOR. Upholding records a decision; it does
+// not carry it out. Removing the review is `removeReview`, on another page,
+// with its own confirmation — so "this report was right" and "here is what I
+// am doing about it" stay two separate acts, each with its own audit line.
+expectEqual('upholding does NOT remove the review', (await db.listReviewsForListing(repOffer!.id)).length, reviewsBefore);
+
+const resolved = (await db.listReports(ADMIN)).find((r) => r.id === reviewReport!.id);
+expectEqual('the report is upheld', resolved?.status, 'upheld');
+expectEqual('...by the admin who did it', resolved?.resolved_by, ADMIN!.userId);
+expectEqual('...named in the queue', resolved?.resolved_by_name, 'Ada Administrator');
+expectEqual('...with the note trimmed', resolved?.resolution_note, 'They are right.');
+expectEqual('...and a timestamp', typeof resolved?.resolved_at, 'string');
+
+// Mirrors the `and status = 'open'` in the UPDATE, which is what makes
+// double-resolution impossible under concurrency in Postgres.
+await refuses('a resolved report cannot be resolved again', 'conflict', () =>
+  db.resolveReport(ADMIN, reviewReport!.id, 'dismissed'),
+);
+
+// A resolved report frees the reporter to file another one about the same
+// subject — the unique index is partial, on `status = 'open'`.
+await allows(
+  'the same coach may report the same review again once it is resolved',
+  () => db.reportReview(COACH, repReview!.id, 'spam'),
+  (r) => r.status,
+);
+
+// --- the audit log ----------------------------------------------------------
+const audit = await allows(
+  'an ADMIN reads the audit log',
+  () => db.listAdminActions(ADMIN),
+  (rows) => `${rows.length} action(s)`,
+);
+const resolveLine = audit?.find((a) => a.action === 'resolve_report' && a.subject_id === reviewReport!.id);
+expectEqual('resolving wrote a line', Boolean(resolveLine), true);
+expectShape('...with the actor named', resolveLine, ADMIN_ACTION_COLUMNS);
+expectEqual('...attributing it to the admin', resolveLine?.actor_id, ADMIN!.userId);
+expectEqual('...by name', resolveLine?.actor_name, 'Ada Administrator');
+expectEqual('...and recording the decision', resolveLine?.reason, 'upheld');
+// Newest first, like every other list in this interface.
+expectEqual(
+  'the log is newest first',
+  audit!.every((row, i) => i === 0 || row.created_at <= audit![i - 1]!.created_at),
+  true,
+);
+// The removal in the section above went through `removeReview`, which writes
+// its own line — the log is every admin action, not only report decisions.
+expectEqual(
+  '...and it covers removals too, not only reports',
+  audit?.some((a) => a.action === 'remove_review'),
+  true,
+);
+
+// ---------------------------------------------------------------------------
+section('Coach standing — suspension is a database invariant, not a UI rule');
+// ---------------------------------------------------------------------------
+
+for (const [who, actor] of [
+  ['an anonymous caller', null],
+  ['a learner', MARCUS],
+  ['an approved coach', COACH],
+] as Array<[string, Actor]>) {
+  await refuses(`${who} cannot change a coach's standing`, actor === null ? 'unauthorized' : 'forbidden', () =>
+    db.setCoachStatus(actor, NILS!.userId, 'suspended'),
+  );
+  await refuses(`${who} cannot list coaches as an admin`, actor === null ? 'unauthorized' : 'forbidden', () =>
+    db.listCoachesForAdmin(actor),
+  );
+  await refuses(`${who} cannot read another coach's withdrawn offers`, actor === null ? 'unauthorized' : 'forbidden', () =>
+    db.listListingsForAdmin(actor, COACH!.userId),
+  );
+}
+
+// An administrator suspending themselves would lock the marketplace's own
+// operator out with no way back except another administrator.
+await refuses('an admin cannot change their own standing', 'forbidden', () =>
+  db.setCoachStatus(ADMIN, ADMIN!.userId, 'suspended'),
+);
+// `pending_review` and `rejected` belong to the application flow. Hand-setting
+// one here would produce a pending application that does not exist.
+await refuses('the application statuses are not settable here', 'invalid', () =>
+  db.setCoachStatus(ADMIN, NILS!.userId, 'pending_review'),
+);
+await refuses('an unknown account is not_found', 'not_found', () =>
+  db.setCoachStatus(ADMIN, '00000000-0000-4000-8000-0000000000fb', 'suspended'),
+);
+
+// THE INVARIANT. `set_coach_status()` cannot withdraw the offers itself — it is
+// SECURITY DEFINER owned by `javelin_privileged`, and `guard_listing_update()`
+// calls `auth.uid()`, which that role can never reach. So it REFUSES, and
+// "suspended but still selling" is not a state that can be reached however a
+// caller sequences their requests.
+expectEqual(
+  'the coach has at least one offer on sale',
+  (await db.listListingsByCoach(null, COACH!.userId)).length > 0,
+  true,
+);
+await refuses('a coach cannot be suspended while an offer is on sale', 'invalid', () =>
+  db.setCoachStatus(ADMIN, COACH!.userId, 'suspended'),
+);
+await refuses('...nor demoted', 'invalid', () => db.setCoachStatus(ADMIN, COACH!.userId, 'none'));
+
+// The admin takes them down first, AS THE ADMIN — which is what makes
+// `deleted_by` the administrator, and so what stops the coach putting them
+// straight back. See `restoreListing`'s table.
+const coachListings = await allows(
+  'an ADMIN reads every offer of one coach, withdrawn included',
+  () => db.listListingsForAdmin(ADMIN, COACH!.userId),
+  (rows) => `${rows.length} offer(s)`,
+);
+for (const listing of coachListings!.filter((l) => l.deleted_at === null)) {
+  await db.softDeleteListing(ADMIN, listing.id);
+}
+expectEqual(
+  'nothing of theirs is on sale now',
+  (await db.listListingsByCoach(null, COACH!.userId)).length,
+  0,
+);
+expectEqual(
+  '...but the admin read still sees them all',
+  (await db.listListingsForAdmin(ADMIN, COACH!.userId)).length,
+  coachListings?.length,
+);
+
+const suspendedCoach = await allows(
+  'NOW the coach can be suspended',
+  () => db.setCoachStatus(ADMIN, COACH!.userId, 'suspended', 'Two upheld reports.'),
+  (p) => p.coach_status,
+);
+expectEqual('...and the status is set', suspendedCoach?.coach_status, 'suspended');
+// SUSPENSION DOES NOT DEMOTE. A suspended coach is a coach whose selling is
+// paused, which is why the role survives and `none` is the separate decision.
+expectEqual('...while the role survives', suspendedCoach?.role, 'coach');
+
+// They vanish from the public directory the moment they are suspended, because
+// `public_coaches` filters to `approved` — which is exactly why the admin list
+// reads `profiles` instead.
+expectEqual('a suspended coach leaves the public directory', await db.getPublicCoach(COACH!.userId), null);
+expectEqual(
+  '...but is still on the admin list',
+  (await db.listCoachesForAdmin(ADMIN)).some((p) => p.id === COACH!.userId),
+  true,
+);
+
+// What a suspension actually costs them: publishing.
+await refuses('a suspended coach cannot publish', 'forbidden', () =>
+  db.createListing(COACH, {
+    title: 'Published while suspended',
+    description: 'This must not be creatable while the account is suspended.',
+    price_cents: 1000,
+    category: 'training_plan',
+  }),
+);
+// And what it does NOT cost them: the admin's takedown is not theirs to lift.
+const suspendedOwn = await db.listMyListings(COACH);
+const adminTakedown = suspendedOwn.find((l) => l.deleted_at !== null && l.withdrawn_by_admin);
+expectEqual('their own dashboard shows the takedown as an admin one', Boolean(adminTakedown), true);
+await refuses('...and they cannot lift it themselves', 'forbidden', () =>
+  db.restoreListing(COACH, adminTakedown!.id),
+);
+
+// --- reinstating ------------------------------------------------------------
+const reinstated = await allows(
+  'an ADMIN reinstates them',
+  () => db.setCoachStatus(ADMIN, COACH!.userId, 'approved'),
+  (p) => p.coach_status,
+);
+expectEqual('...back to approved', reinstated?.coach_status, 'approved');
+expectEqual('...and back in the public directory', Boolean(await db.getPublicCoach(COACH!.userId)), true);
+// REINSTATING DOES NOT REPUBLISH. Nothing records which withdrawals belonged to
+// which suspension, so putting them back is one deliberate decision per offer.
+expectEqual(
+  'their offers stay withdrawn until somebody restores them',
+  (await db.listListingsByCoach(null, COACH!.userId)).length,
+  0,
+);
+await allows(
+  '...and only an ADMIN can restore one',
+  () => db.restoreListing(ADMIN, adminTakedown!.id),
+  (l) => l.id,
+);
+
+// --- the audit trail --------------------------------------------------------
+const standingLog = await db.listAdminActions(ADMIN);
+// The SUSPENSION line specifically. The list is newest first and this coach
+// has since been reinstated, so a bare `find` would return the reinstatement.
+const standingLine = standingLog.find(
+  (a) =>
+    a.action === 'set_coach_status' &&
+    a.subject_id === COACH!.userId &&
+    (a.reason ?? '').includes('suspended'),
+);
+expectEqual('a standing change is in the audit log', Boolean(standingLine), true);
+expectEqual('...naming the admin', standingLine?.actor_id, ADMIN!.userId);
+expectEqual(
+  '...and carrying both the reason and the new status',
+  standingLine?.reason?.includes('Two upheld reports.') && standingLine?.reason?.includes('suspended'),
+  true,
+);
+
+// --- demotion ---------------------------------------------------------------
+// Nils has picked up an offer in an earlier section, so the same rule applies
+// to him — the invariant is not a special case for the busy coach.
+await refuses('the other coach cannot be demoted while selling either', 'invalid', () =>
+  db.setCoachStatus(ADMIN, NILS!.userId, 'none'),
+);
+for (const listing of await db.listListingsForAdmin(ADMIN, NILS!.userId)) {
+  if (listing.deleted_at === null) await db.softDeleteListing(ADMIN, listing.id);
+}
+const demoted = await allows(
+  'an ADMIN removes a coach once nothing of theirs is on sale',
+  () => db.setCoachStatus(ADMIN, NILS!.userId, 'none', 'Asked to be removed.'),
+  (p) => `${p.coach_status}/${p.role}`,
+);
+// DEMOTION DROPS THE ROLE TOO, unlike suspension: `none` means the chapter is
+// closed, and leaving `role = 'coach'` would be a title with nothing under it.
+expectEqual('...and the role goes with it', demoted?.role, 'learner');
+expectEqual(
+  '...so they leave the admin coach list entirely',
+  (await db.listCoachesForAdmin(ADMIN)).some((p) => p.id === NILS!.userId),
+  false,
+);
 
 // ---------------------------------------------------------------------------
 section('Rate limiting — a speed bump that has to count correctly');

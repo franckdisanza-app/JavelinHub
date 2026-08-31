@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 
 import { CreateInviteForm } from '@/app/admin/invites/create-invite-form';
 import { CopyCodeButton, RevokeInviteForm } from '@/app/admin/invites/invite-actions';
+import { AdminNav } from '@/components/admin-nav';
 import { Badge, type BadgeTone } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
 import { getActor, getCurrentProfile, requireAdmin } from '@/lib/auth/session';
@@ -49,6 +50,8 @@ export default async function AdminInvitesPage() {
         An invite code approves whoever redeems it as a coach immediately, with no review. Each code works exactly once.
         Treat one like a password: anyone holding it can sell on the marketplace.
       </p>
+
+      <AdminNav current="invites" />
 
       <div className="mt-8 flex flex-col gap-8">
         <Card tone="raised">

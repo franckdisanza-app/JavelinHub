@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { ListingCard } from '@/components/listing-card';
+import { ReportForm } from '@/components/report-form';
 import { ReviewItem } from '@/components/review-item';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
@@ -372,13 +373,27 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
             </p>
             <ul className="mt-3 flex flex-col gap-3">
               {reviews.map((review) => (
-                <li key={review.id}>
+                <li key={review.id} className="flex flex-col gap-2">
                   {/*
                     No `context`: naming the offer under every review of the
                     offer you are already reading is noise. The coach profile,
                     which mixes several offers, passes the title.
                   */}
                   <ReviewItem review={review} />
+                  {/*
+                    ONLY THE COACH WHOSE OFFER THIS IS, which is exactly the
+                    entitlement `report_review()` enforces through a JOIN on
+                    `listings`. Rendering it to anybody else would be a control
+                    that always fails — and the refusal is deliberately the same
+                    "could not be found" a nonexistent review gets, so the form
+                    cannot be used to learn which review ids exist.
+
+                    A buyer with a complaint about a review is not the person
+                    the report is for: they report the COACH, on the profile.
+                  */}
+                  {isOwnOffer ? (
+                    <ReportForm subject="review" id={review.id} subjectName={review.author_name} />
+                  ) : null}
                 </li>
               ))}
             </ul>

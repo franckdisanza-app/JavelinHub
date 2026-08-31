@@ -818,6 +818,10 @@ and the coach's dashboard flags it as *Needs a file*.
 | `listMyOrders`, `createCoachApplication`, `getMyCoachApplication`, `redeemInviteCode` | any signed-in actor |
 | `createListing` | the actor's **stored** `coach_status` is `'approved'` |
 | `createInvite`, `listInvites`, `revokeInvite`, `listCoachApplications`, `reviewCoachApplication` | the actor's **stored** `role` is `'admin'` |
+| `reportReview` | signed in, **and the coach who owns the offer the review is about** — a join, not a column comparison. Everyone else, including the review's author and an admin, gets `not_found`, in the same words an unknown id gets |
+| `reportCoach` | any signed-in actor, about any **approved** coach who is not themselves |
+| `listMyReports` | any signed-in actor; scoped to the actor, with no subject parameter to point elsewhere |
+| `listReports`, `resolveReport`, `setCoachStatus`, `listCoachesForAdmin`, `listListingsForAdmin`, `listAdminActions` | the actor's **stored** `role` is `'admin'` |
 
 The two routes to `coach_status: 'approved'`:
 
@@ -834,6 +838,113 @@ The two routes to `coach_status: 'approved'`:
 
 A user may hold at most one `pending` application, and an already-approved coach
 cannot apply again — both are `conflict`.
+
+## Reports, standing, and the audit log
+
+Three tables, one queue, and one rule that runs through all of it: **deciding
+something was wrong is never the same act as doing something about it.**
+
+### Who may report what
+
+A **review** can be reported only by the coach whose offer it is about. That is
+an entitlement expressed as a join through `listings`, which is why it is an RPC
+(`report_review()`) rather than an INSERT with a `with check`: a policy could
+express the rule, but then "no such review" and "not your offer" would both
+surface as the same anonymous RLS violation, and the function can say the one
+sentence that reveals neither. Both refusals are `not_found`, deliberately — a
+review id is never published anywhere, and distinguishable errors would turn the
+form into an oracle for which ids exist.
+
+A **coach** can be reported by anybody signed in, about any approved coach who is
+not themselves. Approved specifically: every lever this queue offers is about
+selling, so a report about somebody who does not sell is one nobody could act on.
+
+A partial unique index caps this at **one open report per reporter per subject**.
+Partial, on `status = 'open'`, so a dismissed report does not block a later one —
+and per reporter, so two people seeing the same problem is the normal case rather
+than a duplicate.
+
+### Neither subject column is a foreign key
+
+`reports.subject_review_id` and `reports.subject_coach_id` point at rows without
+referencing them, and that is the load-bearing decision in the schema. Removing a
+review **deletes** it — see the moderation section — so a cascade would take the
+report with it at the exact moment somebody acted on it, which is the one moment
+the record matters. The `reports_subject_shape` CHECK keeps the discriminator and
+the two columns consistent instead: exactly one is set, and it matches
+`subject_type`.
+
+The consequence a reader has to handle: the subject may be gone. `listReports`
+resolves it from `reviews`, then from `removed_reviews`, and says
+"This review has since been removed." when only the archive has it.
+
+### Resolving is not the consequence
+
+`resolveReport` marks a report `upheld` or `dismissed` and writes an audit line.
+It does **not** remove the review or suspend the coach. Those are `removeReview`
+and `setCoachStatus`, on other pages, each with its own confirmation. A single
+button that did both would make the second decision invisible.
+
+### Suspension is a database invariant
+
+`set_coach_status()` **refuses while any of the coach's offers is still on sale**,
+and refuses rather than withdrawing them itself. The reason is the one `0004`
+recorded: it is SECURITY DEFINER owned by `javelin_privileged`, and
+`guard_listing_update()` assigns `new.deleted_by := auth.uid()`, which that role
+can never call.
+
+So the application takes the offers down first, **as the administrator**, and
+that turns out to be the right behaviour rather than a workaround:
+`listings.deleted_by` then holds the administrator, so `restoreListing`'s table
+says the coach may not put them back themselves. A takedown a coach can undo in
+one click is not a takedown. And because the function refuses, "suspended but
+still selling" is not a state that can be reached however a caller sequences its
+requests.
+
+| status | what it means | role |
+|---|---|---|
+| `suspended` | was approved, is stopped, may be reinstated | unchanged — still a coach |
+| `none` | demoted; the coach chapter is closed | drops to `learner` |
+| `approved` | reinstated | raised to `coach` |
+
+An administrator's `role` is never touched by any of them: standing as a coach
+and the admin role are independent axes.
+
+`pending_review` and `rejected` are not reachable here — they belong to the
+application flow, and hand-setting one would produce a `pending_review` with no
+application behind it, which every read of that status assumes cannot happen.
+
+**Reinstating does not republish.** Nothing records which withdrawals belonged to
+which suspension, so restoring is one deliberate decision per offer, on
+`/admin/coaches`. `listListingsForAdmin` is the read that makes that possible: the
+public by-coach read hides withdrawn offers and `listMyListings` cannot be pointed
+at somebody else, so without it a reinstated coach would be left with a shelf
+nobody could put back.
+
+**Demotion is one-way from that page.** `coach_status = 'none'` is
+indistinguishable from a learner who never applied, so a demoted coach leaves the
+admin list. They can apply again through the ordinary queue.
+
+### The audit log
+
+`admin_actions` is append-only: no UPDATE or DELETE policy for any role. Five
+kinds — `grant_admin`, `review_application`, `remove_review`, `resolve_report`,
+`set_coach_status` — written by exactly one function, `record_admin_action()`,
+which is why "what gets logged" is one place to read rather than five.
+
+`actor_id` is nullable and rendered as "a deleted account" rather than as an
+invented name: the FK is ON DELETE SET NULL, and bootstrapping the first
+administrator has no actor at all.
+
+> **The trap that cost this schema five migrations.** `0019` closed
+> `record_admin_action()` with `revoke all ... from public`, which is correct on a
+> stock Postgres and does nothing on Supabase: the project bootstrap runs
+> `alter default privileges in schema public grant all on functions to anon,
+> authenticated, service_role`, and revoking from the PUBLIC pseudo-role does not
+> touch an explicit grant to a named role. Anonymous callers could append forged
+> lines to the audit log until `0024`. **A function no client should call must
+> revoke from those three roles by name.** `scripts/probe-grants.mjs` sweeps every
+> client-reachable function for this, and `verify:supabase` pins this one.
 
 ## Server-only
 

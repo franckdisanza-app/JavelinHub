@@ -9,6 +9,7 @@ import { Alert } from '@/components/ui/alert';
 import { linkButtonClass } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { requireUser } from '@/lib/auth/session';
+import type { CoachStatus } from '@/lib/data/types';
 import { avatarCacheBuster, avatarPublicUrl } from '@/lib/storage/avatars';
 
 export const metadata: Metadata = { title: 'Your coach profile' };
@@ -148,13 +149,40 @@ function Shell({ children }: { children: ReactNode }) {
  * "you have not applied" and "we have your application" are different facts and
  * telling an applicant to apply again would be wrong.
  */
-function NotACoachPanel({ status }: { status: 'none' | 'pending_review' | 'rejected' }) {
-  const opening =
-    status === 'pending_review'
+function NotACoachPanel({ status }: { status: Exclude<CoachStatus, 'approved'> }) {
+  /*
+   * SUSPENDED IS NOT REJECTED, and the two must not share copy. `rejected`
+   * means an application was read and turned down, and the honest next step is
+   * to apply again. `suspended` means somebody who WAS approved has been
+   * stopped — inviting them to re-apply would be both wrong and an invitation
+   * to route around the suspension. See `CoachStatus`.
+   */
+  const suspended = status === 'suspended';
+
+  const opening = suspended
+    ? 'An administrator has suspended your coaching account, so your public profile is not editable and your offers are off sale.'
+    : status === 'pending_review'
       ? 'Your coach application is with an administrator. Once it is approved you can write your public profile here.'
       : status === 'rejected'
         ? 'Your last application was not approved, so there is no public profile to edit yet. You can apply again.'
         : 'Only approved coaches have a public profile. There are two ways to become one.';
+
+  if (suspended) {
+    // No routes onward: neither applying again nor redeeming a code lifts a
+    // suspension, and offering either would be a control whose only outcome is
+    // to waste somebody's invite code.
+    return (
+      <Card>
+        <CardHeader title="Your coaching account is suspended" description={opening} />
+        <CardBody>
+          <p className="text-sm leading-relaxed text-muted">
+            Only an administrator can lift this. Applying again or redeeming an invite code will not, so
+            there is nothing useful to click here.
+          </p>
+        </CardBody>
+      </Card>
+    );
+  }
 
   return (
     <Card>

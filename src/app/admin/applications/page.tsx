@@ -12,6 +12,7 @@ import {
   type ApplicationFilter,
 } from '@/app/admin/applications/filters';
 import { ReviewForm } from '@/app/admin/applications/review-form';
+import { AdminNav } from '@/components/admin-nav';
 import { Alert } from '@/components/ui/alert';
 import { Badge, type BadgeTone } from '@/components/ui/badge';
 import { Card, CardBody, CardHeader } from '@/components/ui/card';
@@ -139,6 +140,8 @@ function Shell({
         </Link>
         .
       </p>
+
+      <AdminNav current="applications" />
 
       <FilterTabs current={filter} counts={counts} />
 
@@ -324,6 +327,9 @@ function StatusText({ status }: { status: CoachStatus }) {
     pending_review: 'awaiting review',
     approved: 'approved coach',
     rejected: 'rejected',
+    // An administrator stopped them. NOT the same as `rejected`, which is an
+    // application decision — see `CoachStatus`.
+    suspended: 'suspended',
   };
   return (
     <span className="font-medium text-ink">

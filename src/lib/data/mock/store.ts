@@ -23,6 +23,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 
 import { mockDbPath, seedAdminEmail, seedAdminPassword } from '@/lib/env';
 import type {
+  AdminAction,
   CoachApplication,
   Deliverable,
   Invite,
@@ -32,6 +33,7 @@ import type {
   Order,
   Profile,
   RemovedReview,
+  Report,
   Review,
 } from '../types';
 
@@ -124,6 +126,10 @@ export interface MockDb {
   password_resets: PasswordReset[];
   /** Fixed-window request counters. Mirrors `public.rate_limits` (0013). */
   rate_limits: RateLimit[];
+  /** The moderation queue. Mirrors `public.reports` (0020). */
+  reports: Report[];
+  /** Who did what, to whom, when and why. Mirrors `public.admin_actions` (0019). */
+  admin_actions: AdminAction[];
   /**
    * Reviews an administrator took down, copied verbatim before deletion.
    * Mirrors `public.removed_reviews` (0016).
@@ -153,6 +159,8 @@ function emptyDb(): MockDb {
     password_resets: [],
     rate_limits: [],
     removed_reviews: [],
+    reports: [],
+    admin_actions: [],
   };
 }
 
@@ -733,6 +741,12 @@ export function seedDatabase(db: MockDb): void {
   // fixture: a moderation log entry asserts that an administrator took an
   // action, and inventing one would be inventing an accusation.
   if (!Array.isArray(db.removed_reviews)) db.removed_reviews = [];
+
+  // Same backfill, same reasoning. Neither is ever seeded: a report is an
+  // accusation and an audit row asserts that somebody took an action, so
+  // inventing either as a fixture would be inventing a grievance or a deed.
+  if (!Array.isArray(db.reports)) db.reports = [];
+  if (!Array.isArray(db.admin_actions)) db.admin_actions = [];
 
   // `deleted_at` on a PROFILE arrived with account deletion. Backfilled rather
   // than bumping DB_VERSION, like every column above — and `null` is the only

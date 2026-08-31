@@ -184,6 +184,7 @@ async function plantFixtures(): Promise<{
   resetToken: string;
   adminId: string;
   withdrawnOfferBuyerId: string;
+  reportedReviewId: string;
 }> {
   const db = getDataClient();
 
@@ -399,7 +400,27 @@ async function plantFixtures(): Promise<{
   const resetToken = await issueResetToken('locked-out@verify-pages.test');
   if (!resetToken) throw new Error('fixture: could not mint a password-reset token');
 
+  // --- F14 ------------------------------------------------------------------
+  // ONE OF EACH KIND OF REPORT, so `/admin/reports` renders a queue rather than
+  // an empty state. Filed here for the reason every other fixture is: the store
+  // lives in the server process's `globalThis`, and a write made after boot is
+  // not seen.
+  //
+  // The review report is filed BY CORY, because only the coach whose offer a
+  // review is about may report it — that entitlement is the thing the page's
+  // assertions are checking is honoured, so the fixture has to satisfy it.
+  const reportedReview = (await db.listReviewsForListing(OFFER.fundamentals))[0];
+  if (!reportedReview) throw new Error('fixture: the seeded offer has no review to report');
+  await db.reportReview(CORY, reportedReview.id, 'not_a_real_purchase', 'They never bought it.');
+  await db.reportCoach(
+    { userId: LEARNER },
+    COACH,
+    'scam',
+    'Asked me to pay by bank transfer, off the site.',
+  );
+
   return {
+    reportedReviewId: reportedReview.id,
     deapprovedCoachId: dana.id,
     deapprovedOfferId: danaOffer.id,
     soldUnreviewedCoachId: rune.id,
@@ -1868,6 +1889,163 @@ try {
   check('the admin nav links to it', moderation.html.includes('href="/admin/reviews"'), true);
   check('...and a learner’s nav does not',
     (await getAs('/offers', LEARNER)).html.includes('href="/admin/reviews"'), false);
+
+  // -------------------------------------------------------------------------
+  section('/admin/reports — the queue, and the two ways into it');
+
+  // The same 404-not-403 gate every admin page carries: telling a signed-in
+  // learner they are not allowed here confirms there is a `here`.
+  check('anonymous -> log in and back',
+    await redirectTarget('/admin/reports'), '/login?next=%2Fadmin%2Freports');
+  check('a learner gets 404, not a refusal',
+    (await getAs('/admin/reports', LEARNER)).status, 404);
+  check('...and so does an approved coach — even one who FILED a report',
+    (await getAs('/admin/reports', COACH)).status, 404);
+  check('the 404 does NOT leak the page title',
+    /<title>[^<]*Reports/i.test((await getAs('/admin/reports', LEARNER)).html), false);
+
+  const reports = await getAs('/admin/reports', fixtures.adminId);
+  check('an admin gets the page', reports.status, 200);
+  check('...carrying the title', /<title>[^<]*Reports/i.test(reports.html), true);
+
+  // Both fixture reports are in the default (open) tab, and each renders the
+  // context its subject needs: a review report quotes the review and names the
+  // offer; a coach report names the coach and has no offer at all.
+  check('...listing the review report, quoted verbatim',
+    reports.text.includes('They never bought it.'), true);
+  check('...naming the offer it is about',
+    reports.text.includes('Javelin Throw Fundamentals'), true);
+  check('...and the coach report',
+    reports.text.includes('Asked me to pay by bank transfer'), true);
+  check('the open tab counts both', /Open\s*2/.test(reports.text), true);
+  check('...and the resolved tabs are empty', /Upheld\s*0/.test(reports.text), true);
+
+  /*
+   * THE SPLIT THIS PAGE EXISTS TO MAKE VISIBLE. Upholding records a decision;
+   * it does not carry it out. The card says so and links to the page where the
+   * second decision is made, so an administrator is never left believing the
+   * review is gone because they pressed Uphold.
+   */
+  check('a review report points at the removal page',
+    reports.html.includes('href="/admin/reviews"'), true);
+  check('...and a coach report at the standing page',
+    reports.html.includes('href="/admin/coaches"'), true);
+  check('the resolve form is rendered per report',
+    reports.html.includes('value="upheld"') && reports.html.includes('value="dismissed"'), true);
+
+  // The filter is a real URL, so back/forward and bookmarking work.
+  const upheldTab = await getAs('/admin/reports?status=upheld', fixtures.adminId);
+  check('the status filter is honoured', upheldTab.text.includes('No report has been upheld yet'), true);
+  check('...and it does not show the open ones',
+    upheldTab.text.includes('They never bought it.'), false);
+  // An unrecognised value falls back to the working queue rather than 500ing.
+  check('a nonsense filter falls back to the queue',
+    (await getAs('/admin/reports?status=banana', fixtures.adminId)).text.includes('They never bought it.'),
+    true);
+
+  // The audit log, which is every admin action rather than only report
+  // decisions. Nothing has been done to the seed, so it renders its empty state.
+  check('the audit log is on the page',
+    reports.text.includes('Administrator actions'), true);
+
+  // -------------------------------------------------------------------------
+  section('/admin/coaches — standing, and the offers a suspension takes down');
+
+  check('anonymous -> log in and back',
+    await redirectTarget('/admin/coaches'), '/login?next=%2Fadmin%2Fcoaches');
+  check('a learner gets 404', (await getAs('/admin/coaches', LEARNER)).status, 404);
+  check('...and so does a coach', (await getAs('/admin/coaches', COACH)).status, 404);
+  check('the 404 does NOT leak the page title',
+    /<title>[^<]*Coach standing/i.test((await getAs('/admin/coaches', LEARNER)).html), false);
+
+  const standing = await getAs('/admin/coaches', fixtures.adminId);
+  check('an admin gets the page', standing.status, 200);
+  check('...listing the seeded coach', standing.text.includes('Cory Vaughn'), true);
+  // READS `profiles`, NOT `public_coaches` — the point of the separate method.
+  // Dana was de-approved, so the public directory does not have her; this page
+  // must, because she is exactly the sort of account it exists to act on.
+  check('...and a coach the public directory has dropped',
+    standing.html.includes(`href="/coaches/${fixtures.deapprovedCoachId}"`), true);
+  check('the suspend control is rendered', standing.text.includes('Suspend'), true);
+  check('...and the demote one', standing.text.includes('Remove as coach'), true);
+  /*
+   * The reason textarea is NOT in the served markup: `CoachStandingForm` reveals
+   * it only after the first click, which is the two-step confirmation that
+   * exists because suspending empties somebody's shop and hands the only key to
+   * whoever clicked. So the control for that negative is the buttons above.
+   */
+  check('the confirmation panel is not pre-rendered',
+    standing.html.includes('name="reason"'), false);
+  // The admin took one of Cory's offers down in an earlier fixture, and only an
+  // admin can put it back — so it has to be reachable from here or it is
+  // stranded.
+  check('a takedown is listed with a Restore control',
+    standing.html.includes(`value="${fixtures.adminTakenDownOfferId}"`), true);
+
+  // -------------------------------------------------------------------------
+  section('Reporting — who is offered the control, and who is not');
+
+  /*
+   * ONLY THE COACH WHOSE OFFER IT IS. That is exactly the entitlement
+   * `report_review()` enforces through a join on `listings`, and rendering the
+   * control to anybody else would be a button that always fails.
+   */
+  /*
+   * Matched on the button's screen-reader suffix, not on a hidden input: the
+   * form is COLLAPSED until the first click — see `ReportForm` — so the review
+   * id is not in the served markup at all. That is the same reason
+   * `/admin/reviews` is asserted through "the review by" rather than through its
+   * reason textarea.
+   */
+  const ownOffer = await getAs(`/offers/${OFFER.fundamentals}`, COACH);
+  check('the offer’s own coach is offered a report control per review',
+    ownOffer.text.includes('the review by'), true);
+  check('...one per review, not one for the page',
+    ownOffer.text.split('the review by').length - 1 >= 2, true);
+  check('a signed-in learner is not',
+    (await getAs(`/offers/${OFFER.fundamentals}`, LEARNER)).text.includes('the review by'), false);
+  check('...and neither is an anonymous visitor',
+    (await get(`/offers/${OFFER.fundamentals}`)).text.includes('the review by'), false);
+  check('...nor another coach',
+    (await getAs(`/offers/${OFFER.fundamentals}`, EMPTY_COACH)).text.includes('the review by'), false);
+
+  /*
+   * REPORTING A COACH is the other direction, and it is open to anybody signed
+   * in — a buyer with no offer of their own is precisely who needs it.
+   */
+  const reportableCoachPage = await getAs(`/coaches/${COACH}`, LEARNER);
+  check('a signed-in visitor may report a coach', reportableCoachPage.text.includes('Report this coach'), true);
+  check('...and is told what it is for',
+    reportableCoachPage.text.includes('took payment outside JavelinHub'), true);
+  check('an anonymous visitor is not offered it',
+    (await get(`/coaches/${COACH}`)).text.includes('Report this coach'), false);
+  check('...and neither is the coach themselves',
+    (await getAs(`/coaches/${COACH}`, COACH)).text.includes('Report this coach'), false);
+
+  // The reporter's own view: what they filed, and what came of it. On /settings
+  // rather than a route of its own, because there is nothing to do with them.
+  const reporterSettings = await getAs('/settings', COACH);
+  check('a reporter sees their own report on /settings',
+    reporterSettings.text.includes('Reports you have filed'), true);
+  check('...told that nobody has looked at it yet',
+    reporterSettings.text.includes('Nobody has looked at this yet'), true);
+  /*
+   * AND NOTHING ABOUT THE OTHER PERSON. `listMyReports` returns the row rather
+   * than the queue's context shape, so the page cannot name the author of a
+   * review even by accident.
+   */
+  check('...but not the text they reported',
+    reporterSettings.text.includes('They never bought it.'), false);
+  check('somebody who has filed nothing gets no such section',
+    (await getAs('/settings', EMPTY_COACH)).text.includes('Reports you have filed'), false);
+
+  // The admin nav names every admin surface, or nobody finds the new ones.
+  check('the admin nav links to the reports queue',
+    standing.html.includes('href="/admin/reports"'), true);
+  check('...and to coach standing from the reports page',
+    reports.html.includes('href="/admin/coaches"'), true);
+  check('a learner’s header does not link to any of it',
+    (await getAs('/offers', LEARNER)).html.includes('href="/admin/reports"'), false);
 
   // -------------------------------------------------------------------------
   section('Password reset — the link, end to end over HTTP');

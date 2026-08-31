@@ -169,6 +169,15 @@ coach publishes and manages offers in either delivery mode, a learner claims one
 and either downloads it immediately or exchanges files against that order, and
 the buyer reviews it. What is left in §1 is the money.
 
+The nine methods added since — `reportReview`, `reportCoach`, `listMyReports`,
+`listReports`, `resolveReport`, `setCoachStatus`, `listCoachesForAdmin`,
+`listListingsForAdmin`, `listAdminActions` — each shipped in the same commit as
+the page that calls it, which is the habit this section exists to enforce. The
+one that had to be invented for the UI rather than the other way round is
+`listListingsForAdmin`: without it a reinstated coach would be left with a shelf
+of admin-withdrawn offers that nobody could put back, since a coach may not lift
+an administrator's takedown.
+
 ---
 
 ## 4. Auth is half-built
@@ -348,14 +357,55 @@ them twice is how the two diverge.
   unaudited route beside the audited one. `remove_review()` is now the only way a
   review can cease to exist.
 
-  Still missing: reviews cannot be REPORTED, so the queue is every review on the
-  site rather than a queue. That is fine at this size and is not fine later.
-* **No way to suspend or demote a coach** through the app. `coach_status` can go
-  to `rejected` only through application review.
-* **No audit log**, still — with one exception. `removed_reviews` (0016) records
-  who took a review down, when, why, and the whole text, because destroying user
-  content with no trace is not a thing to ship. `grant_admin()` and application
-  decisions still leave nothing behind but the mutated row.
+  ~~Still missing: reviews cannot be REPORTED.~~ **Done** (0020,
+  `/admin/reports`). A coach reports a review of their own offer; anybody signed
+  in reports a coach. Both land in one queue, because they are the same job —
+  somebody says something here is wrong, and one person decides — and two queues
+  would mean two places to check and one of them going stale.
+
+  The rule that runs through it: **deciding something was wrong is never the same
+  act as doing something about it.** Upholding a review report does not delete
+  the review, and upholding a coach report does not suspend the coach; each card
+  links to the page where that second decision is made, with its own
+  confirmation. A single button doing both would make the second one invisible.
+
+  Neither subject column is a foreign key, and that is the load-bearing choice:
+  removing a review DELETES it, so a cascade would take the report away at the
+  exact moment somebody acted on it. The queue resolves a missing review from
+  `removed_reviews` and says so instead.
+* ~~**No way to suspend or demote a coach**~~ — **done** (0021/0022,
+  `/admin/coaches`). Suspend, demote, reinstate, one call.
+
+  `set_coach_status()` **refuses while any of their offers is on sale**, because
+  it cannot withdraw them itself: it is SECURITY DEFINER owned by
+  `javelin_privileged`, and `guard_listing_update()` calls `auth.uid()`, which
+  that role can never reach — the dead end `0004` recorded, paying off a third
+  time. So the app takes the offers down first, AS THE ADMINISTRATOR, which makes
+  `deleted_by` the administrator and means the coach cannot put them straight
+  back. A takedown a coach can undo in one click is not a takedown. And because
+  the function refuses rather than fixing it up, "suspended but still selling" is
+  a state that cannot be reached however a caller sequences its requests.
+
+  Reinstating deliberately does not republish: nothing records which withdrawals
+  belonged to which suspension, so restoring is one decision per offer.
+* ~~**No audit log**~~ — **done** (0019, plus retrofits in 0020, 0022, 0023).
+  `admin_actions` is append-only — no UPDATE or DELETE policy for any role — with
+  five kinds: `grant_admin`, `review_application`, `remove_review`,
+  `resolve_report`, `set_coach_status`. One writer, `record_admin_action()`, so
+  "what gets logged" is one place to read rather than five. Rendered at the
+  bottom of `/admin/reports`.
+
+  **It shipped with a hole, and finding it is the reason this suite exists.**
+  `0019` closed the writer with `revoke all ... from public` — correct on a stock
+  Postgres, and inert on Supabase, whose bootstrap runs `alter default privileges
+  in schema public grant all on functions to anon, authenticated, service_role`.
+  Revoking from the PUBLIC pseudo-role does not touch an explicit grant to a
+  named role, so for five migrations any anonymous caller could POST to
+  `/rest/v1/rpc/record_admin_action` and append a forged line. `0024` is the
+  revoke that actually closes it, `0025` deletes the two rows the probe wrote,
+  and `scripts/probe-grants.mjs` sweeps every client-reachable function for the
+  same trap. Nothing else was exposed: every other privileged function guards
+  itself and refuses anon with its own sentence.
 * **Observability: the seam exists, the provider does not.**
   `src/instrumentation.ts` binds Next's `onRequestError`, which fires for every
   server error — renders, route handlers, Server Actions, the proxy — and
