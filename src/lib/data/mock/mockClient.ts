@@ -62,6 +62,7 @@ import type {
   PublicCoach,
   PublicProfile,
   PublicReview,
+  PublicReviewReply,
   PublicReviewWithListing,
   RemovedReviewWithNames,
   Review,
@@ -83,6 +84,7 @@ import {
   COACH_HEADLINE_MAX,
   DataError,
   LISTING_CATEGORIES,
+  REVIEW_REPLY_MAX,
   isListingCategory,
   isReportReason,
 } from '../types';
@@ -95,6 +97,7 @@ import {
   readDb,
   verifyPassword,
   type MockDb,
+  type ReviewReplyRow,
 } from './store';
 import {
   optionalActorId,
@@ -529,6 +532,25 @@ function withListing(db: MockDb, order: Order, viewerId: string | null): OrderWi
  * this function LEAVES OUT is the point — see the doc comment on
  * `PublicReview` for why each omitted column is omitted.
  */
+/**
+ * `public.public_review_replies`, as a projection.
+ *
+ * Field by field for the reason `toPublicReview()` gives: a spread would carry
+ * `is_demo` — which no client role is granted and which tells a visitor which
+ * rows are fabricated — and every column a future migration adds.
+ */
+function toPublicReviewReply(db: MockDb, row: ReviewReplyRow): PublicReviewReply {
+  const profile = db.profiles.find((p) => p.id === row.coach_id);
+  return {
+    id: row.id,
+    review_id: row.review_id,
+    coach_id: row.coach_id,
+    body: row.body,
+    created_at: row.created_at,
+    coach_name: profile ? toPublicProfile(profile).full_name : 'Unknown coach',
+  };
+}
+
 function toPublicReview(db: MockDb, review: Review): PublicReview {
   const profile = db.profiles.find((p) => p.id === review.author_id);
   // A field-by-field projection, NOT `{ ...review, author_name }`. That is the
@@ -2178,6 +2200,75 @@ export class MockDataClient implements DataClient {
       };
       db.reviews.push(review);
       return copy(review);
+    });
+  }
+
+  async listReviewReplies(reviewIds: readonly string[]): Promise<PublicReviewReply[]> {
+    if (!Array.isArray(reviewIds) || reviewIds.length === 0) return [];
+    // Mirrors the `public.public_review_replies` view, which is public. No actor
+    // and no privilege check: a reply is published beside a review that is
+    // already public.
+    return readDb((db) => {
+      const wanted = new Set(reviewIds.filter((id) => typeof id === 'string' && id !== ''));
+      // DROPS ids with no reply, like `listOfferStats` and unlike
+      // `listCoachStats` — most reviews have no reply, and a placeholder row per
+      // review would be inventing a shape to describe an absence. The interface
+      // says so; callers key by `review_id`.
+      return db.review_replies
+        .filter((row) => wanted.has(row.review_id))
+        .map((row) => toPublicReviewReply(db, row));
+    });
+  }
+
+  async createReviewReply(actor: Actor, reviewId: string, body: string): Promise<PublicReviewReply> {
+    const id = requireText(reviewId, 'Review', 200);
+    const text = requireText(body, 'Reply', REVIEW_REPLY_MAX, 3);
+
+    return mutateDb((db) => {
+      // Mirrors: policy `review_replies_insert_coach` —
+      //   with check (
+      //     coach_id = auth.uid()
+      //     and exists (select 1 from public.reviews r
+      //                   join public.listings l on l.id = r.listing_id
+      //                  where r.id = review_id and l.coach_id = auth.uid())
+      //   )
+      // plus the UNIQUE constraint on review_replies.review_id.
+      const profile = resolveProfile(db, actor);
+
+      const review = db.reviews.find((r) => r.id === id);
+      if (!review) throw new DataError('not_found', 'That review could not be found.');
+
+      // NO isWithdrawn() FILTER, matching the SQL and for the same reason
+      // `createReview` has none: a withdrawn offer keeps its reviews — the offer
+      // page renders a tombstone over them — and a coach who took an offer down
+      // should still be able to answer what was said about it.
+      const listing = db.listings.find((l) => l.id === review.listing_id);
+      if (!listing) throw new DataError('not_found', 'That offer could not be found.');
+
+      // THE entitlement, and it is ownership of the offer rather than the
+      // actor's role. An approved coach answering a review of somebody else's
+      // offer would be publishing under their own name on a page they do not
+      // own; `coach_status` says nothing about that either way.
+      if (listing.coach_id !== profile.id) {
+        throw new DataError('forbidden', 'You can only reply to a review of your own offer.');
+      }
+
+      if (db.review_replies.some((r) => r.review_id === review.id)) {
+        throw new DataError('conflict', 'You have already replied to this review.');
+      }
+
+      const row: ReviewReplyRow = {
+        id: newId(),
+        review_id: review.id,
+        // From the RESOLVED profile, never from input — the same rule
+        // `createReview` follows for `author_id`.
+        coach_id: profile.id,
+        body: text,
+        created_at: nowIso(),
+        is_demo: false,
+      };
+      db.review_replies.push(row);
+      return toPublicReviewReply(db, row);
     });
   }
 

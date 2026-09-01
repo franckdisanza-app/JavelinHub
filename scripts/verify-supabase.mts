@@ -74,6 +74,8 @@
  */
 // `@next/env` is CommonJS, so it has no named exports through the ESM loader —
 // the default import is the whole module object.
+import { randomBytes } from 'node:crypto';
+
 import nextEnv from '@next/env';
 
 import { FULFILMENT_MODES, LISTING_CATEGORIES } from '@/lib/data/types';
@@ -443,9 +445,24 @@ expectEqual(
 );
 
 const grantAnon = await rpc('grant_admin', { p_user_id: '00000000-0000-4000-8000-000000000001' });
-// Not granted to `authenticated` at all, so this is a function-level refusal
-// rather than one from inside the body. Either way it must not succeed.
 expectEqual('grant_admin is not callable through the API', grantAnon.status >= 400, true);
+// SINCE 0031 IT IS A FUNCTION-LEVEL REFUSAL, and the distinction is the whole
+// point of that migration. Before it, the grant Supabase's bootstrap default
+// privileges had added behind 0002's back was still in place, so the call
+// reached the body and came back with the body's own sentence — "Only an
+// administrator can grant administrator access." It looked identical from
+// outside and was held by one lock instead of two.
+//
+// So this asserts the SQLSTATE rather than merely a 4xx: a later blanket grant
+// would put the authored sentence back, which is a pass under `status >= 400`
+// and a silent regression. `record_admin_action` shipped exactly that hole for
+// five migrations (0019 → 0024).
+expectEqual('...at the grant, not from inside the body (0031)', grantAnon.code, '42501');
+expectEqual(
+  '...so the body never runs and its sentence is not what comes back',
+  (grantAnon.message ?? '').includes('administrator can grant'),
+  false,
+);
 note(`grant_admin → ${grantAnon.code ?? grantAnon.status}: ${truncate(grantAnon.message)}`);
 
 const redeemAnon = await rpc('redeem_invite_code', { p_code: 'AAAA-AAAA-AAAA' });
@@ -535,7 +552,15 @@ expectSqlState(
 
 // The function IS callable by anon. A limiter that only applied to signed-in
 // callers would protect none of the forms it exists for.
-const probeBucket = `verify-supabase-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+//
+// SINCE 0030 THE BUCKET HAS A SHAPE, and these probes have to have it. The
+// function admits anything that is not 64 lowercase hex characters and counts
+// it against nothing — so a probe bucket like the old
+// `verify-supabase-<base36>` made every assertion below pass vacuously: five of
+// them flipped to failures the moment 0030 landed, which is the suite doing its
+// job. `randomBytes(32).toString('hex')` is exactly what `bucketFor()` in
+// `src/lib/rate-limit.ts` produces, minus the HMAC.
+const probeBucket = randomBytes(32).toString('hex');
 const first = await rpc('consume_rate_limit', { p_bucket: probeBucket, p_limit: 2, p_window_seconds: 60 });
 expectEqual('anon may consume a rate limit', first.status, 200);
 expectEqual('...and the first attempt is admitted', first.body, true);
@@ -561,13 +586,46 @@ expectEqual(
 // about this bucket rather than about the function refusing everything.
 expectEqual(
   'a different bucket has its own budget',
-  (await rpc('consume_rate_limit', { p_bucket: `${probeBucket}-other`, p_limit: 2, p_window_seconds: 60 })).body,
+  (await rpc('consume_rate_limit', { p_bucket: randomBytes(32).toString('hex'), p_limit: 2, p_window_seconds: 60 })).body,
   true,
 );
+
+// ---------------------------------------------------------------------------
+// 0030 — the bucket shape, which is the half that keeps anon from filling the
+// table one row per request.
+// ---------------------------------------------------------------------------
+// EVERY ONE OF THESE EXPECTS `true`, and that is the point rather than an
+// oversight. 0030's own header: "Returning `false` would mean a caller could
+// deny service to anybody by guessing at the shape rule, which inverts the
+// whole posture. So a malformed bucket is admitted and simply not counted."
+//
+// What cannot be asserted from here is the half that matters most — that no ROW
+// was created — because `rate_limits` is unreadable by every client role, which
+// the two assertions at the top of this section prove. The observable
+// consequence is this: a malformed bucket never runs out, however often it is
+// called, because nothing is counting it.
+for (const [shape, bucket] of [
+  ['a bucket of the wrong length', randomBytes(16).toString('hex')],
+  ['a bucket with uppercase hex', randomBytes(32).toString('hex').toUpperCase()],
+  ['a bucket that is not hex at all', `verify-supabase-${Date.now().toString(36)}`],
+  ['an empty bucket', ''],
+] as Array<[string, string]>) {
+  // A limit of 1, called twice. A counted bucket would refuse the second call;
+  // an uncounted one admits both.
+  await rpc('consume_rate_limit', { p_bucket: bucket, p_limit: 1, p_window_seconds: 60 });
+  expectEqual(
+    `${shape} is admitted and counted against nothing`,
+    (await rpc('consume_rate_limit', { p_bucket: bucket, p_limit: 1, p_window_seconds: 60 })).body,
+    true,
+  );
+}
 // Degenerate arguments fail CLOSED inside the function. They cannot arrive from
 // the app — the budgets are constants — so the only caller who can send one is
 // somebody probing, and a zero window would otherwise make every row instantly
 // stale and the limiter a no-op that still looks installed.
+//
+// The bucket here must be WELL-FORMED, or 0030's shape guard returns `true`
+// before any of these checks is reached and all three assert nothing.
 for (const [shape, args] of [
   ['a zero limit', { p_bucket: probeBucket, p_limit: 0, p_window_seconds: 60 }],
   ['a negative limit', { p_bucket: probeBucket, p_limit: -1, p_window_seconds: 60 }],
@@ -575,6 +633,96 @@ for (const [shape, args] of [
 ] as Array<[string, Record<string, unknown>]>) {
   expectEqual(`${shape} is refused rather than ignored`, (await rpc('consume_rate_limit', args)).body, false);
 }
+
+// ===========================================================================
+// ===========================================================================
+section('Review replies — public to read, owner-only to write (0032)');
+// ===========================================================================
+// The insert policy has two conjuncts and neither implies the other, so the
+// interesting refusals are the ones a SIGNED-IN caller would hit — and those
+// live in the write tier. What anon can prove is the shape of the surface:
+// the read model is public, the base table is not writable, and the removal
+// RPC answers with its own sentence rather than a Postgres one.
+
+expectEqual(
+  'public_review_replies is readable by anon',
+  (await rest('public_review_replies?select=id,review_id,coach_id,body,created_at,coach_name&limit=1')).status,
+  200,
+);
+
+// `is_demo` is granted to no client role. A star select is the probe that
+// catches a later blanket grant putting it back — the same trap 0002 warns
+// about for `listings.deleted_by`, which the suite already checks above.
+expectSqlState(
+  'select=* on the base table is refused — is_demo is granted to nobody',
+  await rest('review_replies?select=*&limit=1'),
+  '42501',
+);
+expectEqual(
+  'the granted projection IS readable, so the refusal above is about the column',
+  (await rest('review_replies?select=id,review_id,coach_id,body,created_at&limit=1')).status,
+  200,
+);
+
+expectSqlState(
+  'anon cannot insert a reply',
+  await rest('review_replies', {
+    method: 'POST',
+    body: { review_id: '00000000-0000-4000-8000-000000000001', coach_id: '00000000-0000-4000-8000-000000000001', body: 'x' },
+    prefer: 'return=minimal',
+  }),
+  '42501',
+);
+// NO UPDATE POLICY EXISTS FOR ANY ROLE, which is the property that makes a
+// published reply immutable the way a published review is. Asserted rather than
+// assumed: a later `for all` policy would silently reopen it.
+expectSqlState(
+  'nobody can update a reply — there is no policy for any role',
+  await rest('review_replies?id=eq.00000000-0000-4000-8000-000000000001', {
+    method: 'PATCH',
+    body: { body: 'rewritten' },
+    prefer: 'return=minimal',
+  }),
+  '42501',
+);
+expectSqlState(
+  'nor delete one outside remove_review_reply()',
+  await rest('review_replies?id=eq.00000000-0000-4000-8000-000000000001', { method: 'DELETE', prefer: 'return=minimal' }),
+  '42501',
+);
+
+const removeReplyAnon = await rpc('remove_review_reply', {
+  p_reply_id: '00000000-0000-4000-8000-000000000001',
+  p_reason: 'probe',
+});
+expectEqual('remove_review_reply refuses an anonymous caller', removeReplyAnon.status >= 400, true);
+// AT THE GRANT, NOT FROM INSIDE THE BODY — and that is the stronger outcome,
+// not a weaker one. 0032 grants EXECUTE to `authenticated` only and revokes the
+// bootstrap's grants from anon and service_role by name, so an anonymous caller
+// never reaches the `is_admin()` check at all. Compare `claim_offer` and
+// `redeem_invite_code`, which ARE granted to anon and therefore answer with
+// their own authored sentence.
+//
+// Asserted as a SQLSTATE rather than merely a 4xx, for the reason the
+// `grant_admin` assertion gives: a later blanket grant would put the body's
+// sentence back, which still refuses but is held by one lock instead of two —
+// exactly the regression 0024 and 0031 were each written to close.
+expectEqual('...at the grant, not from inside the body', removeReplyAnon.code, '42501');
+expectEqual(
+  '...so the body never runs and its sentence is not what comes back',
+  (removeReplyAnon.message ?? '').includes('administrator can remove'),
+  false,
+);
+
+// `demo_data_summary` gained a tenth table in 0032, which meant dropping and
+// recreating the view — and on this project that RE-GRANTS it. 0027 did exactly
+// that and reopened the leak 0007 had closed. This is the assertion that would
+// have caught it.
+expectSqlState(
+  'demo_data_summary is still revoked after 0032 recreated it',
+  await rest('demo_data_summary?select=*'),
+  '42501',
+);
 
 // ===========================================================================
 section('Moderation — the archive, and the routes that were closed');

@@ -38,6 +38,15 @@ import { Wordmark } from '@/components/wordmark';
 const FOOTER_LINK =
   'inline-flex min-h-11 items-center font-display text-display-22 font-bold leading-none tracking-[0.005em] uppercase text-muted transition-colors hover:text-ink';
 
+/*
+ * The legal row. Body face at the smallest body step, underlined — these are
+ * documents rather than destinations, and the underline is what says so. Still
+ * `min-h-11`: they are standalone links, so WCAG 2.5.5's in-a-sentence
+ * exception does not cover them either.
+ */
+const LEGAL_LINK =
+  'inline-flex min-h-11 items-center text-body-15 text-muted underline decoration-line underline-offset-2 transition-colors hover:text-ink hover:decoration-ink';
+
 export function SiteFooter() {
   return (
     <footer className="border-t border-line bg-surface">
@@ -48,20 +57,42 @@ export function SiteFooter() {
             A local proof of concept. Accounts, offers, reviews and invite codes are demo data.
           </p>
         </div>
-        <nav aria-label="Footer" className="flex flex-wrap gap-x-6">
-          <Link href="/offers" className={FOOTER_LINK}>
-            Offers
-          </Link>
-          <Link href="/coaches" className={FOOTER_LINK}>
-            Coaches
-          </Link>
-          <Link href="/coach/apply" className={FOOTER_LINK}>
-            Become a coach
-          </Link>
-          <Link href="/redeem" className={FOOTER_LINK}>
-            Redeem an invite
-          </Link>
-        </nav>
+        {/*
+          TWO NAVS, NOT ONE ROW OF EIGHT. The first four are places to go; the
+          last three are documents you consult, and they are set at the body
+          scale rather than the display one because a legal link that shouts as
+          loudly as "Offers" is a legal link nobody believes is load-bearing.
+          Stripe requires all three to be reachable from the site during Connect
+          onboarding, so they are in the footer of every page rather than on a
+          single page somewhere.
+        */}
+        <div className="flex flex-col gap-4 sm:items-end">
+          <nav aria-label="Footer" className="flex flex-wrap gap-x-6">
+            <Link href="/offers" className={FOOTER_LINK}>
+              Offers
+            </Link>
+            <Link href="/coaches" className={FOOTER_LINK}>
+              Coaches
+            </Link>
+            <Link href="/coach/apply" className={FOOTER_LINK}>
+              Become a coach
+            </Link>
+            <Link href="/redeem" className={FOOTER_LINK}>
+              Redeem an invite
+            </Link>
+          </nav>
+          <nav aria-label="Legal" className="flex flex-wrap gap-x-5 gap-y-1">
+            <Link href="/legal/terms" className={LEGAL_LINK}>
+              Terms
+            </Link>
+            <Link href="/legal/privacy" className={LEGAL_LINK}>
+              Privacy
+            </Link>
+            <Link href="/legal/refunds" className={LEGAL_LINK}>
+              Refunds
+            </Link>
+          </nav>
+        </div>
       </div>
     </footer>
   );

@@ -1642,6 +1642,94 @@ await mutateDb((store) => {
 expectEqual('legacy fixture removed', (await db.getListing(legacyId)) === null, true);
 
 // ---------------------------------------------------------------------------
+// ===========================================================================
+section('createReviewReply — the answer belongs to whoever owns the offer');
+// ===========================================================================
+// 0032. The entitlement here is NOT a role: `coach_status` says nothing about
+// which reviews a coach may answer. It is ownership of the listing the review
+// is about, resolved from the review by the data layer and checked a third time
+// by `review_replies_insert_coach` in Postgres.
+//
+// These mirror the policy's two `with check` conjuncts. Both are needed and
+// neither implies the other: an approved coach passing only `coach_id =
+// auth.uid()` could answer every review on the site under their own byline.
+
+const fundamentalsReviews = await all.listReviewsForListing(OFFER.fundamentals);
+const someReview = fundamentalsReviews[0];
+expectEqual('there is a seeded review to answer', typeof someReview?.id, 'string');
+
+await refuses('anon cannot reply to a review', 'unauthorized', () =>
+  db.createReviewReply(ANON, someReview!.id, 'An anonymous answer.'),
+);
+
+// THE LOAD-BEARING ONE. A learner is not a coach; a coach who does not own this
+// offer is not its coach. Both are refused for the same reason and by the same
+// line, and the second is the one an approved seller could actually attempt.
+await refuses('a learner cannot reply to a review', 'forbidden', () =>
+  db.createReviewReply(LEARNER, someReview!.id, 'Not my offer, not my reply.'),
+);
+await refuses('an admin cannot reply in the coach’s name', 'forbidden', () =>
+  db.createReviewReply(ADMIN, someReview!.id, 'Administrative answer.'),
+);
+
+// Forged actor shapes, the same three `createReview` is probed with: the data
+// layer re-reads the review and the listing from the store, so nothing the
+// caller attaches to the actor changes the answer.
+for (const [shape, actor] of [
+  ['extra role property', { userId: LEARNER!.userId, role: 'admin' } as unknown as Actor],
+  ['a forged coach_id claim', { userId: LEARNER!.userId, coach_id: COACH!.userId } as unknown as Actor],
+  ['role on the PROTOTYPE chain', Object.assign(Object.create({ role: 'admin' }), { userId: LEARNER!.userId }) as Actor],
+] as Array<[string, Actor]>) {
+  await refuses(`forged actor (${shape}) still cannot reply`, 'forbidden', () =>
+    db.createReviewReply(actor, someReview!.id, 'Forged with a crafted actor.'),
+  );
+}
+
+await refuses('replying to a review that does not exist', 'not_found', () =>
+  db.createReviewReply(COACH, '00000000-0000-4000-8000-0000000dead9', 'No such review.'),
+);
+
+// The owner CAN, and it lands.
+const publishedReply = await db.createReviewReply(COACH, someReview!.id, 'Thank you — glad the block work helped.');
+expectEqual('the owning coach may reply', publishedReply.review_id, someReview!.id);
+expectEqual('...attributed to the coach, not the caller’s claim', publishedReply.coach_id, COACH!.userId);
+
+// THE PROJECTION IS THE SAFETY PROPERTY, the same assertion `public_reviews`
+// gets. `is_demo` is granted to no client role in 0032 and must not appear on
+// the read model; a spread instead of a field-by-field projection would put it
+// there, along with every column a future migration adds.
+expectShape('a reply publishes exactly six fields', publishedReply, [
+  'id',
+  'review_id',
+  'coach_id',
+  'body',
+  'created_at',
+  'coach_name',
+]);
+
+// One per review, as a UNIQUE constraint rather than as application logic.
+await refuses('a second reply to the same review is refused', 'conflict', () =>
+  db.createReviewReply(COACH, someReview!.id, 'Answering twice.'),
+);
+
+// The batched read drops ids it has no row for — most reviews have no reply, so
+// a placeholder per review would be inventing a shape to describe an absence.
+// A caller that zipped positionally would print this answer under a different
+// buyer's review.
+const unrepliedId = fundamentalsReviews[1]?.id ?? someReview!.id;
+const batchedReplies = await db.listReviewReplies([someReview!.id, unrepliedId, '00000000-0000-4000-8000-0000000dead9']);
+expectEqual('listReviewReplies returns only reviews that HAVE one', batchedReplies.length, 1);
+expectEqual('...and it is keyed by review_id, not by position', batchedReplies[0]?.review_id, someReview!.id);
+expectEqual('an empty request reads nothing', (await db.listReviewReplies([])).length, 0);
+
+// Public: no actor, and the same answer for a stranger as for the coach.
+expectEqual(
+  'a reply is public — anon reads the same row',
+  (await db.listReviewReplies([someReview!.id]))[0]?.body,
+  publishedReply.body,
+);
+
+// ===========================================================================
 section('createReview — a review cannot be forged for an order you do not own');
 // ---------------------------------------------------------------------------
 // This is the criterion the round exists to satisfy. Everything a review claims

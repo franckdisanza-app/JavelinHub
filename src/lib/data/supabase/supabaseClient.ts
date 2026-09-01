@@ -81,6 +81,7 @@ import {
   COACH_HEADLINE_MAX,
   DataError,
   LISTING_CATEGORIES,
+  REVIEW_REPLY_MAX,
   isListingCategory,
   isReportReason,
   type Actor,
@@ -106,6 +107,7 @@ import {
   type PublicCoach,
   type PublicProfile,
   type PublicReview,
+  type PublicReviewReply,
   type PublicReviewWithListing,
   type Report,
   type ReportReason,
@@ -2450,6 +2452,86 @@ export class SupabaseDataClient implements DataClient {
     }
     if (!data) throw new DataError('invalid', 'That review could not be saved.');
     return data as Review;
+  }
+
+  async listReviewReplies(reviewIds: readonly string[]): Promise<PublicReviewReply[]> {
+    if (!Array.isArray(reviewIds) || reviewIds.length === 0) return [];
+    // Shape-filtered like `listOfferStats`: a malformed id simply has no row,
+    // which is what "unknown ids are skipped" means.
+    const ids = reviewIds.filter((id) => typeof id === 'string' && isUuid(id));
+    if (ids.length === 0) return [];
+
+    // PUBLIC context. `public_review_replies` is an owner-run view granted to
+    // anon, so this must not go through the request-scoped client — a cached
+    // public read may not touch `cookies()` anywhere in its stack.
+    const ctx = await openPublicContext();
+    const { data, error } = await ctx.supabase
+      .from('public_review_replies')
+      .select('id, review_id, coach_id, body, created_at, coach_name')
+      .in('review_id', ids);
+    if (error) {
+      // Same reasoning as `listOfferStats`: one malformed id inside an `in`
+      // list fails the whole cast and would take the valid ids down with it.
+      if (isMalformedId(error)) return [];
+      throwDataError(error, ctx.userId !== null);
+    }
+    return (data ?? []) as PublicReviewReply[];
+  }
+
+  async createReviewReply(actor: Actor, reviewId: string, body: string): Promise<PublicReviewReply> {
+    const id = requireText(reviewId, 'Review', 200);
+    const text = requireText(body, 'Reply', REVIEW_REPLY_MAX, 3);
+
+    const ctx = await openAuthedContext(actor);
+
+    // The review, then the listing behind it. Read rather than trusted: the
+    // entitlement is ownership of the offer, and the only authority on that is
+    // the listing row. `review_replies_insert_coach` checks the same join in
+    // Postgres, so this produces a sentence rather than being the boundary.
+    const { data: reviewRow, error: reviewError } = await ctx.supabase
+      .from('public_reviews')
+      .select('id, listing_id')
+      .eq('id', id)
+      .maybeSingle();
+    if (reviewError) {
+      if (isMalformedId(reviewError)) throw new DataError('not_found', 'That review could not be found.');
+      throwDataError(reviewError, true);
+    }
+    if (!reviewRow) throw new DataError('not_found', 'That review could not be found.');
+
+    // NO `deleted_at` FILTER — `readListingRow` returns the row whatever its
+    // withdrawal state, which is what lets a coach answer a review of an offer
+    // they have since taken down. Matches the policy, which has no such clause.
+    const listing = await this.readListingRow(ctx, (reviewRow as { listing_id: string }).listing_id);
+    if (!listing) throw new DataError('not_found', 'That offer could not be found.');
+    if (listing.coach_id !== ctx.userId) {
+      throw new DataError('forbidden', 'You can only reply to a review of your own offer.');
+    }
+
+    const { data, error } = await ctx.supabase
+      .from('review_replies')
+      .insert({ review_id: id, coach_id: ctx.userId, body: text })
+      // The INSERT grant covers three columns and the SELECT grant covers five,
+      // so the returning projection names them rather than using `*`: `is_demo`
+      // is granted to nobody and a bare star would be refused.
+      .select('id, review_id, coach_id, body, created_at')
+      .maybeSingle();
+    if (error) {
+      // 23505 on the UNIQUE constraint is the real guard against a double
+      // submit; there is no pre-check here because there is nothing nicer to
+      // say than what this maps to.
+      if (error.code === '23505') {
+        throw new DataError('conflict', 'You have already replied to this review.');
+      }
+      throwDataError(error, true);
+    }
+    if (!data) throw new DataError('invalid', 'That reply could not be saved.');
+
+    // The view is what carries `coach_name`, and the insert cannot return it.
+    // Read it from the actor's own profile rather than re-querying: the coach
+    // IS the author here, so this is a self-read.
+    const me = await this.getProfile(actor, ctx.userId);
+    return { ...(data as Omit<PublicReviewReply, 'coach_name'>), coach_name: me?.full_name ?? '' };
   }
 
   // -------------------------------------------------------------------------

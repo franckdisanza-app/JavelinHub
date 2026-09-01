@@ -108,6 +108,25 @@ export interface RateLimit {
   window_started_at: string;
 }
 
+/**
+ * `public.review_replies` (0032) as a stored row.
+ *
+ * Its own local interface rather than one in `types.ts` because `types.ts`
+ * publishes the READ MODEL — `PublicReviewReply`, which carries `coach_name`
+ * and no `is_demo`. The stored row is the other shape, and keeping them
+ * separate is what stops `is_demo` reaching a page: there is no type in the app
+ * that has both a body and that flag. `RateLimit` and `PasswordReset` above are
+ * here for the same reason.
+ */
+export interface ReviewReplyRow {
+  id: string;
+  review_id: string;
+  coach_id: string;
+  body: string;
+  created_at: string;
+  is_demo: boolean;
+}
+
 export interface MockDb {
   /** Bumped when the on-disk shape changes; a mismatch triggers a reseed. */
   version: number;
@@ -120,6 +139,14 @@ export interface MockDb {
   listing_revisions: ListingRevision[];
   orders: Order[];
   reviews: Review[];
+  /**
+   * Coach answers to reviews. Mirrors `public.review_replies` (0032).
+   *
+   * The ROW, not the read model — it carries `is_demo`, which no client role may
+   * read and which `toPublicReviewReply()` projects away, exactly as the
+   * Supabase column grant does.
+   */
+  review_replies: ReviewReplyRow[];
   /** Personalised delivery files. Paths only — the mock has no file storage. */
   deliverables: Deliverable[];
   /** Pending password resets. Mock only — GoTrue owns this on Supabase. */
@@ -155,6 +182,7 @@ function emptyDb(): MockDb {
     listing_revisions: [],
     orders: [],
     reviews: [],
+    review_replies: [],
     deliverables: [],
     password_resets: [],
     rate_limits: [],

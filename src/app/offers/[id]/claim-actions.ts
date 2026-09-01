@@ -8,6 +8,8 @@ import { getDataClient } from '@/lib/data';
 import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError } from '@/lib/data/types';
 import { formError, toFormState, type FormState } from '@/lib/forms';
+import { notifyBuyerOfOrder } from '@/lib/email/notifications';
+import { formatPrice } from '@/lib/format';
 import { consume, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
 
 /**
@@ -46,8 +48,20 @@ export async function claimOfferAction(_prev: FormState, formData: FormData): Pr
   }
 
   let needsLogin = false;
+  let placed: { title: string; orderId: string; priceCents: number } | null = null;
   try {
-    await getDataClient().createOrder(actor, listingId);
+    const db = getDataClient();
+    const order = await db.createOrder(actor, listingId);
+    /*
+     * Read back for the confirmation email only. `createOrder` returns the
+     * order, which carries `price_cents_at_purchase` and the listing id but not
+     * the title — and the title is the one thing a person needs in order to
+     * recognise what the message is about.
+     */
+    const listing = await db.getListing(listingId);
+    placed = listing
+      ? { title: listing.title, orderId: order.id, priceCents: order.price_cents_at_purchase }
+      : null;
   } catch (error) {
     if (!isDataError(error)) throw error;
     // Deferred: `redirect()` throws and must not be thrown from inside a catch.
@@ -58,6 +72,35 @@ export async function claimOfferAction(_prev: FormState, formData: FormData): Pr
   // An anonymous visitor is sent to sign in and returned to the offer, rather
   // than being told to sign in and left where they were.
   if (needsLogin) redirect(loginPath(`/offers/${listingId}`));
+
+  /*
+   * The buyer's own copy of what they claimed.
+   *
+   * THE ONLY ONE OF THE THREE NOTIFICATIONS THAT CAN BE SENT FROM AN ACTION,
+   * and the reason is worth knowing before somebody adds the other two here:
+   * `profiles` carries an email, so it is readable only by its owner and by an
+   * administrator. The recipient here IS the actor, so this is a self-read. The
+   * coach's "you have a new order" needs an address this session may not read,
+   * and waits on an outbox — see `src/lib/email/notifications.ts`.
+   *
+   * After the write and before the redirect, and it cannot fail the claim:
+   * `sendEmail` logs and skips while `RESEND_API_KEY` is unset, and never
+   * throws. An order that succeeded must not be reported as failed because a
+   * mail provider was down.
+   */
+  if (placed && actor) {
+    const me = await getDataClient()
+      .getProfile(actor, actor.userId)
+      .catch(() => null);
+    if (me) {
+      await notifyBuyerOfOrder({
+        buyerEmail: me.email,
+        offerTitle: placed.title,
+        orderId: placed.orderId,
+        price: formatPrice(placed.priceCents),
+      });
+    }
+  }
 
   // The sales count on this offer, on the coach's page and on every card that
   // shows it are all stale now.

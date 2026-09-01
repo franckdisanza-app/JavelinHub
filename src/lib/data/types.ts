@@ -811,6 +811,35 @@ export interface PublicReview {
 }
 
 /**
+ * `public.public_review_replies` — a coach's answer to a review of their offer.
+ *
+ * A PROJECTION for the same reasons {@link PublicReview} is one, and with the
+ * same omission that matters most: `is_demo` is not on it and is not granted to
+ * any client role. The coach is attributed by display name, joined through
+ * `public_profiles` so a `Profile` and its email cannot be reached from here.
+ *
+ * THERE IS NO `updated_at`, and unlike on a review that is not merely because
+ * nothing edits it — 0032 grants no UPDATE policy to any role at all, so a
+ * published reply is immutable for everybody including its author. The same
+ * rule `reviews` follows since 0016, applied to the answer as well as to the
+ * question.
+ *
+ * One per review, as a UNIQUE constraint on `review_id`. A thread is a
+ * different feature with different moderation problems.
+ */
+export interface PublicReviewReply {
+  id: string;
+  review_id: string;
+  coach_id: string;
+  body: string;
+  created_at: string;
+  coach_name: string;
+}
+
+/** Bounds mirrored from `review_replies_body_length` in 0032. */
+export const REVIEW_REPLY_MAX = 2000;
+
+/**
  * A public review joined to the offer it is about, for a coach's profile —
  * where reviews of several different offers appear in one list.
  */

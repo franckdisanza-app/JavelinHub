@@ -65,6 +65,12 @@ export default function robots(): MetadataRoute.Robots {
           '/signup',
           '/forgot-password',
           '/reset-password',
+          // NOTE: `/legal/*` is deliberately absent — terms, privacy and the
+          // refund policy are meant to be found, and Stripe checks they are
+          // reachable during Connect onboarding. While `src/lib/legal.ts` still
+          // has gaps each of those pages sets its own `robots: { index: false }`
+          // in metadata, which is the right instrument: the condition is
+          // computed, and this file is a static list.
         ],
       },
     ],

@@ -177,6 +177,7 @@ import type {
   PublicCoach,
   PublicProfile,
   PublicReview,
+  PublicReviewReply,
   PublicReviewWithListing,
   RemovedReviewWithNames,
   Report,
@@ -1257,6 +1258,40 @@ export interface DataClient {
   removeDeliverable(actor: Actor, deliverableId: string): Promise<string>;
 
   createReview(actor: Actor, input: CreateReviewInput): Promise<Review>;
+
+  /**
+   * The replies for a set of reviews, in one read.
+   *
+   * BATCHED, and for exactly the reason {@link listOfferStats} is: a review list
+   * is a list, and a `getReviewReply` per row is the N+1 that only becomes a
+   * performance cliff after the backend swap. Like `listOfferStats` and unlike
+   * `listCoachStats`, it **drops ids it has no row for** — most reviews have no
+   * reply, so returning a placeholder per review would be inventing rows to
+   * describe an absence. Callers key the result by `review_id`; nothing may zip
+   * it positionally.
+   *
+   * PUBLIC, so it takes no actor. A reply is published beside a review that is
+   * already public, and the read model projects away `is_demo`.
+   */
+  listReviewReplies(reviewIds: readonly string[]): Promise<PublicReviewReply[]>;
+
+  /**
+   * Publishes the selling coach's answer to a review of their own offer.
+   *
+   * THE ENTITLEMENT IS NOT THE ACTOR'S ROLE, it is ownership of the offer the
+   * review is about — an approved coach may not answer a review of somebody
+   * else's offer. Both backends resolve that themselves from the review, so
+   * nothing about it is caller-supplied; `review_replies_insert_coach` in 0032
+   * checks it a third time, in Postgres.
+   *
+   * Refuses a second reply to the same review (`conflict`), which the UNIQUE
+   * constraint enforces underneath. There is no edit and no delete for the
+   * author: removal is an administrator's, through `remove_review_reply()`.
+   *
+   * A withdrawn offer can still be answered, deliberately — its reviews outlive
+   * it and `/offers/[id]` renders them under a tombstone.
+   */
+  createReviewReply(actor: Actor, reviewId: string, body: string): Promise<PublicReviewReply>;
 
   // ---------------------------------------------------------------------------
   // Moderation — administrators only, all three

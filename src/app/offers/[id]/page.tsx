@@ -6,6 +6,8 @@ import { ListingCard } from '@/components/listing-card';
 import { Pager } from '@/components/pager';
 import { ReportForm } from '@/components/report-form';
 import { ReviewItem } from '@/components/review-item';
+import { ReviewReply } from '@/components/review-reply';
+import { ReviewReplyForm } from '@/components/review-reply-form';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardBody, CardFooter } from '@/components/ui/card';
@@ -183,6 +185,22 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
   const justPublished = firstValue(search.published) === '1';
 
   const reviewTotal = reviewPage.total ?? reviews.length;
+
+  /*
+   * ONE READ FOR THE WHOLE PAGE OF REVIEWS, keyed by `review_id`.
+   *
+   * Batched for the reason `listOfferStats` above is: a `getReviewReply` per
+   * row is the N+1 that only becomes a cliff after the backend swap. Keyed
+   * rather than zipped because `listReviewReplies` DROPS ids it has no row for
+   * — most reviews have no reply — so a positional zip would print one coach's
+   * answer under a different buyer's review.
+   *
+   * Not cached: `cachedListings` and friends serve strangers a browse grid that
+   * changes rarely, while this is one page's worth of a list that a coach
+   * expects to see their own reply appear in the moment they publish it.
+   */
+  const replies = await db.listReviewReplies(reviews.map((review) => review.id));
+  const replyByReviewId = new Map(replies.map((reply) => [reply.review_id, reply]));
   const salesCount = stats?.sales_count ?? 0;
   // Nothing sold and nothing written at this epoch: the one state that reads
   // "New offer". An offer that HAS sold and simply has no reviews yet is a
@@ -402,6 +420,16 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
                   */}
                   <ReviewItem review={review} />
                   {/*
+                    The coach's answer, when there is one. Keyed out of a map
+                    built from ONE batched read — `listReviewReplies` drops ids
+                    it has no row for, so `undefined` here means "no reply"
+                    rather than "not loaded", and a per-review read would be the
+                    N+1 the batched method exists to prevent.
+                  */}
+                  {replyByReviewId.get(review.id) ? (
+                    <ReviewReply reply={replyByReviewId.get(review.id)!} />
+                  ) : null}
+                  {/*
                     ONLY THE COACH WHOSE OFFER THIS IS, which is exactly the
                     entitlement `report_review()` enforces through a JOIN on
                     `listings`. Rendering it to anybody else would be a control
@@ -412,8 +440,23 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
                     A buyer with a complaint about a review is not the person
                     the report is for: they report the COACH, on the profile.
                   */}
+                  {/*
+                    Two controls, same entitlement, opposite purposes — and the
+                    reply comes first because it is the ordinary response and
+                    reporting is the exceptional one. Offering "report" above
+                    "reply" would frame every review as a problem.
+
+                    The reply form disappears once a reply exists: one per
+                    review is a UNIQUE constraint, so a second form could only
+                    ever produce a refusal.
+                  */}
                   {isOwnOffer ? (
-                    <ReportForm subject="review" id={review.id} subjectName={review.author_name} />
+                    <div className="flex flex-col gap-2">
+                      {replyByReviewId.has(review.id) ? null : (
+                        <ReviewReplyForm reviewId={review.id} authorName={review.author_name} />
+                      )}
+                      <ReportForm subject="review" id={review.id} subjectName={review.author_name} />
+                    </div>
                   ) : null}
                 </li>
               ))}

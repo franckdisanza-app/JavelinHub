@@ -197,6 +197,30 @@ export function requireSupabaseConfig(): {
 }
 
 /**
+ * Transactional-email configuration.
+ *
+ * `apiKey` is `null` until Resend is wired up, and `sendEmail()` treats that as
+ * "log and skip" rather than as an error — see `src/lib/email/send.ts` for why
+ * that is the right default rather than an unfinished one.
+ *
+ * `from` has a default and the default is deliberately a `.invalid` address:
+ * RFC 6761 reserves that TLD, so it can never resolve and can never be somebody
+ * else's mailbox. An unset sender that silently became `noreply@localhost` or a
+ * real-looking domain is how test mail ends up being delivered from an address
+ * the business does not control.
+ *
+ * NOT VALIDATED AS AN ADDRESS HERE. `assertRuntimeConfig()` does that at boot,
+ * because a malformed sender fails on the first send rather than at startup —
+ * which is exactly the class of silent production failure that check exists for.
+ */
+export function emailConfig(): { apiKey: string | null; from: string } {
+  return {
+    apiKey: read('RESEND_API_KEY') ?? null,
+    from: read('EMAIL_FROM') ?? 'JavelinHub <noreply@javelinhub.invalid>',
+  };
+}
+
+/**
  * =============================================================================
  * The boot check — every misconfiguration that is otherwise SILENT.
  * =============================================================================
@@ -297,6 +321,25 @@ export function assertRuntimeConfig(): void {
     if (supabaseUrl() === null) problems.push('NEXT_PUBLIC_SUPABASE_URL is unset, and DATA_BACKEND=supabase needs it.');
     if (supabaseAnonKey() === null) {
       problems.push('NEXT_PUBLIC_SUPABASE_ANON_KEY is unset, and DATA_BACKEND=supabase needs it.');
+    }
+  }
+
+  /*
+   * Only when mail is actually switched on. An unset `RESEND_API_KEY` is a
+   * supported state — `sendEmail()` logs and skips — so it is not a problem to
+   * report. A key that IS set beside a sender nobody can reply to, or one still
+   * pointing at the `.invalid` default, is: it means the first real
+   * notification goes out from an address that does not exist.
+   */
+  const mail = emailConfig();
+  if (mail.apiKey !== null) {
+    if (mail.from.includes('.invalid')) {
+      problems.push(
+        'RESEND_API_KEY is set but EMAIL_FROM is still the .invalid placeholder. Set it to a sender on a domain ' +
+          'verified in Resend, e.g. "JavelinHub <noreply@yourdomain.com>", or mail will be rejected or land in spam.',
+      );
+    } else if (!/^[^<>]*<[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>$|^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(mail.from)) {
+      problems.push(`EMAIL_FROM ("${mail.from}") is not an address or a "Name <address>" pair.`);
     }
   }
 

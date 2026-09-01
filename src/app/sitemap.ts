@@ -79,6 +79,15 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${origin}/offers`, changeFrequency: 'daily', priority: 0.9 },
     { url: `${origin}/coaches`, changeFrequency: 'daily', priority: 0.9 },
 
+    // The three documents. Listed unconditionally rather than behind
+    // `legalIsComplete()`: while they are incomplete each page carries its own
+    // `noindex`, which is the stronger and more specific signal, and a sitemap
+    // that silently changes shape is harder to reason about than one that does
+    // not. Low priority — they are consulted, not browsed.
+    { url: `${origin}/legal/terms`, changeFrequency: 'yearly', priority: 0.3 },
+    { url: `${origin}/legal/privacy`, changeFrequency: 'yearly', priority: 0.3 },
+    { url: `${origin}/legal/refunds`, changeFrequency: 'yearly', priority: 0.3 },
+
     // `updated_at` is the honest `lastModified`: it is stamped by the
     // `listings_set_updated_at` trigger on every edit, so it moves when the
     // page's content does.
