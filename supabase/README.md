@@ -1,22 +1,49 @@
 # `supabase/` — schema, RLS, and the mock → Postgres swap path
 
 **Applied.** Project ref `trocsdetpwyqcgyfclir`, PostgreSQL 17, migrations
-**0001-0018** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
+**0001-0028** pushed, `DATA_BACKEND=supabase`, and the app verified serving real
 pages off it.
 
+**0029, 0030 and 0031 are NOT pushed.** They are authored and reviewed, and
+none of them has been executed against a database — there is no local Postgres
+in this checkout to try them on. Each carries its header, the assertions to add
+to `verify:supabase` once it is applied, and a rollback. Read them before
+`npm run db:push`, and re-run `npm run verify:supabase` immediately after.
+
 **Bootstrapped.** An administrator exists, minted an invite code, and that code
-has been redeemed — so the approval path is open end to end for the first time.
-The project holds 5 profiles, 1 approved coach and no published listings; four
-of those profiles and the coach are `verify:supabase` fixtures, and the offer it
-published was withdrawn again at the end of the run. `seed.sql` has still never
-been run, so there is no fabricated data.
+has been redeemed — so the approval path is open end to end.
+
+**AND THEN SEEDED, WHICH IS THE THING TO KNOW BEFORE ANY LAUNCH.** An earlier
+revision of this paragraph said the project held 5 profiles and no listings and
+that "`seed.sql` has still never been run, so there is no fabricated data".
+That has not been true since `demo-seed.sql` was applied. As measured through
+PostgREST with the anon key:
+
+| | |
+|---|---|
+| profiles | 41 |
+| approved coaches | 6 |
+| published listings | 40 |
+| reviews | 31 |
+
+**Nobody bought any of it and nobody wrote a word of those reviews**, and they
+feed `offer_stats` and `coach_stats` exactly as real rows would — which is the
+whole reason `is_demo` exists. Before this project serves a real user, run
+`demo-teardown.sql` and then confirm the result:
+
+```bash
+npm run check:demo-data     # fails loudly while any is_demo row remains
+```
+
+Note the teardown's own caveat: the four `@javelinhub-verify.test` accounts
+predate the flag, carry `is_demo = false`, and are not removed by it.
 
 **The checks against the live database are now a script**, not a table
 somebody re-ran by hand: `npm run verify:supabase`. It asks PostgREST and
 GoTrue directly, with the same anon key a browser gets, and it is READ-ONLY by
 default because it runs against whatever `NEXT_PUBLIC_SUPABASE_URL` names —
-here, the live project. Last run: **64 passed, 0 failed**, with the write tiers
-skipped — see below, they can no longer provision fixtures against a project
+here, the live project. Last run: **102 passed, 0 failed, 1 skipped**, with the
+write tiers skipped — see below, they can no longer provision fixtures against a project
 that validates email domains.
 
 What the read-only tier covers, and why each one is here rather than in the
@@ -72,8 +99,8 @@ PostgREST request arrives as `authenticator`, service-role included. The suite
 confirms that rather than assuming it — `grant_admin` anonymously answers
 `42501 Only an administrator can grant administrator access.`
 
-The mock remains the code twin and is still what `npm run verify:authz` (995
-assertions) and `npm run verify:pages` (303) exercise — both hard-set
+The mock remains the code twin and is still what `npm run verify:authz` (1,161
+assertions) and `npm run verify:pages` (374) exercise — both hard-set
 `DATA_BACKEND=mock`, so **neither of those two covers `SupabaseDataClient`.**
 
 The app itself was separately checked serving real pages off this project:
@@ -107,6 +134,19 @@ MAIL has not.
 | `migrations/0016_review_moderation.sql` | `removed_reviews`, `remove_review()`, and the DROP of `reviews_update_admin` and `reviews_delete_admin` — both were routes around the audited one |
 | `migrations/0017_sync_profile_email.sql` | the `AFTER UPDATE OF email` trigger on `auth.users` — the only writer of `profiles.email` after signup, and without it an email change desyncs the copy forever |
 | `migrations/0018_delete_my_account.sql` | `profiles.deleted_at` and `delete_my_account()` — anonymise rather than erase, and the two refusals that fall out of what the privileged role cannot reach |
+| `migrations/0019_admin_actions.sql` | `admin_actions`, the append-only audit table, and `record_admin_action()` — **shipped with a hole**, see 0024 |
+| `migrations/0020_reports.sql` | `reports` — one queue for two subjects — plus `report_review()`, `report_coach()` and `resolve_report()` |
+| `migrations/0021_coach_status_suspended.sql` | adds `suspended` to `coach_status`. Not the same state as `rejected`, and must never be collapsed into it |
+| `migrations/0022_set_coach_status.sql` | `set_coach_status()` — suspend, demote, reinstate. Refuses while any of their offers is still on sale, because it cannot withdraw them itself |
+| `migrations/0023_audit_application_reviews.sql` | retrofits the `admin_actions` write onto `review_coach_application()` |
+| `migrations/0024_close_record_admin_action.sql` | **the revoke that actually closed 0019.** `revoke all … from public` does not touch the explicit grants Supabase's `alter default privileges` hands to `anon`, `authenticated` and `service_role`, so for five migrations any anonymous caller could POST a forged audit row |
+| `migrations/0025_delete_forged_audit_rows.sql` | deletes the two rows the probe that found it wrote |
+| `migrations/0026_coach_reviews_published_flag.sql` | `listing_published` on `public_coach_reviews`, so the coach profile can report a withdrawal without dropping the row and disagreeing with `coach_stats` |
+| `migrations/0027_demo_flag_for_newer_tables.sql` | `is_demo` on `removed_reviews`, `deliverables` and `reports`, and `demo_data_summary` widened to all nine |
+| `migrations/0028_demo_summary_revoke_again.sql` | re-revokes that summary, which 0027 had recreated and therefore re-granted |
+| `migrations/0029_input_bounds.sql` | **not pushed.** Length CHECKs on the six free-text columns the app bounds and the database did not, plus the `<order>/<uploader>/` shape on `deliverables.storage_path` — the third storage path, and the only one that was never pinned |
+| `migrations/0030_rate_limit_bucket_shape.sql` | **not pushed.** `consume_rate_limit()` refuses a bucket that is not 64 lowercase hex, so an anonymous caller can consume a limit without inserting an unbounded row per request. Admits rather than refuses, because the limiter must never be a denial of service |
+| `migrations/0031_close_grant_admin.sql` | **not pushed.** The revoke 0002 said it had made. `grant_admin` is safe today because its body tests `session_user`, not because the grant was closed — the second instance of the trap 0024 found |
 | `seed.sql` | demo fixtures — the SQL mirror of `seedDatabase()` in `src/lib/data/mock/store.ts`. **Fabricated purchases and reviews; do not load into a project real users will see.** Flags everything it inserts as `is_demo` |
 
 ### Finding fabricated data

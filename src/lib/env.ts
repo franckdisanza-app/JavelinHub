@@ -121,15 +121,43 @@ export function seedAdminPassword(): string {
  * rather than sending a poisoned link. Both are wanted; neither replaces the
  * other.
  *
- * Falls back to `http://localhost:3000` so local development needs no setup.
- * That fallback is only reachable when the variable is unset, and an unset
- * variable in production means reset links point at localhost, which is a
- * visible failure rather than a silent one.
+ * Falls back to `http://localhost:3000` so local development needs no setup —
+ * and **only** in development. In production the fallback is a throw.
+ *
+ * THE OLD COMMENT CLAIMED THE FALLBACK WAS "a visible failure rather than a
+ * silent one" IN PRODUCTION. It is not, and the reasoning was one step short.
+ * The chain runs: variable unset -> link built as `http://localhost:3000/...`
+ * -> GoTrue checks it against the project's Redirect URLs and refuses ->
+ * `resetPasswordForEmail` returns an error -> `requestPasswordReset` does not
+ * inspect it, deliberately, because inspecting it re-opens the account
+ * enumeration oracle -> `requestPasswordResetAction` swallows it, deliberately,
+ * for the same reason -> the user is told to check an inbox nothing was sent
+ * to. Every one of those swallows is individually correct, and together they
+ * make a misconfiguration invisible to the one person who would notice it: a
+ * user who is locked out and by definition cannot report it through the app.
+ *
+ * So the failure moves to the only place it can be loud — the first request
+ * that asks, in production, which is far earlier and far cheaper than a support
+ * thread about reset emails that never arrive. Development is untouched: the
+ * fallback still applies, so `npm run dev` and `verify:pages` need no setup.
  */
 export function siteUrl(): string {
   const value = process.env.NEXT_PUBLIC_SITE_URL;
-  const raw = value && value.trim() !== '' ? value.trim() : 'http://localhost:3000';
-  return raw.replace(/\/+$/, '');
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+
+  if (trimmed === '') {
+    if (isProduction()) {
+      missing(
+        'NEXT_PUBLIC_SITE_URL',
+        "It is this app's own public origin with no trailing slash, e.g. https://javelin-hub.vercel.app — " +
+          'and the same origin must be listed under Supabase → Authentication → URL Configuration → Redirect URLs, ' +
+          'or GoTrue refuses every emailed link.',
+      );
+    }
+    return 'http://localhost:3000';
+  }
+
+  return trimmed.replace(/\/+$/, '');
 }
 
 /**
@@ -166,4 +194,117 @@ export function requireSupabaseConfig(): {
   const anonKey =
     supabaseAnonKey() ?? missing(PUBLIC_KEYS[1], 'It is the anon/public API key from the Supabase dashboard.');
   return { url, anonKey, serviceRoleKey: supabaseServiceRoleKey() };
+}
+
+/**
+ * =============================================================================
+ * The boot check — every misconfiguration that is otherwise SILENT.
+ * =============================================================================
+ *
+ * Everything else in this module is lazy on purpose: importing it never throws,
+ * and only *asking for* a missing value does. That is right for a value one
+ * page needs, and it is exactly wrong for the four below, because nothing on a
+ * healthy-looking deployment ever asks for them until the damage is done.
+ *
+ * Each of these has already been written down somewhere in this repository as a
+ * failure that is invisible to the person who would report it:
+ *
+ *   DATA_BACKEND=mock       README.md: "`/` and `/login` return 200 while
+ *                           `/offers` and `/coaches` return 500." The store
+ *                           writes to a serverless filesystem that is read-only
+ *                           and not shared between invocations, so the marketing
+ *                           page comes up and the product does not.
+ *
+ *   SESSION_SECRET          `rate-limit.ts`: the limiter FAILS OPEN, deliberately
+ *                           and correctly, and `bucketFor()` reads this key
+ *                           inside the same `try`. So an unset secret does not
+ *                           produce an error anywhere — it produces signup,
+ *                           login, password reset and invite redemption with no
+ *                           throttle at all, and says nothing.
+ *
+ *   NEXT_PUBLIC_SITE_URL    `siteUrl()` above, at length: the link is built,
+ *                           GoTrue refuses it, `requestPasswordReset` does not
+ *                           inspect the error (that would re-open the
+ *                           enumeration oracle) and the user is told to check an
+ *                           inbox nothing was sent to. Every swallow in that
+ *                           chain is individually correct.
+ *
+ *   the Supabase pair       every page that reads data answers 500 while the two
+ *                           that do not keep answering 200.
+ *
+ * `siteUrl()` already throws on demand, and that is kept — this is the earlier,
+ * louder half of the same idea, not a replacement for it.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY IT IS SAFE TO THROW HERE, AND WHY CI IS NOT AFFECTED
+ * -----------------------------------------------------------------------------
+ * The only caller is `register()` in `src/instrumentation.ts`, and Next skips
+ * that hook entirely during a production build — `registerInstrumentation()` in
+ * `next/dist/server/lib/router-utils/instrumentation-globals.external.js` opens
+ * with *"Ensure registerInstrumentation is not called in production build"* and
+ * returns when `NEXT_PHASE` is `phase-production-build`.
+ *
+ * That distinction is the whole reason this can exist. `next build` sets
+ * `NODE_ENV=production`, so a check keyed on `isProduction()` alone would fire
+ * during the CI build — which passes `DATA_BACKEND=mock` deliberately and has no
+ * business knowing a deployment's own origin. The layout's `generateMetadata`
+ * is written as a function rather than a const for precisely this reason; the
+ * same trap, avoided a different way.
+ *
+ * -----------------------------------------------------------------------------
+ * IT REPORTS EVERY FAILURE AT ONCE
+ * -----------------------------------------------------------------------------
+ * A deploy that fails four times for four variables is four round trips through
+ * a build queue. All of them are collected and raised together.
+ */
+export function assertRuntimeConfig(): void {
+  if (!isProduction()) return;
+
+  const problems: string[] = [];
+
+  // Read directly rather than through `dataBackend()`: an invalid value should
+  // be reported as itself, beside the others, rather than throwing on its own
+  // and hiding the rest.
+  const backend = read('DATA_BACKEND');
+  if (backend === undefined || backend === 'mock') {
+    problems.push(
+      'DATA_BACKEND is "mock" (or unset, which means mock). The mock store writes to ./data/db.json, ' +
+        'and a serverless filesystem is read-only and not shared between invocations — so it cannot serve ' +
+        'a deployment even as a stopgap. Set DATA_BACKEND=supabase.',
+    );
+  } else if (backend !== 'supabase') {
+    problems.push(`DATA_BACKEND is "${backend}", which is neither "mock" nor "supabase".`);
+  }
+
+  if (read('SESSION_SECRET') === undefined) {
+    problems.push(
+      'SESSION_SECRET is unset. It keys the rate limiter\'s bucket HMAC on BOTH backends, and the limiter ' +
+        'fails open by design — so without it signup, login, password reset and invite redemption are ' +
+        'unthrottled and nothing says so. Generate one with: ' +
+        'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"',
+    );
+  }
+
+  if (typeof process.env.NEXT_PUBLIC_SITE_URL !== 'string' || process.env.NEXT_PUBLIC_SITE_URL.trim() === '') {
+    problems.push(
+      "NEXT_PUBLIC_SITE_URL is unset. It is this app's own public origin with no trailing slash, and it is " +
+        'the absolute base of every link GoTrue emails. Add the same origin to Supabase → Authentication → ' +
+        'URL Configuration → Redirect URLs, or GoTrue refuses the redirect and the failure reaches nobody.',
+    );
+  }
+
+  if (backend === 'supabase') {
+    if (supabaseUrl() === null) problems.push('NEXT_PUBLIC_SUPABASE_URL is unset, and DATA_BACKEND=supabase needs it.');
+    if (supabaseAnonKey() === null) {
+      problems.push('NEXT_PUBLIC_SUPABASE_ANON_KEY is unset, and DATA_BACKEND=supabase needs it.');
+    }
+  }
+
+  if (problems.length === 0) return;
+
+  throw new Error(
+    `Refusing to start: ${problems.length} production configuration ${problems.length === 1 ? 'problem' : 'problems'}.\n\n` +
+      problems.map((line, i) => `  ${i + 1}. ${line}`).join('\n\n') +
+      '\n\nEach of these fails silently at runtime rather than loudly, which is why the server stops here instead.',
+  );
 }

@@ -330,7 +330,6 @@ function FileRow({
           <RemoveFileForm
             orderId={orderId}
             deliverableId={file.id}
-            path={file.storage_path}
             fileName={file.file_name}
           />
         ) : null}

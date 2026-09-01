@@ -7,7 +7,8 @@ import { getActor, loginPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { COACH_BIO_MAX, COACH_HEADLINE_MAX, COACH_YEARS_COACHING_MAX, isDataError } from '@/lib/data/types';
-import { fieldError, toFormState, type FormState } from '@/lib/forms';
+import { fieldError, formError, toFormState, type FormState } from '@/lib/forms';
+import { consume, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
 
 const PROFILE_PATH = '/coach/profile';
 
@@ -50,6 +51,13 @@ export async function updateCoachProfileAction(_prev: FormState, formData: FormD
   if (Object.keys(fieldErrors).length > 0) return fieldError(fieldErrors, values);
 
   const actor = await getActor();
+
+  // Three columns published through `public_coaches` — the headline and bio on
+  // every card in the directory. Same budget as an offer edit, and spent after
+  // validation so a too-long bio does not cost the attempt that shortens it.
+  if (actor && !(await consume('writeUser', actor.userId))) {
+    return formError(TOO_MANY_MESSAGE, values);
+  }
 
   let needsLogin = false;
   try {

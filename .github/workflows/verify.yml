@@ -1,0 +1,93 @@
+# =============================================================================
+# The suites, run by something other than a person remembering.
+# =============================================================================
+#
+# `README.md` says of the authorization suite: "verify:authz is the executable
+# half of the security model … Run it after any change to src/lib/data/**."
+# Until this file existed, nothing enforced that sentence. A control that
+# depends on somebody typing a command is not a control, and the two mock
+# suites are between them 1,535 assertions about who may do what.
+#
+# WHAT IS DELIBERATELY NOT HERE: `npm run verify:supabase`. It runs against
+# whatever `NEXT_PUBLIC_SUPABASE_URL` names, which for this project is the LIVE
+# database — its own header says so, and says it is read-only by default for
+# exactly that reason. Pointing CI at production would be wrong even for reads:
+# it would put the project's credentials in a place every fork's pull request
+# can reach. It stays a manual, operator-run check until there is a second,
+# test-only project to aim it at.
+#
+# NO SECRETS ARE NEEDED, and that is a property worth preserving. Both suites
+# hard-set `DATA_BACKEND=mock` and provision their own throwaway store; the
+# build below is given the same mock values explicitly rather than inheriting
+# a `.env.local` that does not exist in CI.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So a red main can be re-run after an infrastructure blip without an
+  # empty commit.
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    # `verify:pages` boots a dev server and waits up to 180s for it; the whole
+    # job is well inside this, and the cap is here so a hung server fails
+    # rather than burning an hour.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22.18 is a hard floor, not a preference: `register-ts.mjs` refuses
+          # to start below it, because native TypeScript type stripping is what
+          # lets the suites import `src/**` directly. Pinned to the 22 line so a
+          # new major cannot change the answer without somebody choosing it.
+          node-version: "22.x"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        # Mock values, stated rather than inherited. There is no `.env.local` in
+        # CI, so `DATA_BACKEND` would default to `mock` anyway — naming it means
+        # a future default change cannot silently point a CI build at a real
+        # database. `SESSION_SECRET` is required on both backends since it keys
+        # the rate limiter's bucket HMAC; the value here is throwaway and signs
+        # nothing that outlives the job.
+        env:
+          DATA_BACKEND: mock
+          SESSION_SECRET: ci-throwaway-session-secret
+          SEED_ADMIN_PASSWORD: ci-throwaway-admin-password
+        run: npm run build
+
+      - name: Authorization suite
+        # The RLS twin: every rule the policy set encodes, asserted against the
+        # mock implementation of it. Sets its own environment.
+        run: npm run verify:authz
+
+      - name: Rendered-page suite
+        # Starts its own dev server on a free port against a throwaway store,
+        # and clears Next's data cache at both ends so a previous run cannot
+        # answer for this one.
+        run: npm run verify:pages

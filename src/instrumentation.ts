@@ -1,6 +1,31 @@
 import type { Instrumentation } from 'next';
 
+import { assertRuntimeConfig } from '@/lib/env';
 import { reportError } from '@/lib/observability';
+
+/**
+ * The boot gate.
+ *
+ * `register()` runs once per server instance and **must complete before the
+ * server is ready to handle requests** — which is the only property that makes
+ * it the right place for this. Four environment variables, if wrong, produce a
+ * deployment that comes up, serves its marketing page, and is broken in a way
+ * nobody on the outside can report; `assertRuntimeConfig()` in `env.ts` lists
+ * each one and why its failure is silent. Throwing here means the server does
+ * not come up at all, which is the only louder failure available.
+ *
+ * NEXT SKIPS THIS HOOK DURING A PRODUCTION BUILD — `registerInstrumentation()`
+ * returns early on `NEXT_PHASE === 'phase-production-build'`, in as many words.
+ * That is load-bearing rather than incidental: `next build` sets
+ * `NODE_ENV=production`, so without it the CI build would fail on its own
+ * deliberately-mock configuration.
+ *
+ * Nothing else belongs in here. A slow `register()` is added to the cold start
+ * of every instance, and this one reads environment variables and returns.
+ */
+export function register(): void {
+  assertRuntimeConfig();
+}
 
 /**
  * The server-error seam.

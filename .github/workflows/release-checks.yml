@@ -1,0 +1,106 @@
+# =============================================================================
+# The checks that have to touch the real database — run on purpose, never on push.
+# =============================================================================
+#
+# `verify.yml` beside this file states the rule this workflow is built around,
+# and it is worth restating rather than assuming:
+#
+#   > WHAT IS DELIBERATELY NOT HERE: `npm run verify:supabase`. It runs against
+#   > whatever `NEXT_PUBLIC_SUPABASE_URL` names, which for this project is the
+#   > LIVE database … Pointing CI at production would be wrong even for reads:
+#   > it would put the project's credentials in a place every fork's pull
+#   > request can reach.
+#
+# That reasoning is correct and this file does not weaken it. **The exposure it
+# describes is specific to `push` and `pull_request`**, where a fork's PR runs a
+# workflow whose contents the fork controls. `workflow_dispatch` cannot be
+# triggered by a fork at all — GitHub requires write access to the repository —
+# so a secret used only here is reachable only by somebody who could read it
+# from the settings page anyway.
+#
+# -----------------------------------------------------------------------------
+# WHY IT EXISTS
+# -----------------------------------------------------------------------------
+# `supabase/README.md` records what happened without it, in as many words:
+#
+#   > The flag, the indexes and the `demo_data_summary` view have all existed
+#   > for twenty-odd migrations. **What did not exist was anything that ASKS.**
+#   > So the mechanism was a convention plus a query somebody had to remember to
+#   > run, and the live project was seeded past every one of those warnings
+#   > without anything anywhere objecting.
+#
+# `scripts/check-demo-data.mts` is the thing that objects. This is the thing
+# that runs it without depending on somebody remembering — the same argument
+# `verify.yml` opens with: *"A control that depends on somebody typing a command
+# is not a control."*
+#
+# -----------------------------------------------------------------------------
+# HOW TO USE IT
+# -----------------------------------------------------------------------------
+# Actions → release checks → Run workflow. **Run it immediately before any
+# deploy that will serve a real user**, and after running `demo-teardown.sql`.
+#
+# It needs two repository secrets, neither of which any other workflow reads:
+#
+#   NEXT_PUBLIC_SUPABASE_URL     the project URL
+#   SUPABASE_SERVICE_ROLE_KEY    required because `demo_data_summary` is revoked
+#                                from `anon` and `authenticated` (0007, and again
+#                                in 0028) — it is a pre-launch check, not
+#                                something the application shows.
+#
+# THE KEY IS BYPASSRLS. `check-demo-data.mts` makes one `fetch` to one view and
+# builds no Supabase client, for the reason its own header gives; nothing added
+# to this workflow should either.
+#
+# If the secrets are absent the job SKIPS rather than passing — see the guard on
+# the step. A launch gate that reports success because it could not reach the
+# database is the failure mode the script's exit code 2 exists to prevent, and
+# it would be undone here by a green tick over a missing secret.
+
+name: release checks
+
+on:
+  workflow_dispatch:
+
+# Read-only, and the job below does not check out anything it will publish.
+permissions:
+  contents: read
+
+jobs:
+  demo-data:
+    name: No fabricated rows in the live database
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Same hard floor as `verify.yml`: `register-ts.mjs` refuses to start
+          # below 22.18, because native type stripping is what lets the scripts
+          # import TypeScript directly.
+          node-version: "22.x"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Refuse to pass without credentials
+        env:
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SERVICE_ROLE_KEY" ]; then
+            echo "::error::Both NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set as repository secrets."
+            echo "::error::This job fails rather than skipping: a launch gate that cannot reach the database must never report a pass."
+            exit 1
+          fi
+
+      - name: Demo-data check
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        # Exit 0 = clean, 1 = fabricated rows remain, 2 = could not answer.
+        # All three are distinguished by the script; any non-zero fails the job.
+        run: npm run check:demo-data

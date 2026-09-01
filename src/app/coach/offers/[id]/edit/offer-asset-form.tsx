@@ -105,8 +105,6 @@ export function OfferAssetForm({
           <form action={formAction} className="flex flex-col gap-3">
             <input type="hidden" name="id" value={listingId} />
             <input type="hidden" name="intent" value="set" />
-            {/* The file being replaced, deleted only after the column has moved. */}
-            <input type="hidden" name="current" value={currentPath ?? ''} />
             <Field
               id="asset"
               label={currentPath ? 'Replace the file' : 'Attach the file'}
@@ -136,7 +134,6 @@ export function OfferAssetForm({
             <form action={formAction}>
               <input type="hidden" name="id" value={listingId} />
               <input type="hidden" name="intent" value="clear" />
-              <input type="hidden" name="current" value={currentPath} />
               <Button type="submit" variant="danger" size="sm" disabled={pending}>
                 Remove file
               </Button>

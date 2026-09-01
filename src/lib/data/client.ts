@@ -1244,8 +1244,17 @@ export interface DataClient {
    * else's is refused even for the other party to the order — and there is no
    * edit path at all, because a deliverable is a record of what was handed over
    * at a moment, the same reasoning that makes `listing_revisions` append-only.
+   *
+   * **Returns the removed row's `storage_path`**, which is the caller's cue to
+   * delete the bytes. It used to return nothing, and the object path came back
+   * to the Server Action from a hidden form field instead — so the one input
+   * deciding which file to erase was chosen by the client. The storage policies
+   * bounded the damage to the caller's own uploads, but "their own" is not
+   * "the one they just removed": a forged value deleted a DIFFERENT file of
+   * theirs and left its row behind, pointing at bytes that were gone. The row
+   * has always known the path; now it says so, and the form field is gone.
    */
-  removeDeliverable(actor: Actor, deliverableId: string): Promise<void>;
+  removeDeliverable(actor: Actor, deliverableId: string): Promise<string>;
 
   createReview(actor: Actor, input: CreateReviewInput): Promise<Review>;
 

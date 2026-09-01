@@ -11,13 +11,14 @@
     "verify:authz": "node --import ./scripts/register-ts.mjs scripts/verify-authz.mts",
     "verify:pages": "node --import ./scripts/register-ts.mjs scripts/verify-pages.mts",
     "verify:supabase": "node --import ./scripts/register-ts.mjs scripts/verify-supabase.mts",
+    "check:demo-data": "node --import ./scripts/register-ts.mjs scripts/check-demo-data.mts",
     "db:link": "supabase link --project-ref trocsdetpwyqcgyfclir",
     "db:push": "supabase db push"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",
     "@supabase/supabase-js": "^2.112.4",
-    "next": "16.3.1",
+    "next": "16.3.4",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
@@ -27,7 +28,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.3.1",
+    "eslint-config-next": "16.3.4",
     "supabase": "^2.115.0",
     "tailwindcss": "^4",
     "typescript": "^5"

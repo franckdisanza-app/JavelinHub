@@ -150,7 +150,7 @@ import {
 } from '../validation';
 import { throwDataError } from './errors';
 import { publicSupabase } from './publicClient';
-import { createSupabaseServerClient } from './serverClient';
+import { createSupabaseServerClient, getSupabaseUserId } from './serverClient';
 
 // ---------------------------------------------------------------------------
 // Column lists.
@@ -186,6 +186,24 @@ const PUBLIC_REVIEW_COLUMNS = 'id, listing_id, rating, body, created_at, author_
 
 // ---------------------------------------------------------------------------
 // Query-building helpers.
+//
+// THE FOUR BELOW ARE `export`ed FOR ONE REASON: so `scripts/verify-authz.mts`
+// can assert on them directly. Nothing else imports them and nothing else
+// should — they are internals of this file, not part of the data layer's
+// surface.
+//
+// They are worth the export because of what they are. Three of them are the
+// only thing standing between a caller-supplied search term and PostgREST's
+// own filter grammar, and a mistake in any of them WIDENS a query rather than
+// breaking it — `escapeLike` returning `''` for `'*'` turns a search into the
+// whole catalogue, and a `quoteForOr` that can be broken out of turns one into
+// a filter the caller wrote. Neither failure raises an error, appears in a log,
+// or changes anything a page renders except the number of rows on it. They had
+// no coverage at all: both mock suites hard-set `DATA_BACKEND=mock` and never
+// load this class, so the 3,208 lines here are exercised by nothing.
+//
+// This does not close that gap — the methods still need a database. It closes
+// the part of it that needs no database at all.
 // ---------------------------------------------------------------------------
 
 /**
@@ -197,7 +215,7 @@ const PUBLIC_REVIEW_COLUMNS = 'id, listing_id, rating, body, created_at, author_
  * same input on the other backend. `\` goes first, or it would escape the
  * escapes added after it.
  */
-function escapeLike(raw: string): string | null {
+export function escapeLike(raw: string): string | null {
   // `*` IS ALSO A WILDCARD HERE, and it is the one with no escape. PostgREST
   // accepts `*` as an alias for `%` in `like`/`ilike` and rewrites it BEFORE
   // Postgres sees the pattern, so it never reaches the backslash escaping
@@ -221,7 +239,7 @@ function escapeLike(raw: string): string | null {
 }
 
 /** `escapeLike`, wrapped so it matches anywhere in the value. `null` propagates. */
-function likePattern(raw: string): string | null {
+export function likePattern(raw: string): string | null {
   const escaped = escapeLike(raw);
   return escaped === null ? null : `%${escaped}%`;
 }
@@ -235,7 +253,7 @@ function likePattern(raw: string): string | null {
  * for. Double-quoting the value is PostgREST's documented escape hatch; inner
  * quotes and backslashes are escaped so the quoting cannot be broken out of.
  */
-function quoteForOr(value: string): string {
+export function quoteForOr(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
@@ -270,7 +288,7 @@ function toCount(value: unknown): number {
  * coach on the page. The mock answers per id, so dropping the bad one here and
  * letting it fall through to "no row" is what keeps the two agreeing.
  */
-function isUuid(value: string): boolean {
+export function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
@@ -347,10 +365,22 @@ interface Ctx {
   userId: string | null;
 }
 
+/**
+ * The identity comes from `getSupabaseUserId()` rather than from a second
+ * `supabase.auth.getUser()` on the client built here, and that is the whole
+ * point: it is the SAME question, asked of the same cookies, and asking it
+ * inline meant one HTTPS round trip to the auth server per data-layer method.
+ * A page calling four methods paid for four. That helper is memoised per
+ * request — see its comment for why the identity may be cached and the profile
+ * may not — so the first caller in a render pays and the rest are free.
+ *
+ * The two are awaited together because they do not depend on each other:
+ * building the client reads cookies and does no I/O, so the pair costs one
+ * round trip rather than two sequential awaits.
+ */
 async function openContext(): Promise<Ctx> {
-  const supabase = await createSupabaseServerClient();
-  const { data, error } = await supabase.auth.getUser();
-  return { supabase, userId: error ? null : (data.user?.id ?? null) };
+  const [supabase, userId] = await Promise.all([createSupabaseServerClient(), getSupabaseUserId()]);
+  return { supabase, userId };
 }
 
 /**
@@ -2334,16 +2364,17 @@ export class SupabaseDataClient implements DataClient {
     return data as Deliverable;
   }
 
-  async removeDeliverable(actor: Actor, deliverableId: string): Promise<void> {
+  async removeDeliverable(actor: Actor, deliverableId: string): Promise<string> {
     const id = requireText(deliverableId, 'File', 200);
     const ctx = await openAuthedContext(actor);
 
     // `deliverables_delete_own` admits only the uploader, so somebody else's
     // file matches no row and deletes nothing. Read it back first to tell that
-    // apart from a file that never existed.
+    // apart from a file that never existed — and, since the row is being read
+    // anyway, to learn the object path the caller has to delete afterwards.
     const { data: existing, error: findError } = await ctx.supabase
       .from('deliverables')
-      .select('id, uploaded_by')
+      .select('id, uploaded_by, storage_path')
       .eq('id', id)
       .maybeSingle();
     if (findError) {
@@ -2351,12 +2382,15 @@ export class SupabaseDataClient implements DataClient {
       throwDataError(findError, true);
     }
     if (!existing) throw new DataError('not_found', 'That file could not be found.');
-    if ((existing as { uploaded_by: string }).uploaded_by !== ctx.userId) {
+    const row = existing as { uploaded_by: string; storage_path: string };
+    if (row.uploaded_by !== ctx.userId) {
       throw new DataError('forbidden', 'You can only remove files you uploaded yourself.');
     }
 
     const { error } = await ctx.supabase.from('deliverables').delete().eq('id', id);
     if (error) throwDataError(error, true);
+
+    return row.storage_path;
   }
 
   async createReview(actor: Actor, input: CreateReviewInput): Promise<Review> {

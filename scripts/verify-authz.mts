@@ -5839,6 +5839,108 @@ expectEqual('an unserialisable payload still produces one line', survived.length
 expectEqual('...and does not throw', true, true);
 
 // ---------------------------------------------------------------------------
+section('SupabaseDataClient — the pure helpers, which nothing else executes');
+// ---------------------------------------------------------------------------
+// `supabase/README.md` states the gap plainly: "neither of those two covers
+// `SupabaseDataClient`." Both mock suites hard-set `DATA_BACKEND=mock`, and
+// `verify:supabase` asks the DATABASE its questions over raw fetch — so the
+// 3,200 lines of the class that actually runs in production are exercised by
+// nothing at all.
+//
+// Most of it genuinely needs a database. These four functions do not: they are
+// pure string work, and they are the ones where a mistake is INVISIBLE. Every
+// failure mode below widens a query or breaks out of a filter grammar rather
+// than throwing, so nothing logs, nothing 500s, and the only symptom is a page
+// with the wrong rows on it.
+//
+// Imported from the module directly rather than through `@/lib/data`, because
+// the point is to reach the internals. See the note above their `export`.
+const { escapeLike, likePattern, quoteForOr, isUuid } = await import(
+  '@/lib/data/supabase/supabaseClient'
+);
+
+// --- escapeLike: the wildcard that has no escape ---------------------------
+// PostgREST rewrites `*` to `%` BEFORE Postgres sees the pattern, so no amount
+// of backslashing makes it literal. `null` means "this term cannot be
+// expressed", and every caller must then narrow rather than widen — the rule
+// the file states and the reason it is not simply stripped.
+expectEqual('a bare * cannot be expressed', escapeLike('*'), null);
+expectEqual('...nor can one inside a term', escapeLike('Ja*'), null);
+expectEqual('...at the end either', escapeLike('*velin'), null);
+expectEqual('and likePattern propagates the null rather than wrapping it', likePattern('*'), null);
+// The regression this guards: `'*'` stripped to `''` becomes `'%%'`, which
+// matches the entire catalogue. Asserted as "not a match-everything pattern"
+// rather than by equality, so any future rewrite that reintroduces it fails.
+expectEqual('...so a wildcard can never become the match-all pattern', likePattern('*') === '%%', false);
+
+// --- escapeLike: the three LIKE metacharacters -----------------------------
+// The mock matches a plain substring, so `50%` has to find the literal text.
+// Backslash goes FIRST or it escapes the escapes added after it.
+expectEqual('percent is escaped', escapeLike('50%'), '50\\%');
+expectEqual('underscore is escaped', escapeLike('a_b'), 'a\\_b');
+expectEqual('backslash is escaped first', escapeLike('a\\b'), 'a\\\\b');
+expectEqual('all three together', escapeLike('\\%_'), '\\\\\\%\\_');
+expectEqual('an ordinary term is untouched', escapeLike('javelin'), 'javelin');
+expectEqual('likePattern wraps for a substring match', likePattern('javelin'), '%javelin%');
+
+// --- quoteForOr: the filter grammar cannot be broken out of ----------------
+// `or=` is comma-separated and `.` separates a filter's parts, so an unquoted
+// value containing either is parsed as SYNTAX. Double-quoting is PostgREST's
+// documented escape hatch; the quoting itself has to survive a quote.
+expectEqual('an ordinary value is simply quoted', quoteForOr('javelin'), '"javelin"');
+expectEqual('a comma stays inside the quotes', quoteForOr('a,b'), '"a,b"');
+expectEqual('so does a dot', quoteForOr('a.b'), '"a.b"');
+expectEqual('a quote is escaped rather than ending the value', quoteForOr('a"b'), '"a\\"b"');
+expectEqual('a backslash is escaped first', quoteForOr('a\\b'), '"a\\\\b"');
+// The break-out attempt this exists to defeat: closing the quote and appending
+// a filter of the caller's own. The result must still be ONE quoted value.
+const brokenOut = quoteForOr('x",listings.id.eq.00000000-0000-4000-8000-000000000001,"');
+expectEqual('a crafted break-out stays one quoted value', brokenOut.startsWith('"') && brokenOut.endsWith('"'), true);
+expectEqual('...with every inner quote escaped', /(?<!\\)"/.test(brokenOut.slice(1, -1)), false);
+
+// --- isUuid: one junk id must not take a batch down ------------------------
+// A malformed id inside a PostgREST `.in(...)` fails the cast for the WHOLE
+// filter, so `listOfferStats` would return [] instead of the stats it did have.
+// Pre-filtering is what keeps the two backends agreeing per id.
+expectEqual('a canonical uuid passes', isUuid('00000000-0000-4000-8000-000000000001'), true);
+expectEqual('uppercase passes too', isUuid('AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE'), true);
+expectEqual('a bare word does not', isUuid('junk'), false);
+expectEqual('the empty string does not', isUuid(''), false);
+expectEqual('a truncated uuid does not', isUuid('00000000-0000-4000-8000-00000000000'), false);
+expectEqual('trailing junk does not', isUuid('00000000-0000-4000-8000-000000000001x'), false);
+expectEqual('a filter fragment does not', isUuid('00000000-0000-4000-8000-000000000001,id.eq.2'), false);
+
+// --- toDataError: a Postgres sentence must never reach a user --------------
+// `looksInternal` is a denylist that FAILS SAFE, and the asymmetry is
+// deliberate: a vaguer sentence is cosmetic, `permission denied for table
+// listings` is an information leak. Asserted in both directions, because a
+// denylist that swallowed everything would pass a one-sided test.
+const { toDataError } = await import('@/lib/data/supabase/errors');
+const rlsRefusal = toDataError(
+  { code: '42501', message: 'new row violates row-level security policy for table "listings"' },
+  true,
+);
+expectEqual('an RLS refusal maps to forbidden for a signed-in caller', rlsRefusal?.code, 'forbidden');
+expectEqual('...and its message is replaced, not shown', rlsRefusal?.message, 'You do not have permission to do that.');
+expectEqual(
+  'the same code with no session means "sign in", not "not yours"',
+  toDataError({ code: '42501', message: 'permission denied for table listings' }, false)?.code,
+  'unauthorized',
+);
+// Our own authored sentences are the half that must survive.
+const authored = toDataError({ code: '22023', message: 'That invite code is not valid.' }, true);
+expectEqual('an authored sentence is preserved verbatim', authored?.message, 'That invite code is not valid.');
+expectEqual('...under the right code', authored?.code, 'invalid');
+expectEqual(
+  'and "could not be found" is not mistaken for "could not serialize"',
+  toDataError({ code: 'P0002', message: 'Your profile could not be found.' }, true)?.message,
+  'Your profile could not be found.',
+);
+// An unmapped code is a bug or an outage and must propagate, not be dressed up.
+expectEqual('an unmapped SQLSTATE is not converted', toDataError({ code: 'PGRST205', message: 'x' }, true), null);
+expectEqual('neither is a non-object', toDataError('boom', true), null);
+
+// ---------------------------------------------------------------------------
 section('Store invariants');
 // ---------------------------------------------------------------------------
 const admins = await mutateDb((store) => store.profiles.filter((p) => p.role === 'admin').length);

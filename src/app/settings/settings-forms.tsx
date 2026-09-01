@@ -109,8 +109,6 @@ export function AvatarForm({ name, currentUrl, currentPath, available }: AvatarF
         <>
           <form action={formAction} className="flex flex-col gap-3">
             <input type="hidden" name="intent" value="set" />
-            {/* The file being replaced, deleted only after the column has moved. */}
-            <input type="hidden" name="current" value={currentPath ?? ''} />
             <Field
               id="avatar"
               label={currentUrl ? 'Replace your picture' : 'Upload a picture'}
@@ -139,7 +137,6 @@ export function AvatarForm({ name, currentUrl, currentPath, available }: AvatarF
           {currentPath ? (
             <form action={formAction}>
               <input type="hidden" name="intent" value="clear" />
-              <input type="hidden" name="current" value={currentPath} />
               <Button type="submit" variant="danger" size="sm" disabled={pending}>
                 Remove picture
               </Button>
@@ -249,9 +246,13 @@ export function PasswordForm() {
 
   return (
     <form action={formAction} className="flex flex-col gap-5">
+      {/* The sign-out is stated because it is the reason most people change a
+          password from this form, and because it is otherwise invisible until
+          another device asks them to log in again. `changePasswordAction` calls
+          `destroyOtherSessions()`. */}
       {state.status === 'success' ? (
         <Alert tone="success" title="Your password is changed.">
-          You are still signed in here. Use the new one next time.
+          You are still signed in here, and every other device has been signed out. Use the new password there.
         </Alert>
       ) : null}
       {state.status === 'error' && state.message && Object.keys(errors).length === 0 ? (

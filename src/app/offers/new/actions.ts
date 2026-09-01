@@ -14,6 +14,7 @@ import {
   uploadOfferAsset,
 } from '@/lib/storage/deliverables';
 import { fieldError, formError, toFormState, type FormState } from '@/lib/forms';
+import { consume, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
 import { parsePriceToCents } from '@/lib/format';
 
 const NEW_OFFER_PATH = '/offers/new';
@@ -124,6 +125,22 @@ export async function createListingAction(_prev: FormState, formData: FormData):
   }
 
   const actor = await getActor();
+
+  /*
+   * AFTER validation and after the actor, and both halves of that matter. A
+   * coach who mistypes a price should not spend a budget they will need when
+   * they correct it — the ordering `signUpAction` established — and a caller
+   * with no session is refused by `createListing` a moment later without
+   * having touched anybody's bucket.
+   *
+   * This is the one action that spends `writeUser` and can also move up to
+   * 50 MB of bytes, and it needs no separate upload budget for that: the file
+   * is attached to a listing that this same call creates, so a caller cannot
+   * upload twice without publishing twice.
+   */
+  if (actor && !(await consume('writeUser', actor.userId))) {
+    return formError(TOO_MANY_MESSAGE, values);
+  }
 
   let needsLogin = false;
   let createdId: string | null = null;

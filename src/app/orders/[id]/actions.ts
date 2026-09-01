@@ -8,6 +8,7 @@ import { getDataClient } from '@/lib/data';
 import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError } from '@/lib/data/types';
 import { formError, toFormState, type FormState } from '@/lib/forms';
+import { consume, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
 import { checkDeliveryFile, deleteDeliveryFile, uploadDeliveryFile } from '@/lib/storage/deliverables';
 
 /**
@@ -34,6 +35,22 @@ export async function addDeliverableAction(_prev: FormState, formData: FormData)
   if (!check.ok) return formError(check.message ?? 'That file could not be used.');
 
   const actor = await getActor();
+
+  /*
+   * THE MOST EXPENSIVE THING AN ORDINARY ACCOUNT CAN DO, and until now the only
+   * unmetered one. The `deliverables` bucket accepts 50 MB per object and this
+   * action appends rather than replaces — every call is a new key under
+   * `<order_id>/<uploader_id>/` — so nothing in the schema bounds how many
+   * times it may be called against one order.
+   *
+   * After the file check, so a caller who picks an unsupported type is told so
+   * without spending anything. Keyed on the account: both parties to an order
+   * upload through this same action, and one running its budget down must not
+   * be able to affect the other's.
+   */
+  if (actor && !(await consume('uploadUser', actor.userId))) {
+    return formError(TOO_MANY_MESSAGE);
+  }
 
   let needsLogin = false;
   try {
@@ -83,18 +100,25 @@ export async function addDeliverableAction(_prev: FormState, formData: FormData)
  * reason in reverse. `removeDeliverable` is the authorization check; once it
  * has passed, the file is gone as far as the product is concerned and deleting
  * the bytes is housekeeping that must not be able to fail the operation.
+ *
+ * THE PATH COMES BACK FROM THE ROW, not from the form. It used to arrive as a
+ * hidden input, which made the value deciding which object to erase a thing the
+ * client chose. `offer_assets`-style storage policies bounded that to the
+ * caller's own uploads, so it was never a cross-tenant delete — but "one of
+ * yours" is not "the one you just removed", and a forged value erased a
+ * different file of theirs while leaving its row pointing at nothing. The row
+ * always knew; now it says so.
  */
 export async function removeDeliverableAction(_prev: FormState, formData: FormData): Promise<FormState> {
   const orderId = String(formData.get('orderId') ?? '').trim();
   const deliverableId = String(formData.get('deliverableId') ?? '').trim();
-  const path = String(formData.get('path') ?? '').trim();
   if (deliverableId === '') return formError('That file could not be found.');
 
   const actor = await getActor();
 
   let needsLogin = false;
   try {
-    await getDataClient().removeDeliverable(actor, deliverableId);
+    const path = await getDataClient().removeDeliverable(actor, deliverableId);
     if (path !== '') await deleteDeliveryFile(path);
   } catch (error) {
     if (!isDataError(error)) throw error;

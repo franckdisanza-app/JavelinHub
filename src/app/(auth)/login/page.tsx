@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { LoginForm } from '@/app/(auth)/login/login-form';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { safeNextPath } from '@/lib/auth/session';
-import { seedAdminEmail } from '@/lib/env';
+import { dataBackend, seedAdminEmail } from '@/lib/env';
 
 export const metadata: Metadata = { title: 'Log in' };
 
@@ -40,18 +40,36 @@ export default async function LoginPage({
         ) : null}
       </Card>
 
-      <DemoAccounts />
+      {/*
+        MOCK ONLY, and this is a fix rather than a tidy-up.
+
+        The panel below prints fixture logins AND the seeded invite codes, and
+        it used to render on every backend — including the deployed Supabase
+        one. The logins are harmless there (those accounts exist only in the
+        local JSON store), but the INVITE CODES are not: `seed.sql` and
+        `demo-seed.sql` mint the same two codes into Postgres, redeeming one
+        promotes the redeemer straight to an approved coach, and this page is
+        reachable by anyone. A deployed, seeded project was therefore publishing
+        a live privilege-granting credential to anonymous visitors, on its own
+        login screen.
+
+        `dataBackend()` is the honest gate: everything in this panel is a
+        property of the mock store, so it belongs only where that store is what
+        is running. Revoking the codes on a deployed project is still needed —
+        see README.md — because this only stops us advertising them.
+      */}
+      {dataBackend() === 'mock' ? <DemoAccounts /> : null}
     </div>
   );
 }
 
 /**
- * The POC's fixture accounts, so the flows can be exercised without reading the
- * README first.
+ * The MOCK store's fixture accounts, so the flows can be exercised without
+ * reading the README first.
  *
- * These are public demo credentials for a local proof of concept and live in
- * the seed data and the README on purpose. The admin password is the one thing
- * that is NOT printed: it comes from `SEED_ADMIN_PASSWORD` in `.env.local`,
+ * Rendered only when `DATA_BACKEND=mock` — see the call site for why that
+ * matters more than it looks. The admin password is the one thing that is not
+ * printed even there: it comes from `SEED_ADMIN_PASSWORD` in `.env.local`,
  * which is per-machine and not ours to publish.
  */
 function DemoAccounts() {

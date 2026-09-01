@@ -30,8 +30,15 @@ export function ResetPasswordForm() {
   if (state.status === 'success') {
     return (
       <div className="flex flex-col gap-4">
+        {/* The second sentence is a security fact the user needs and cannot see
+            for themselves: `resetPasswordAction` calls `destroyOtherSessions()`,
+            so anyone still holding a session on another device — which is a
+            plausible reason for being locked out in the first place — has just
+            lost it. Saying so is also what tells an innocent user why their
+            phone is asking them to sign in again. */}
         <Alert tone="success" title="Your password is set.">
-          You are signed in on this device already. Use the new password next time.
+          You are signed in on this device already. Every other device has been signed out, so use the new
+          password there.
         </Alert>
         <div>
           <Link href="/offers" className={linkButtonClass()}>

@@ -3,6 +3,7 @@ import { Barlow_Condensed, IBM_Plex_Mono, Newsreader } from 'next/font/google';
 
 import { SiteFooter } from '@/components/site-footer';
 import { SiteHeader } from '@/components/site-header';
+import { siteUrl } from '@/lib/env';
 
 import './globals.css';
 
@@ -78,20 +79,40 @@ const TITLE = 'JavelinHub — coaching and video review for throwers';
 const DESCRIPTION =
   'JavelinHub connects throwers with the coaches who can help. Browse coaches, browse the offers they publish, or apply to coach.';
 
-export const metadata: Metadata = {
-  title: {
-    default: TITLE,
-    template: '%s · JavelinHub',
-  },
-  description: DESCRIPTION,
-  applicationName: 'JavelinHub',
-  openGraph: {
-    type: 'website',
-    siteName: 'JavelinHub',
-    title: TITLE,
+/**
+ * `generateMetadata` rather than a `metadata` const, and the reason is
+ * `metadataBase`.
+ *
+ * A module-level `metadata` object is evaluated when the module loads, which
+ * includes `next build`. `siteUrl()` throws in production when
+ * `NEXT_PUBLIC_SITE_URL` is unset — that is the point of it, see `env.ts` — so
+ * reading it from a const would make a correct build fail on a machine that has
+ * no reason to know the deployment's own origin, CI first among them. As a
+ * function it is asked at request time, where the answer exists.
+ *
+ * WHY `metadataBase` IS NEEDED AT ALL: every relative URL in a metadata object
+ * — an Open Graph image, a canonical link — is resolved against it, and without
+ * one Next guesses from `VERCEL_URL` or falls back to localhost and warns. The
+ * guess is a per-deployment hostname rather than the site's own, so a shared
+ * link would point at a URL that changes on every deploy.
+ */
+export async function generateMetadata(): Promise<Metadata> {
+  return {
+    metadataBase: new URL(siteUrl()),
+    title: {
+      default: TITLE,
+      template: '%s · JavelinHub',
+    },
     description: DESCRIPTION,
-  },
-};
+    applicationName: 'JavelinHub',
+    openGraph: {
+      type: 'website',
+      siteName: 'JavelinHub',
+      title: TITLE,
+      description: DESCRIPTION,
+    },
+  };
+}
 
 export default function RootLayout({ children }: LayoutProps<'/'>) {
   return (

@@ -931,6 +931,33 @@ function state(): StoreState {
  * Runs `task` with exclusive access to the store. Every public entry point goes
  * through here, so two concurrent server actions can never interleave a
  * read-modify-write and lose one of the two updates.
+ *
+ * -----------------------------------------------------------------------------
+ * "EXCLUSIVE" MEANS WITHIN ONE PROCESS, AND THAT IS THE WHOLE GUARANTEE
+ * -----------------------------------------------------------------------------
+ * The mutex is a promise chain on a `globalThis` singleton, and the write it
+ * protects is `writeFile` to a temp path followed by `rename`. The rename makes
+ * each WRITE atomic; the mutex makes each read-modify-write PAIR atomic. Neither
+ * does anything across processes, and both `next dev` and `next start` may run
+ * more than one worker — so two workers can read the same `db.json`, each apply
+ * their own change to their own copy, and the second rename silently discards
+ * the first. No error, no partial file, just a lost update.
+ *
+ * That is accepted rather than fixed, and the reasoning is the same one that
+ * keeps this backend out of production at all: `README.md` states that
+ * `DATA_BACKEND` **must** be `supabase` in production because a serverless
+ * filesystem is read-only and not shared between invocations. The mock is a
+ * single-developer, single-machine store, and on Supabase this file is not in
+ * the graph. An advisory file lock would close it and would be one more thing
+ * to reason about in a module whose job is to be too simple to be interesting.
+ *
+ * Where it does bite is the suites, which is why it is written down here rather
+ * than left to be rediscovered: both hard-set `DATA_BACKEND=mock`, and a lost
+ * update inside a test run reads as a flaky authorization assertion rather than
+ * as a concurrency bug. `verify:authz` runs in ONE process, and `verify:pages`
+ * keeps its planting phase in the parent and its reads in the child, so neither
+ * is exposed today. Keep it that way: a suite that writes to the store from two
+ * processes at once is testing this comment, not the rule it meant to test.
  */
 function exclusive<T>(task: () => Promise<T>): Promise<T> {
   const s = state();

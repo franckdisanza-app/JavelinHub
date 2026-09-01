@@ -40,8 +40,10 @@ Open <http://localhost:3000>. The mock store seeds itself at `./data/db.json`
 
 ## Demo fixtures
 
-These are **public demo credentials for a local POC**. They exist in the seed
-data and in this file on purpose. Never reuse them for anything real.
+These are **credentials for the local MOCK store only** — `DATA_BACKEND=mock`,
+a JSON file at `./data/db.json` that this repository seeds on first run. They
+exist in the seed data and in this file on purpose. Never reuse them for
+anything real, and note what changed below about the invite codes.
 
 | Account | Email | Password | Role / status |
 |---|---|---|---|
@@ -51,8 +53,40 @@ data and in this file on purpose. Never reuse them for anything real.
 | New coach | `newcoach@javelin.test` | `coach1234` | `coach` / `approved`, with **nothing published** — the "new coach" empty state |
 | Review authors | `marcus@` / `priya@` / `tomas@` / `aisha@javelin.test` | `learner1234` | `learner` / `none` |
 
-Seeded unredeemed invite codes: `JAVELIN-COACH-2026`, `THROWERS-WELCOME`.
-Redeeming one promotes the signed-in account straight to an approved coach.
+### Invite codes, and why they are no longer printed here
+
+Redeeming an invite code promotes the signed-in account **straight to an
+approved coach** — someone who can publish offers under their own byline, be
+listed in the public directory and upload into the private buckets. It is the
+one credential in this project that grants a privilege rather than an identity.
+
+The mock seed still mints two, and the migration that flags them says what that
+means for anywhere real:
+
+> `invites.is_demo` — *"TRUE for a fixture invite code. These are PUBLISHED IN
+> README.md and grant approved-coach status to whoever redeems one — revoke them
+> before any real deployment."*
+
+That warning was written against a README that printed the codes in its
+getting-started section, in a repository with a public URL. The codes are the
+same in every clone, so anyone who read this file could have redeemed one
+against **any deployment seeded from `seed.sql`**. So they are not printed here
+any more. To find the local ones for your own mock store:
+
+```bash
+node -e "console.log(require('./data/db.json').invites.filter(i=>!i.redeemed_by).map(i=>i.code).join('\n'))"
+```
+
+**On a deployed project, revoke them.** They are minted by `seed.sql` and by
+`demo-seed.sql`, both of which flag their rows:
+
+```sql
+update public.invites set revoked_at = now()
+ where redeemed_by is null and revoked_at is null;
+```
+
+`npm run check:demo-data` reports whether any fabricated rows — invites
+included — are still present.
 
 **The purchases and reviews in the seed are fabricated.** Nobody bought anything
 and nobody wrote any of it; there is no checkout in this POC and the Buy button
@@ -70,11 +104,12 @@ touches `process.env`, and no secret is hardcoded anywhere.
 |---|---|---|
 | `DATA_BACKEND` | `mock` | `mock` or `supabase`; any other value throws at startup |
 | `MOCK_DB_PATH` | `./data/db.json` | resolved from the project root |
-| `SESSION_SECRET` | **none** | required; signs the local session cookie |
+| `SESSION_SECRET` | **none** | required on **both** backends. Signs the mock session cookie, and keys the rate limiter's bucket HMAC on either — see the note below |
 | `SEED_ADMIN_EMAIL` | `admin@javelin.test` | non-secret |
-| `SEED_ADMIN_PASSWORD` | **none** | required; seeds the admin login |
+| `SEED_ADMIN_PASSWORD` | **none** | required on the mock backend; seeds the admin login. Unused on Supabase |
+| `NEXT_PUBLIC_SITE_URL` | `http://localhost:3000` | this app's own public origin, no trailing slash. It is the absolute base of every link GoTrue emails — password reset, signup confirmation, email change. Deliberately **not** derived from the request's `Host` header, which is attacker-controlled. Set it in production, and add the same origin to Supabase → Authentication → URL Configuration → Redirect URLs, or GoTrue refuses the redirect |
 | `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | empty | required when `DATA_BACKEND=supabase`; both are browser-safe by design |
-| `SUPABASE_SERVICE_ROLE_KEY` | empty | **leave blank.** Nothing in `src/` reads it — it is `BYPASSRLS`, so a client built from it ignores every policy. Operator tasks only |
+| `SUPABASE_SERVICE_ROLE_KEY` | empty | **exactly one file in `src/` reads it** — `src/lib/auth/account-deletion.ts`, which bans the GoTrue user on account deletion because `delete_my_account()` cannot reach the `auth` schema. That file builds **no** Supabase client; it makes one `fetch` to one admin endpoint. The key is `BYPASSRLS`, so a client built from it would ignore every policy — never construct one. Leave it blank and deletion still anonymises the profile and closes the app; what does not happen is the credential dying |
 
 ## Deploying to Vercel
 
@@ -97,11 +132,37 @@ Project Settings → Environment Variables:
 | `DATA_BACKEND` | `supabase` |
 | `NEXT_PUBLIC_SUPABASE_URL` | the project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | the publishable / anon key |
+| `NEXT_PUBLIC_SITE_URL` | the real origin, e.g. `https://javelin-hub.vercel.app` |
+| `SESSION_SECRET` | a random 32-byte hex string |
 
-`SESSION_SECRET` and `SEED_ADMIN_PASSWORD` are **not** needed on Supabase and
-should not be set there: they belong to the mock session cookie and the mock
-seed. `src/lib/env.ts` only throws for them when something actually asks, and on
-the Supabase path nothing does.
+**`SESSION_SECRET` IS REQUIRED HERE TOO**, and an earlier revision of this file
+said the opposite. It is not only the mock cookie's signing key: `rate-limit.ts`
+derives every bucket as `HMAC-SHA256(SESSION_SECRET, key)` on **both** backends,
+because `consume_rate_limit()` is callable by `anon` and a guessable bucket would
+let anybody burn a victim's password-reset budget. Without the variable the
+limiter fails open (it did not always — see the "IT FAILS OPEN" note in
+`src/lib/rate-limit.ts`), which means signup, login, password reset and invite
+redemption are unthrottled.
+
+**A production server now refuses to start without it**, along with the other
+three values whose absence is otherwise silent. `assertRuntimeConfig()` in
+`src/lib/env.ts` is called from `register()` in `src/instrumentation.ts` and
+raises every problem it finds at once:
+
+| | what it looks like without the check |
+|---|---|
+| `DATA_BACKEND` is `mock` or unset | `/` and `/login` answer 200, every page that reads data answers 500 |
+| `SESSION_SECRET` unset | the limiter fails open on all four public forms and says nothing |
+| `NEXT_PUBLIC_SITE_URL` unset | GoTrue refuses every emailed link, and the reset flow swallows that error on purpose |
+| the Supabase pair unset, with `DATA_BACKEND=supabase` | as the first row |
+
+Next skips `register()` during a production build — `registerInstrumentation()`
+returns early on `NEXT_PHASE=phase-production-build`, in as many words — so this
+cannot fail the CI build, which passes mock values deliberately. The check runs
+when a server actually starts.
+
+`SEED_ADMIN_PASSWORD` genuinely is mock-only and can be left unset: it seeds the
+mock store's admin account, and on Supabase nothing asks for it.
 
 No `vercel.json` is required — `next build` output is detected automatically,
 and `src/proxy.ts` deploys as the project's proxy (Vercel still labels it
@@ -127,7 +188,16 @@ npm run typecheck     # tsc --noEmit
 npm run verify:authz  # authorization regression suite (throwaway store)
 npm run verify:pages  # rendered-page regression suite (throwaway store + server)
 npm run verify:supabase   # the same rules, asked of the real database (read-only)
+npm run check:demo-data   # is there fabricated data in the database this points at?
 ```
+
+Two GitHub workflows run them. `.github/workflows/verify.yml` runs typecheck,
+lint, build and both mock suites on every push and pull request, and needs no
+secrets — a property worth preserving. `.github/workflows/release-checks.yml` is
+`workflow_dispatch` only and runs `check:demo-data` against the live project;
+it is separate precisely because it needs credentials, and a fork's pull request
+cannot trigger a manual dispatch. **Run it immediately before any deploy that
+will serve a real user**, after `demo-teardown.sql`.
 
 `verify:authz` is the executable half of the security model. Both suites run
 against the **mock** backend, which is the point: the mock is the code twin of

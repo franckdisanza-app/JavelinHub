@@ -200,6 +200,55 @@ export async function destroySession(): Promise<void> {
 }
 
 /**
+ * Ends every OTHER session this user has, and leaves the caller's own intact.
+ *
+ * Called after a password changes — from the reset flow and from `/settings`.
+ * A password change that leaves the old sessions running is not a password
+ * change: the two people who most need this are somebody whose laptop was
+ * stolen and somebody who is resetting *because* they were compromised, and for
+ * both of them the attacker's session is the entire threat. Until this existed
+ * that session survived the reset, and `docs/ROADMAP.md` §4 recorded it as a
+ * known divergence rather than pretending otherwise.
+ *
+ * -----------------------------------------------------------------------------
+ * THE TWO BACKENDS STILL DIVERGE, AND THE DIVERGENCE IS NARROWER NOW
+ * -----------------------------------------------------------------------------
+ * `supabase` — `signOut({ scope: 'others' })` revokes every refresh token for
+ * the user except the one this request holds. **What it cannot revoke is an
+ * access token that has already been issued**, which stays valid until it
+ * expires — at most an hour. That is the same residual account deletion carries
+ * and is documented there for the same reason: every path through the
+ * application is closed at once, and a raw token held by somebody who already
+ * had one keeps satisfying RLS on a direct PostgREST call until it lapses.
+ *
+ * `mock` — a NO-OP, and it has to be. The mock cookie is stateless by design:
+ * it carries a user id and an issued-at, signed, and nothing reads a store to
+ * validate it. There is no revocation list to add a row to, and inventing one
+ * would mean a store shape, a migration in `db.json`, and a second
+ * implementation of session validity — for a backend that `README.md` says
+ * cannot be deployed at all. Recorded rather than faked, which is this file's
+ * standing rule for anything the two mechanisms genuinely do not share.
+ *
+ * NEVER THROWS. This runs immediately after a password has already been
+ * written, so the change has happened whatever this returns. Failing the action
+ * here would tell the user their new password did not take when it did, and
+ * would send them back to a form that now needs the new one.
+ *
+ * Server Actions / Route Handlers only: the Supabase branch writes cookies.
+ */
+export async function destroyOtherSessions(): Promise<void> {
+  if (dataBackend() !== 'supabase') return;
+
+  try {
+    const supabase = await createSupabaseServerClient();
+    await supabase.auth.signOut({ scope: 'others' });
+  } catch {
+    // See above. A revocation that could not be delivered is worth nothing to
+    // the caller and must not undo a password change that succeeded.
+  }
+}
+
+/**
  * The signed-in user's id, or `null` when anonymous / the session is not valid.
  *
  * Both branches have the same contract, and it is the important one: a

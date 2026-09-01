@@ -63,24 +63,61 @@ export async function setCoachStandingAction(_prev: FormState, formData: FormDat
   const actor = await getActor();
   const db = getDataClient();
 
+  /*
+   * TWO PASSES, AND THE SECOND ONE IS NOT BELT AND BRACES.
+   *
+   * Nothing here is atomic: the sweep below and `set_coach_status()` are
+   * separate transactions, so there is a window between "read the coach's
+   * offers" and "suspend them" in which the coach can publish one more. The
+   * RPC then refuses — correctly, it will not leave "suspended but still
+   * selling" reachable — and the administrator is left having withdrawn the
+   * coach's ENTIRE shop, as the administrator, which means `deleted_by` names
+   * them and the coach cannot put any of it back. The worst outcome of the
+   * whole action, reached by the coach doing something entirely ordinary.
+   *
+   * A second pass closes it in practice: the new offer is now visible to the
+   * sweep, and a coach would have to publish again inside the same narrow
+   * window to survive twice. It is not a proof — the structural fix is an RPC
+   * that suspends and withdraws in one transaction, which needs `deleted_by`
+   * as a parameter because `guard_listing_update()` calls `auth.uid()` and the
+   * role owning that function can never reach it. That is a migration; this is
+   * the honest interim, and it turns a plausible failure into an implausible
+   * one rather than pretending it cannot happen.
+   *
+   * Only an `invalid` retries. That is the code `errors.ts` maps 22023 to, and
+   * 22023 is what 0022 raises for "Take their offers off sale first." A
+   * `forbidden` (not an administrator, or changing your own standing) or a
+   * `not_found` is a settled answer and retrying it would just be slower.
+   */
+  const MAX_PASSES = 2;
   let withdrawn = 0;
   try {
-    if (status === 'suspended' || status === 'none') {
-      // Read first, then withdraw one at a time. Sequential rather than
-      // `Promise.all`: each of these is a write against the same coach's rows,
-      // and a partial failure halfway through a parallel batch would leave a
-      // state nobody could describe in the message below.
-      // EVERY page: `set_coach_status()` refuses while any offer is on sale, so
-      // a first-page sweep would take some down and then fail — see `drainAll`.
-      const listings = await drainAll((page) => db.listListingsForAdmin(actor, coachId, page));
-      for (const listing of listings) {
-        if (listing.deleted_at !== null) continue;
-        await db.softDeleteListing(actor, listing.id);
-        withdrawn += 1;
+    for (let pass = 1; ; pass += 1) {
+      if (status === 'suspended' || status === 'none') {
+        // Read first, then withdraw one at a time. Sequential rather than
+        // `Promise.all`: each of these is a write against the same coach's rows,
+        // and a partial failure halfway through a parallel batch would leave a
+        // state nobody could describe in the message below.
+        // EVERY page: `set_coach_status()` refuses while any offer is on sale, so
+        // a first-page sweep would take some down and then fail — see `drainAll`.
+        const listings = await drainAll((page) => db.listListingsForAdmin(actor, coachId, page));
+        for (const listing of listings) {
+          if (listing.deleted_at !== null) continue;
+          await db.softDeleteListing(actor, listing.id);
+          withdrawn += 1;
+        }
+      }
+
+      try {
+        await db.setCoachStatus(actor, coachId, status, reason);
+        break;
+      } catch (error) {
+        // The last pass rethrows into the handler below, which is what reports
+        // the half-shut shop.
+        if (pass >= MAX_PASSES || !isDataError(error) || error.code !== 'invalid') throw error;
+        // Otherwise: something went on sale under us. Sweep again.
       }
     }
-
-    await db.setCoachStatus(actor, coachId, status, reason);
   } catch (error) {
     if (!isDataError(error)) throw error;
     /*

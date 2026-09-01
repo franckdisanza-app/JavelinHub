@@ -39,11 +39,52 @@ export async function GET(request: NextRequest) {
    * emailed, so an unchecked value would make a link WE SENT redirect somewhere
    * else, with a freshly created session already in the browser.
    *
-   * GoTrue does not forward extra query parameters through its own `/verify`
-   * redirect, so on Supabase this is normally absent and the default applies.
-   * It is honoured anyway rather than ignored, so the two backends behave the
-   * same when it is present.
+   * GoTrue does not reliably forward extra query parameters through its own
+   * `/verify` redirect, so on Supabase this is often absent and the default
+   * below applies. It is honoured when present so the two backends behave the
+   * same.
    */
-  const next = safeNextPath(params.get('next')) ?? RESET_PASSWORD_PATH;
+  const next = safeNextPath(params.get('next')) ?? defaultDestination(params.get('type'));
   redirect(next);
+}
+
+/**
+ * Where a link lands when it carried no `?next=`.
+ *
+ * ONE ROUTE, FOUR ERRANDS. Password reset, signup confirmation, an email change
+ * and a magic link all come back here, and until now they all defaulted to the
+ * password-reset form — so somebody who had just confirmed their email address
+ * for the first time was greeted by a page asking them to choose a NEW
+ * password. For the first screen a new account ever sees, that is the wrong
+ * half of the trade the shared default was making.
+ *
+ * GoTrue names the errand in `type` on the redirect it sends. When it says so,
+ * this believes it. When it does not — the parameter is absent, or a value
+ * arrives that this does not recognise — the answer stays what it has always
+ * been, and that conservatism is deliberate rather than laziness: of the four,
+ * recovery is the only one whose user CANNOT get where they are going by any
+ * other route. A confirming signup that lands on the wrong page is already
+ * signed in and one click from anywhere; a locked-out user sent to `/offers`
+ * has lost the only door they had.
+ *
+ * `type` is untrusted input like everything else in this URL, so it is matched
+ * against a closed set and never interpolated into the path.
+ */
+function defaultDestination(type: string | null): string {
+  switch (type) {
+    case 'signup':
+      // Matches the `?next=` that `signUp` asks GoTrue for, so the destination
+      // is the same whether or not the parameter survives the round trip.
+      return '/offers?welcome=1';
+    case 'email_change':
+      // Likewise `requestEmailChange`. The banner on `/settings` is what tells
+      // them the change actually landed — GoTrue needs BOTH addresses to
+      // confirm, so arriving here does not by itself mean it is done.
+      return '/settings?email=changed';
+    case 'magiclink':
+      return '/offers';
+    case 'recovery':
+    default:
+      return RESET_PASSWORD_PATH;
+  }
 }

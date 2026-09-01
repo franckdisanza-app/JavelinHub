@@ -8,6 +8,7 @@ import { getDataClient } from '@/lib/data';
 import { CACHE_TAGS, invalidatePublicData } from '@/lib/data/cache-tags';
 import { isDataError } from '@/lib/data/types';
 import { formError, toFormState, type FormState } from '@/lib/forms';
+import { consume, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
 
 /**
  * Claims an offer.
@@ -27,6 +28,22 @@ export async function claimOfferAction(_prev: FormState, formData: FormData): Pr
   if (listingId === '') return formError('That offer could not be found.');
 
   const actor = await getActor();
+
+  /*
+   * Keyed on the account, and only spent once there IS one — an anonymous
+   * caller is sent to sign in below without touching a budget, the same
+   * ordering `reportReviewAction` uses so that a signed-out request cannot
+   * consume somebody else's.
+   *
+   * `claim_offer()` already refuses a second claim of the SAME offer, so this
+   * is not about that; it is about one account claiming the whole catalogue,
+   * which costs nothing while the pilot is free and moves every sales count on
+   * the site. Not a boundary: ownership and the one-claim rule are enforced in
+   * Postgres and would hold with this file deleted.
+   */
+  if (actor && !(await consume('claimUser', actor.userId))) {
+    return formError(TOO_MANY_MESSAGE);
+  }
 
   let needsLogin = false;
   try {

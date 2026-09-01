@@ -65,12 +65,10 @@ export function SendFileForm({
 export function RemoveFileForm({
   orderId,
   deliverableId,
-  path,
   fileName,
 }: {
   orderId: string;
   deliverableId: string;
-  path: string;
   fileName: string;
 }) {
   const [state, formAction, pending] = useActionState(removeDeliverableAction, idleFormState);
@@ -79,7 +77,6 @@ export function RemoveFileForm({
     <form action={formAction} className="flex flex-col items-start gap-1">
       <input type="hidden" name="orderId" value={orderId} />
       <input type="hidden" name="deliverableId" value={deliverableId} />
-      <input type="hidden" name="path" value={path} />
       <Button type="submit" variant="danger" size="sm" disabled={pending}>
         {pending ? 'Removing…' : 'Remove'}
         <span className="sr-only"> {fileName}</span>

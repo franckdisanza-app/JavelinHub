@@ -43,6 +43,18 @@
  * The corollary is that this is a SPEED BUMP, not a boundary. Nothing about
  * authorization may ever depend on it.
  *
+ * **EVERYTHING THE LIMITER DOES HAPPENS INSIDE THAT `try`, INCLUDING COMPUTING
+ * THE BUCKET.** That is not tidiness, it is the whole guarantee. `bucketFor()`
+ * asks for `SESSION_SECRET`, and `env.ts` throws when it is missing — so with
+ * the hash computed one line ABOVE the `try`, an unset secret did not fail
+ * open, it threw straight through `consume()` and out of the Server Action that
+ * called it. Every gated form — login, signup, password reset, invite
+ * redemption, reporting, and both of the account forms in `/settings` — died on
+ * an unhandled error before doing any work, while anonymous browse kept working
+ * and the site looked healthy. A limiter that takes sign-in down when it is
+ * MISCONFIGURED is the same liability as one that takes it down when it is
+ * broken; there is no line in this function that may sit outside the `try`.
+ *
  * -----------------------------------------------------------------------------
  * SO IS THE IP
  * -----------------------------------------------------------------------------
@@ -115,6 +127,75 @@ export const LIMITS = {
    * sharing one office router.
    */
   reportUser: { limit: 20, windowSeconds: 60 * 60 },
+
+  /*
+   * ---------------------------------------------------------------------------
+   * THE THREE BELOW COVER THE SIGNED-IN SURFACE, WHICH HAD NOTHING
+   * ---------------------------------------------------------------------------
+   * The six limits above all guard a form reachable WITHOUT a session, which is
+   * where this module started and is the right place to have started. The
+   * consequence nobody had written down: an account is the only thing standing
+   * in front of every write in the rest of the product, `signupIp` prices an
+   * account at five an hour, and one account then had an unmetered budget of
+   * fifty-megabyte uploads.
+   *
+   * All three are keyed per USER, for the reason `reportUser` already gives:
+   * these actions need a session, so the account is the scarce input, and an IP
+   * key would punish an office or a school sharing one address while doing
+   * nothing to a caller who has an account.
+   *
+   * They remain speed bumps. The header's rule holds without exception — the
+   * limiter fails open, so no authorization decision anywhere may depend on any
+   * of these. Ownership is enforced by RLS and by `DataClient`, above and
+   * independently of this file.
+   */
+
+  /**
+   * Per USER. Every path that moves BYTES into a bucket: an avatar, an offer's
+   * instant-delivery file, and either party's file on an order.
+   *
+   * The most expensive thing an ordinary account could do, and the only one
+   * with a bill attached: the two delivery buckets accept 50 MB per object, so
+   * an unbounded loop is unbounded storage. 60 an hour is far above real use —
+   * a coach delivering to every buyer they have in one sitting is nowhere near
+   * it — and it is still a ceiling rather than none.
+   */
+  uploadUser: { limit: 60, windowSeconds: 60 * 60 },
+
+  /**
+   * Per USER. Claiming an offer.
+   *
+   * Claiming is FREE while the pilot is, which is what makes this worth a
+   * budget: `claim_offer()` refuses a second claim of the same offer, so the
+   * per-offer case is already closed by the database — but nothing stopped one
+   * account claiming the entire catalogue, which inflates every sales count on
+   * the site and every coach's public numbers with it.
+   *
+   * **This limit gets tighter, not looser, when payment lands.** A card is a
+   * far better rate limiter than this is, and a failed-charge loop is its own
+   * problem with its own budget at the payment provider.
+   */
+  claimUser: { limit: 30, windowSeconds: 60 * 60 },
+
+  /**
+   * Per USER. Publishing an offer, editing one, withdrawing or restoring one,
+   * the coach profile, and the display name.
+   *
+   * The cost here is not CPU, it is that several of these write to APPEND-ONLY
+   * tables: every edit of an offer adds a `listing_revisions` row, by a trigger,
+   * and no client role may delete one — that is deliberate (a coach must not be
+   * able to rewrite the history of their own offer) and it means an edit loop
+   * grows a table nothing can prune. Every one of these also lands on a public
+   * surface and expires a cache tag.
+   *
+   * NOT applied to writes the schema already bounds, which would be a limiter
+   * doing nothing. `reviews.order_id` is `unique`, so a review is one per order;
+   * `coach_applications_one_pending_per_user_idx` is a partial unique index, so
+   * an application is one per user while it is open; and a deliverable can only
+   * be removed if it exists. The database is the bound in all three, and it does
+   * not fail open.
+   */
+  writeUser: { limit: 60, windowSeconds: 60 * 60 },
 } as const;
 
 export type LimitName = keyof typeof LIMITS;
@@ -136,9 +217,12 @@ function bucketFor(key: string): string {
  */
 export async function consume(name: LimitName, key: string): Promise<boolean> {
   const { limit, windowSeconds } = LIMITS[name];
-  const bucket = bucketFor(`${name}:${key}`);
 
   try {
+    // INSIDE the try, and it has to be — see "IT FAILS OPEN" in the header.
+    // This line reads SESSION_SECRET, which throws when unset.
+    const bucket = bucketFor(`${name}:${key}`);
+
     if (dataBackend() === 'supabase') {
       const supabase = await createSupabaseServerClient();
       const { data, error } = await supabase.rpc('consume_rate_limit', {

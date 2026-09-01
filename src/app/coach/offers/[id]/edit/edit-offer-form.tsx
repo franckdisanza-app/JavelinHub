@@ -81,12 +81,12 @@ export function EditOfferForm({
     <form action={formAction} className="flex flex-col gap-5" noValidate>
       <input type="hidden" name="id" value={id} />
       {/*
-        The path the action deletes when the mode switches away from instant. It
-        is caller-supplied and treated as such — `offer_assets_delete_coach`
-        admits a delete only under a listing the caller owns, so the worst a
-        forged value can do is delete the forger's own file.
+        There is deliberately no `currentAsset` field here any more. The action
+        reads the path off the offer itself before the update clears it, so the
+        object that gets deleted is the one this offer actually points at rather
+        than one a submitted form named. `assetPath` is still a prop because the
+        warning below needs to know whether there is a file to lose.
       */}
-      <input type="hidden" name="currentAsset" value={assetPath ?? ''} />
 
       {state.status === 'error' && state.message ? <Alert tone="error">{state.message}</Alert> : null}
 

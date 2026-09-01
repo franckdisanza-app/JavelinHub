@@ -192,12 +192,25 @@ an administrator's takedown.
   the request form gives the same answer for every address, so it is not an
   account-enumeration oracle.
 
-  **Two things it is NOT.** It does not sign out the user's other sessions:
-  the mock cookie has no revocation list, and neither does the Supabase side
-  without `signOut({ scope: 'others' })` — recorded as a known divergence
-  rather than faked on one side. And it is **not rate limited**, which §6
-  already flags for signup and login and which matters more here: this is the
-  app's only public form that sends mail.
+  ~~**Two things it is NOT.**~~ **Both closed.** Rate limiting landed with the
+  limiter itself (§6), and the reset now **signs out every other session**.
+
+  `destroyOtherSessions()` in `session.ts` is the same dispatching shape as
+  `createSession` / `destroySession`, and it is called by BOTH password paths —
+  the reset flow and `/settings` — because the two arguments point the same way:
+  somebody resetting because they were compromised, and somebody changing a
+  password on a borrowed laptop, are both handed the account back by a change
+  that leaves the old sessions running. Both forms now say so in their success
+  message, because otherwise the user's phone asking them to sign in again looks
+  like a fault.
+
+  **The divergence is narrower, not gone.** On Supabase it is
+  `signOut({ scope: 'others' })`, which revokes every refresh token but cannot
+  revoke an access token already issued — up to an hour, the same residual
+  account deletion carries and documented in the same terms. On the mock it is a
+  deliberate no-op: that cookie is stateless by design, so there is no revocation
+  list to write to, and inventing one would mean a second implementation of
+  session validity for a backend that cannot be deployed at all.
 
   **Deployment still needs three dashboard settings** that are not in this
   repo: `NEXT_PUBLIC_SITE_URL` on Vercel, the same origin added to Supabase's
@@ -348,8 +361,32 @@ them twice is how the two diverge.
   speed bump — proxy headers are attacker-controlled unless something in front
   overwrites them.
 
-  What it does NOT cover: any other Server Action, and the app's own transactional
-  mail once that exists.
+  ~~What it does NOT cover: any other Server Action~~ — **the signed-in surface
+  is covered now too.** The six limits above all guard a form reachable without a
+  session, which was the right place to start and left one gap nobody had written
+  down: an account is the only thing in front of every write in the rest of the
+  product, `signupIp` prices an account at five an hour, and one account then had
+  an unmetered budget of fifty-megabyte uploads.
+
+  Three more limits, all keyed per USER for the reason `reportUser` already gave:
+
+  | | |
+  |---|---|
+  | `uploadUser` | 60/hour. Every path that moves bytes into a bucket — the avatar, an offer's instant-delivery file, and either party's file on an order. The delivery buckets take 50 MB per object, so an unbounded loop is unbounded storage. |
+  | `claimUser` | 30/hour. Claiming is free, and `claim_offer()` only refuses a second claim of the SAME offer — nothing stopped one account claiming the whole catalogue and moving every public sales count. Gets tighter when payment lands, not looser. |
+  | `writeUser` | 60/hour. Publishing, editing, withdrawing and restoring an offer; the coach profile; the display name. The cost is not CPU — an edit appends a `listing_revisions` row that no client role may delete, so an edit loop grows a table nothing can prune. |
+
+  **Deliberately NOT applied where the schema already bounds the write**, which
+  would be a limiter doing nothing: `reviews.order_id` is unique,
+  `coach_applications_one_pending_per_user_idx` is a partial unique index, and a
+  deliverable is only removable if it exists. The database is the bound in all
+  three and it does not fail open.
+
+  **Admin actions are deliberately still unlimited.** The population is the
+  smallest and most trusted in the product, and a limiter that can refuse an
+  administrator mid-incident is a worse trade than the row growth it prevents.
+
+  Still not covered: the app's own transactional mail once that exists.
 
   **The invite-code half of this was overstated and is corrected here.** An
   earlier revision said brute-forcing a code is "currently free". Free, yes, and
@@ -381,6 +418,27 @@ them twice is how the two diverge.
   this app deliberately keeps out of the session cookie; two root layouts would
   make every navigation between them a full page load. `docs/DATA-LAYER.md`
   carries the table and the reasoning.
+
+  **The same trap has a second door, and it is now labelled.** A `loading.tsx`
+  commits the response status the moment its fallback renders, for exactly the
+  reason Cache Components did — Next's docs say it in as many words: *"Because
+  the response headers have already been sent to the client, the status code of
+  the response cannot be updated."* So a loading state is only correct on a route
+  that answers 200 to every visitor unconditionally, and **two routes in this app
+  qualify**: `/offers` and `/coaches`.
+
+  Both now have one, and both sit inside a route group — `(browse)` and
+  `(directory)` — because a `loading.tsx` covers its whole SUBTREE rather than
+  its own page. Written without the groups first, and `verify:pages` failed three
+  assertions immediately: *"a withdrawn offer is a 404 for the public — expected
+  404, got 200"*, twice, plus the signed-in stranger. The groups add nothing to
+  the URL and leave `[id]` and `new` where the boundary cannot reach them.
+
+  ~~**No loading states.**~~ Those two, and deliberately no others. The
+  placeholder geometry is measured against the real cards rather than estimated —
+  296px against 302px, 120px against 126px — because the first draft was written
+  by eye at 162px against 302px, which replaces a blank wait with a page that
+  jumps eleven hundred pixels when it lands.
 ---
 
 ## 7. Trust, safety, operations

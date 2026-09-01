@@ -32,6 +32,7 @@
  */
 
 import { createServerClient } from '@supabase/ssr';
+import { cache } from 'react';
 
 import { requireSupabaseConfig } from '@/lib/env';
 
@@ -106,8 +107,46 @@ export async function createSupabaseServerClient() {
  * Never throws. A malformed or expired cookie makes the request anonymous — the
  * same contract `decodeSessionCookie()` has on the mock side, and for the same
  * reason: a stale cookie must not be able to 500 the site.
+ *
+ * -----------------------------------------------------------------------------
+ * MEMOISED PER REQUEST, AND ONLY THE IDENTITY
+ * -----------------------------------------------------------------------------
+ * `getUser()` is not a local decode. It issues `GET /auth/v1/user` to the auth
+ * server, every single call, with no caching in `@supabase/auth-js` — and this
+ * function is reached from four different directions on one render: the site
+ * header resolving the signed-in profile, `generateMetadata`, the page's own
+ * `requireUser()` / `requireAdmin()`, and `openContext()` inside EVERY
+ * data-layer method the page calls. A signed-in `/admin/reports` render made
+ * about ten of these, awaited one after another. That is a few hundred
+ * milliseconds of round trips under every authenticated page, and it scales
+ * with the auth server's latency rather than with query cost.
+ *
+ * `cache()` from React is request-scoped, not process-scoped, which is the
+ * property that makes it safe here where the module singleton forbidden above
+ * would not be: two concurrent visitors get two separate memo tables, so one
+ * person's identity can never be handed to another. It is the same reasoning
+ * `publicClient.ts` uses in reverse — that client may be shared precisely
+ * because it holds no session.
+ *
+ * WHAT IS DELIBERATELY *NOT* MEMOISED: the profile. `getCurrentProfile()`,
+ * `resolveProfile()` and every `requireAdminProfile()` still read `profiles`
+ * fresh on each call, because `role` and `coach_status` are the facts that a
+ * promotion or a revocation changes — the exact reason `session.ts` refuses to
+ * put them in the cookie. Caching the IDENTITY is caching a value that cannot
+ * change within one request; caching the PRIVILEGE would be the stale-
+ * authorization bug that whole comment exists to prevent. Keep the line there.
+ *
+ * The one thing that could move the identity mid-request is a sign-in or a
+ * sign-out, and neither is reachable after this returns: every action that
+ * calls `createSession` / `destroySession` (`logInAction`, `signUpAction`,
+ * `logoutAction`, `deleteAccountAction`, the reset callback) ends in a
+ * `redirect()`, which throws, so nothing re-reads the identity in that request.
+ * A password change rotates the token pair without changing the id.
+ *
+ * Outside a request scope — a plain Node script — `cache()` degrades to calling
+ * straight through, so the verification suites see today's behaviour exactly.
  */
-export async function getSupabaseUserId(): Promise<string | null> {
+export const getSupabaseUserId = cache(async function getSupabaseUserId(): Promise<string | null> {
   try {
     const supabase = await createSupabaseServerClient();
     const { data, error } = await supabase.auth.getUser();
@@ -116,7 +155,7 @@ export async function getSupabaseUserId(): Promise<string | null> {
   } catch {
     return null;
   }
-}
+});
 
 // ---------------------------------------------------------------------------
 // On the service-role key, which this file deliberately does not use.

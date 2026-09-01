@@ -21,7 +21,7 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 
 import { requestPasswordReset } from '@/lib/auth/password-reset';
-import { createSession, destroySession, getActor, safeNextPath } from '@/lib/auth/session';
+import { createSession, destroyOtherSessions, destroySession, getActor, safeNextPath } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
 import { guessAuthField, toFormState, type FormState } from '@/lib/forms';
 import { clientIp } from '@/lib/client-ip';
@@ -244,6 +244,19 @@ export async function resetPasswordAction(_prev: FormState, formData: FormData):
   } catch (error) {
     return toFormState(error);
   }
+
+  /*
+   * EVERY OTHER SESSION GOES, and this flow is where it matters most. A user
+   * arrives here holding a link they asked for because they could not get in —
+   * and one common reason for that is that somebody else got in first and
+   * changed the password, or is sitting on a stolen session. Setting a new
+   * password while leaving that session running hands the account back.
+   *
+   * After the write, never before: a revocation issued in front of a change
+   * that then fails would sign the user out of every device for nothing. And it
+   * cannot fail this action — see `destroyOtherSessions`.
+   */
+  await destroyOtherSessions();
 
   // The header renders from the signed-in profile; nothing about it changes
   // here, but the session cookies may have been rotated by GoTrue during the

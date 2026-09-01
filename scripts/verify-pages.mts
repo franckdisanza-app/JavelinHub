@@ -86,6 +86,55 @@ import type { Actor, Profile } from '@/lib/data/types';
 const scratch = mkdtempSync(join(tmpdir(), 'javelin-pages-'));
 const storePath = join(scratch, 'db.json');
 
+/**
+ * =============================================================================
+ * THE OTHER THING THIS SUITE HAS TO THROW AWAY, and for a long time did not.
+ * =============================================================================
+ *
+ * The store above is a fresh temp file per run, which is the whole reason this
+ * suite can plant states the seed deliberately does not contain. But the server
+ * it starts is `next dev` IN THIS PROJECT DIRECTORY, and the twelve cached
+ * public reads in `src/lib/data/cached.ts` write to Next's data cache under
+ * `.next` — which is not thrown away by anything.
+ *
+ * `unstable_cache` keys on the wrapped function's ARGUMENTS. `cachedCoaches()`
+ * and `cachedListings()` are called with the same (empty) arguments on every
+ * run, so run N is handed run N−1's HTML, stale-while-revalidate, for exactly
+ * the two pages this suite asserts against hardest. Observed, three consecutive
+ * runs with no source change in between:
+ *
+ *     373 passed, 1 failed      <- F4's directory card, absent
+ *     374 passed, 0 failed      <- after deleting the cache by hand
+ *     372 passed, 2 failed      <- cache repopulated, F1 joins it
+ *
+ * The FAILURES are the benign half. Fixture accounts get a fresh uuid per run,
+ * so their cards are simply missing from a stale page and the assertion
+ * notices. The dangerous half is silent: every assertion keyed on a SEEDED id
+ * still passes against that stale page, so a change to `coach-card.tsx` or
+ * `listing-card.tsx` can be certified by markup rendered before the change
+ * existed. A suite that reads its own previous output is not a regression
+ * suite.
+ *
+ * So the data cache is thrown away with the store. Only the data cache: the
+ * compile caches beside it (`.next/dev/build`, the Turbopack cache) hold no
+ * rendered output and dropping them would make every run a cold compile for no
+ * correctness gain.
+ *
+ * Both paths are cleared because the location moved between Next versions and a
+ * stale directory from an older one is exactly the kind of thing that would sit
+ * there being read. `force: true` makes a missing path a no-op.
+ */
+const NEXT_DATA_CACHES = [
+  join(process.cwd(), '.next', 'dev', 'cache', 'fetch-cache'),
+  join(process.cwd(), '.next', 'cache', 'fetch-cache'),
+];
+
+function clearNextDataCache(): void {
+  for (const dir of NEXT_DATA_CACHES) rmSync(dir, { recursive: true, force: true });
+}
+
+clearNextDataCache();
+
 // Must be set before the store module is evaluated, and inherited by the server
 // child below. Throwaway values, so the suite runs without a `.env.local`.
 //
@@ -2139,6 +2188,69 @@ try {
     (await getAs('/offers', LEARNER)).html.includes('href="/admin/reports"'), false);
 
   // -------------------------------------------------------------------------
+  // =========================================================================
+  section('/api/health, robots and the sitemap — the operator-facing surface');
+  // =========================================================================
+  // These three are the only routes nobody navigates to, which is exactly why
+  // they need asserting: a broken one is invisible until a probe pages someone
+  // at 3am or a crawler indexes /admin.
+  const health = await fetch(`${BASE}/api/health`);
+  const healthBody = (await health.json()) as { status?: string; backend?: string };
+  check('/api/health answers 200 when the data layer answers', health.status, 200);
+  check('...saying so', healthBody.status, 'ok');
+  // The whole diagnostic value of the field: README.md's "symptom when
+  // DATA_BACKEND is unset" is a site that serves `/` and 500s on `/offers`.
+  // A probe that reports WHICH backend answered turns that into one look.
+  check('...and naming the backend that answered', healthBody.backend, 'mock');
+  check('...uncached, or it would keep saying ok after the database went away',
+    health.headers.get('cache-control'), 'no-store');
+
+  const robots = await fetch(`${BASE}/robots.txt`);
+  const robotsText = await robots.text();
+  check('/robots.txt is served', robots.status, 200);
+  // Every one of these is a real page behind a real check; robots is the
+  // courtesy that keeps them out of an index, never the boundary.
+  for (const path of ['/admin', '/settings', '/orders', '/purchases', '/coach', '/api', '/auth']) {
+    check(`...and disallows ${path}`, robotsText.includes(`Disallow: ${path}\n`), true);
+  }
+  check('...while allowing the rest', robotsText.includes('Allow: /'), true);
+  check('...and pointing at the sitemap', robotsText.includes('Sitemap: '), true);
+
+  const sitemap = await fetch(`${BASE}/sitemap.xml`);
+  const sitemapXml = await sitemap.text();
+  check('/sitemap.xml is served', sitemap.status, 200);
+  check('...listing the browse roots', sitemapXml.includes('/offers<') && sitemapXml.includes('/coaches<'), true);
+  // The seeded published offer must be in it and the WITHDRAWN one must not:
+  // the sitemap reads `listListings`, which carries the `deleted_at is null`
+  // predicate, so this is the assertion that a withdrawal really does take an
+  // offer out of the index rather than merely off the grid.
+  check('...and a published offer', sitemapXml.includes(`/offers/${OFFER.fundamentals}<`), true);
+  check('...but never a withdrawn one', sitemapXml.includes(`/offers/${OFFER.video}<`), false);
+  // Nothing private, ever. The disallow list above is advisory; this is the
+  // stronger statement — those URLs are not in the file at all.
+  check('...and nothing behind a login',
+    /\/(admin|settings|orders|purchases|coach\/|redeem|api)/.test(sitemapXml), false);
+
+  // =========================================================================
+  section('The demo panel is a property of the MOCK store, not of the product');
+  // =========================================================================
+  // `/login` prints fixture logins and the seeded invite codes. Redeeming one
+  // promotes its redeemer straight to an approved coach, and `seed.sql` mints
+  // the same two codes into Postgres — so on a deployed, seeded project this
+  // panel published a live privilege-granting credential on a page anybody can
+  // reach. It is now gated on `dataBackend() === 'mock'`.
+  //
+  // This suite runs on the mock, so what it can assert is the PRESENT half:
+  // the panel renders here, and the codes it prints are the ones this store
+  // actually holds. The absent half is asserted by the gate having exactly one
+  // condition, and by `/login` on the Supabase backend rendering neither.
+  const loginPage = await get('/login');
+  check('on the mock the panel is rendered', loginPage.text.includes('Demo accounts'), true);
+  check('...with the fixture coach', loginPage.text.includes('coach@javelin.test'), true);
+  // Never the admin password, on any backend: it is per-machine and not ours.
+  check('...and never the seeded admin password',
+    loginPage.text.includes('verify-pages-throwaway-password'), false);
+
   section('Password reset — the link, end to end over HTTP');
 
   /*
@@ -2228,6 +2340,12 @@ try {
 } finally {
   stopServer(server);
   rmSync(scratch, { recursive: true, force: true });
+  // Again on the way out, so this run leaves nothing behind for a `next dev`
+  // the developer starts afterwards. The entries name a throwaway store's rows
+  // and the server that could revalidate them is gone, so they are dead either
+  // way — but a cached page naming a fixture coach who no longer exists is a
+  // confusing thing to meet in the browser.
+  clearNextDataCache();
 }
 
 for (const failure of failures) console.log(`  FAIL  ${failure}`);

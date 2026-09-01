@@ -200,6 +200,48 @@ function promoteToCoachRole(current: Role): Role {
  * administrators, which is strictly worse than the `is_admin(uuid)` probe that
  * was already removed from the SQL for the same reason.
  */
+/**
+ * Mirrors: the `public.public_profiles` view (0002_rls.sql, widened by 0008).
+ *
+ * =============================================================================
+ * THIS PROJECTS EVERY PROFILE, AND THAT IS A DECISION — SEE BEFORE "FIXING" IT
+ * =============================================================================
+ * The view carries no `where` clause, so `GET /rest/v1/public_profiles` with
+ * the publishable key returns EVERY account's id, display name and avatar:
+ * learners, applicants and administrators included. Measured against the live
+ * project, 41 of 41 rows. That is a real disclosure and it is worth closing —
+ * but **not by adding a predicate here**, which was tried and is wrong.
+ *
+ * A `where` was drafted along the lines its sibling `public_coaches` uses
+ * ("the row's mere EXISTENCE is the approval"), admitting approved coaches,
+ * anyone owning a listing, anyone who has written a review, and anyone who has
+ * redeemed an invite — the four routes by which a name is already published.
+ * It broke five assertions in `verify-authz.mts`, and reading them is what
+ * makes the case:
+ *
+ *   - `getPublicProfile(adminId)` must RETURN A ROW, and its shape must be
+ *     "identical to a learner's". The uniformity is the anti-enumeration
+ *     property: you cannot tell an administrator from a learner by what comes
+ *     back, which is the same thing dropping `role` from the projection buys.
+ *   - `is_approved_coach` must be FALSE — not absent — for an applicant awaiting
+ *     review, a rejected applicant, and a learner who never applied. Callers
+ *     read that boolean to decide whether a name is a link. A missing row and
+ *     `false` are different answers and the suite pins all three cases.
+ *
+ * So a predicate would trade one oracle for a worse one. Today the view answers
+ * "here is a display name" for every uuid and reveals nothing by doing so; with
+ * a `where`, the ROW'S EXISTENCE would itself answer "has this person published,
+ * reviewed or been approved?" — a question about an individual that nothing in
+ * the product asks and that is strictly more than a name.
+ *
+ * The exposure is therefore about BULK reads, not about the projection, and the
+ * fix lives outside this file: cap what one request may return (PostgREST's
+ * `db-max-rows`, a Supabase dashboard setting, which the app's own
+ * `MAX_PAGE_SIZE` cannot enforce on a request the app did not make). Narrowing
+ * the row set as well is a product decision about whether a learner's display
+ * name is public at all — and if it is ever taken, the five assertions above
+ * are the contract that has to be renegotiated first, deliberately.
+ */
 function toPublicProfile(profile: Profile): PublicProfile {
   return {
     id: profile.id,
@@ -2033,7 +2075,7 @@ export class MockDataClient implements DataClient {
   }
 
   /** Mirrors: `deliverables_delete_own` — own uploads only, never the other party's. */
-  async removeDeliverable(actor: Actor, deliverableId: string): Promise<void> {
+  async removeDeliverable(actor: Actor, deliverableId: string): Promise<string> {
     const id = requireText(deliverableId, 'File', 200);
     return mutateDb((db) => {
       const profile = resolveProfile(db, actor);
@@ -2042,7 +2084,12 @@ export class MockDataClient implements DataClient {
       if (db.deliverables[index].uploaded_by !== profile.id) {
         throw new DataError('forbidden', 'You can only remove files you uploaded yourself.');
       }
+      // Read the path off the row BEFORE the splice, and hand it back: it is
+      // the caller's cue to delete the bytes, and the row is the only thing
+      // that knows it. See the contract in `client.ts`.
+      const { storage_path: storagePath } = db.deliverables[index];
       db.deliverables.splice(index, 1);
+      return storagePath;
     });
   }
 

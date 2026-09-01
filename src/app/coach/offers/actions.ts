@@ -15,6 +15,7 @@ import {
 } from '@/lib/storage/deliverables';
 import { fieldError, formError, toFormState, type FormState } from '@/lib/forms';
 import { parsePriceToCents } from '@/lib/format';
+import { consume, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
 
 const DASHBOARD_PATH = '/coach/offers';
 
@@ -97,9 +98,36 @@ export async function updateOfferAction(_prev: FormState, formData: FormData): P
 
   const actor = await getActor();
 
+  /*
+   * Every edit appends a `listing_revisions` row, written by
+   * `record_listing_revision()` rather than by this file — and no client role
+   * holds DELETE on that table, deliberately, so a coach cannot rewrite the
+   * history of their own offer. The other side of that guarantee is that an
+   * edit loop grows a table nothing can prune, so the loop is what gets bounded.
+   *
+   * After validation, so a mistyped price does not spend the budget needed to
+   * correct it.
+   */
+  if (actor && !(await consume('writeUser', actor.userId))) {
+    return formError(TOO_MANY_MESSAGE, values);
+  }
+
   let needsLogin = false;
   try {
-    await getDataClient().updateListing(actor, id, {
+    const db = getDataClient();
+
+    /*
+     * Read BEFORE the update, because the update is what erases the answer:
+     * switching to personalised clears `asset_path` in the same statement, so
+     * afterwards there is nothing left to say which object to tidy up. This
+     * replaces a hidden `currentAsset` input — see `setOfferAssetAction` for
+     * why a client-chosen delete target was worth removing even though the
+     * storage policy already bounded it.
+     */
+    const previousAsset =
+      fulfilment === 'personalised' ? ((await db.getMyListing(actor, id))?.asset_path ?? '') : '';
+
+    await db.updateListing(actor, id, {
       title,
       description,
       price_cents: priceCents,
@@ -114,16 +142,10 @@ export async function updateOfferAction(_prev: FormState, formData: FormData): P
      * bucket is invisible, while bytes deleted before the column would leave a
      * live offer pointing at a download that fails.
      *
-     * `currentAsset` is a hidden input and therefore caller-supplied, which is
-     * fine and is the same trust `removeDeliverableAction` places in its `path`:
-     * `offer_assets_delete_coach` admits a delete only under a listing the
-     * caller owns, so the worst a forged value can do is delete the forger's own
-     * file. Best-effort, like every other object delete in this app.
+     * `previousAsset` was read off the offer above, before the update cleared
+     * the column. Best-effort, like every other object delete in this app.
      */
-    if (fulfilment === 'personalised') {
-      const previous = String(formData.get('currentAsset') ?? '').trim();
-      if (previous !== '') await deleteOfferAsset(previous);
-    }
+    if (previousAsset !== '') await deleteOfferAsset(previousAsset);
   } catch (error) {
     if (!isDataError(error)) throw error;
     // Deferred: `redirect()` throws, and must not be thrown from inside a catch.
@@ -170,7 +192,6 @@ export async function setOfferAssetAction(_prev: FormState, formData: FormData):
   if (id === '') return formError('That offer could not be found.');
 
   const intent = String(formData.get('intent') ?? 'set');
-  const previous = String(formData.get('current') ?? '').trim();
 
   if (intent !== 'clear' && !deliveryStorageAvailable()) {
     return formError(
@@ -180,9 +201,33 @@ export async function setOfferAssetAction(_prev: FormState, formData: FormData):
 
   const actor = await getActor();
 
+  /*
+   * The upload budget, not the write one. This is the single cheapest way for
+   * one account to move bytes repeatedly: `set` uploads a NEW key every time
+   * rather than overwriting (so a buyer's signed URL to the old file keeps
+   * working until it expires), which means a replace loop leaves every previous
+   * object behind until its own delete lands. `clear` spends it too — it is the
+   * same control, and exempting one intent would just name the loop to use.
+   */
+  if (actor && !(await consume('uploadUser', actor.userId))) {
+    return formError(TOO_MANY_MESSAGE);
+  }
+
   let needsLogin = false;
   try {
     const db = getDataClient();
+
+    /*
+     * The path being REPLACED comes off the offer, not off the form. It used to
+     * be a hidden `current` input, i.e. a client-chosen object to delete;
+     * `offer_assets_delete_coach` confined that to offers the caller owns, so
+     * the worst case was a coach erasing the file of another of THEIR OWN
+     * offers and leaving that offer pointing at nothing. `owned_listings` is
+     * scoped by `auth.uid()` inside the view, so this read is both the correct
+     * source and an ownership check.
+     */
+    const owned = await db.getMyListing(actor, id);
+    const previous = owned?.asset_path ?? '';
 
     if (intent === 'clear') {
       await db.setListingAsset(actor, id, null);
@@ -248,6 +293,16 @@ async function setWithdrawn(formData: FormData, mode: 'withdraw' | 'restore'): P
 
   const actor = await getActor();
   const db = getDataClient();
+
+  /*
+   * Withdraw and restore share the budget with edits because they are the same
+   * cost: both take an offer in and out of every public read and expire the
+   * listings cache tag, and a flip-flop between them is the cheapest way to do
+   * that repeatedly.
+   */
+  if (actor && !(await consume('writeUser', actor.userId))) {
+    return formError(TOO_MANY_MESSAGE);
+  }
 
   let needsLogin = false;
   try {
