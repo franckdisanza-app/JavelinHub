@@ -174,6 +174,9 @@ and `src/proxy.ts` deploys as the project's proxy (Vercel still labels it
   actor rule, error handling. Read this before writing any page or server action.
 * [`supabase/README.md`](supabase/README.md) — schema, RLS design notes, the
   mock-check ↔ RLS-policy mapping table, and the mock → Supabase swap path.
+* [`docs/DEPLOY.md`](docs/DEPLOY.md) — every step that happens outside this
+  repository: the demo-data teardown, the dashboard settings, backups, and what
+  a second Supabase project would unblock. Read before deploying anything.
 * [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is missing and in what order, with
   the file that documents each absence. Read before planning a phase.
 * [`PROGRESS.md`](PROGRESS.md) — build log and quality bar.
@@ -189,7 +192,19 @@ npm run verify:authz  # authorization regression suite (throwaway store)
 npm run verify:pages  # rendered-page regression suite (throwaway store + server)
 npm run verify:supabase   # the same rules, asked of the real database (read-only)
 npm run check:demo-data   # is there fabricated data in the database this points at?
+npm run verify:visual     # layout, computed style and 375px overflow, in a real browser
 ```
+
+`verify:visual` is the third suite and the newest. It exists because
+`PROGRESS.md` spent a section warning that **nobody had visually looked at any
+of these pages**, and that `verify:pages` reads served HTML rather than a
+laid-out DOM — so it cannot see computed style, geometry or 375px overflow.
+This one can: it asserts that no public page scrolls sideways at 375px or
+1280px, that nothing on any of them paints a corner radius or a box-shadow
+(brand section 06, previously enforced by grepping the CSS bundle, which
+`globals.css` documents as unreliable), that every standalone control clears
+44px, and that a withdrawn offer is still a 404. Chromium only, no secrets, its
+own throwaway mock store on port 3100.
 
 Two GitHub workflows run them. `.github/workflows/verify.yml` runs typecheck,
 lint, build and both mock suites on every push and pull request, and needs no

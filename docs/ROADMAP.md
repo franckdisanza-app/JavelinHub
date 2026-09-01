@@ -31,6 +31,20 @@ reviewed".
 
 In dependency order:
 
+### 1.0 Money — answered, and now scaffolded rather than built
+
+**The decision is a PAID launch, with Stripe integrated later.** That is
+recorded here because three other items in this document bend around it and
+were previously written as open questions.
+
+What that changes, and what it does not: the offer page already says plainly
+that claiming is free while the pilot runs and that nothing is charged, so the
+free path is honest today. The legal documents §7 now describes are written for
+a paid marketplace — the refund policy distinguishes the two `fulfilment` modes
+because UK/EU consumer law does, and says in its own last section which parts
+of itself are not built yet. What is still absent is everything in §1.3 and
+§1.4.
+
 ### 1.1 File storage and delivery
 **Partly done.** Avatars ship (`0008_avatars.sql`, `src/lib/storage/avatars.ts`),
 which was the point: they depend on nothing, so they were the cheapest way to
@@ -281,16 +295,40 @@ an administrator's takedown.
   project — no fake domain has an MX record. They skip with that reason. Running
   them again needs a second, test-only project, which is where the stuck-fixtures
   problem was already heading.
-* **Still no transactional email of our own.** The reset flow rides on
-  Supabase's built-in SMTP, which works and is heavily rate-limited — a handful
-  of messages an hour, project-wide. That is enough for a pilot and not enough
-  for launch, and it covers only the mails GoTrue itself sends. Nothing sends a
-  receipt, "you have a new order", or "your review is ready".
+* **Transactional email: the seam is built, one of three messages is wired, and
+  the finding is the interesting part.**
 
-  Note where the work actually is: wiring Resend is **configuration, not code**
-  for the reset mail — custom SMTP in the Supabase dashboard, and the flow is
-  unchanged. It is a code change only for the app's own mails, which is where
-  the templates and a provider integration have to live.
+  `src/lib/email/` has `sendEmail()` and the three notifications. `sendEmail`
+  logs and skips while `RESEND_API_KEY` is unset — the supported local and CI
+  state, so no development run can mail a real person — and the provider call
+  itself is deliberately the one unwritten line, marked GAP, because guessing at
+  Resend's field names from memory is how an integration fails silently.
+
+  **NEITHER PARTY TO AN ORDER CAN READ THE OTHER'S EMAIL ADDRESS**, and that was
+  discovered by trying to wire the notifications rather than by reasoning about
+  it. `profiles` carries email, so `profiles_select_self` and
+  `profiles_select_admin` are the only policies that admit it — `getProfile`'s
+  own comment records that an earlier revision mirrored a `using (true)` policy
+  and handed every user's address to anonymous callers. So:
+
+  | | |
+  |---|---|
+  | the buyer's own order confirmation | **wired** — the recipient IS the actor, so it is a self-read |
+  | "you have a new order", to the coach | blocked: the buyer's session may not read the coach's address |
+  | "your file is ready", to the buyer | blocked: the same, in the other direction |
+
+  **The fix is an outbox, not a privileged client.** A `notifications` table the
+  action writes a row into naming a USER ID, drained by something that
+  legitimately holds privilege. Building a service-role client to read the
+  address instead would defeat the RLS model for the convenience of a
+  notification. Two open questions before it can be built, both the operator's:
+  where the drain runs (pg_cron, an Edge Function, a Vercel cron route), and
+  whether a coach may opt out.
+
+  Still true, and unchanged: wiring Resend for GoTrue's OWN mail — reset, signup
+  confirmation, email change — is **configuration in the Supabase dashboard and
+  no code at all**. `docs/DEPLOY.md` lists it as one of three dashboard settings
+  this repository cannot reach.
 
 ---
 
@@ -513,6 +551,20 @@ them twice is how the two diverge.
   and `scripts/probe-grants.mjs` sweeps every client-reachable function for the
   same trap. Nothing else was exposed: every other privileged function guards
   itself and refuses anon with its own sentence.
+* ~~**Reviews cannot be answered.**~~ **Done** (0032, `review_replies`). A
+  coach may publish one reply to a review of their own offer.
+
+  A NEW ROW, NEVER A MUTATION — 0016 took both UPDATE routes out of `reviews`
+  and the same argument applies to the answer, so there is no update policy for
+  any role and no client delete. One per review as a UNIQUE constraint; removal
+  is an administrator's, through an audited RPC. No archive table, unlike
+  `remove_review()`: a reply feeds no aggregate, so a plain delete leaves
+  nothing inconsistent — what is kept is the fact, in `admin_actions`.
+
+  The migration met both of the traps this schema keeps meeting, and closes each
+  in the same file: the bootstrap grant on a newly created table, and the
+  re-grant that follows recreating `demo_data_summary` to add its tenth table.
+
 * **Observability: the seam exists, the provider does not.**
   `src/instrumentation.ts` binds Next's `onRequestError`, which fires for every
   server error — renders, route handlers, Server Actions, the proxy — and
@@ -530,9 +582,23 @@ them twice is how the two diverge.
   nowhere else, because every call site already passes structured context rather
   than a formatted string. It needs an account and a DSN, which is a decision
   rather than a task.
-* **No legal pages.** Terms, privacy policy, refund policy. Stripe will ask for
-  these during onboarding, so they are on the critical path to payments rather
-  than beside it.
+* ~~**No legal pages.**~~ **Drafted** — `/legal/terms`, `/legal/privacy`,
+  `/legal/refunds`, linked from every page's footer and listed in the sitemap.
+
+  **They were written from the code, which is the part that had to be.** The
+  privacy notice is accurate about three things a template would state the
+  opposite of: deletion ANONYMISES rather than erases and says why the
+  foreign-key graph leaves no alternative; the rate limiter stores an HMAC and
+  never an address, so the table is not a record of who asked for a reset; and
+  the error log carries no user id, header or query string.
+
+  Every fact the documents cannot invent — registered name, address, company
+  number, governing law, refund window, commission — is `null` in
+  `src/lib/legal.ts`. Each renders as a visible red marker, is listed in a
+  banner at the top, and holds `robots: { index: false }` on the page until it
+  is filled in. A second banner says the drafts have not been reviewed by a
+  lawyer and is unconditional: no code can verify that, so removing it is a
+  deliberate edit somebody makes after the review.
 
 ---
 

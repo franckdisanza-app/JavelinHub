@@ -91,3 +91,31 @@ jobs:
         # and clears Next's data cache at both ends so a previous run cannot
         # answer for this one.
         run: npm run verify:pages
+
+      # The third suite, and the only one that needs a browser. It asserts the
+      # things the two above are structurally incapable of seeing — 375px
+      # overflow, computed border-radius and box-shadow, rendered target size —
+      # which `PROGRESS.md` spent a whole section warning were unobserved.
+      #
+      # CHROMIUM ONLY, and `--only-shell`: the suite measures layout, not
+      # cross-engine rendering, and the headless shell is a fraction of the
+      # download. `playwright.config.ts` says why the mobile project is a
+      # viewport rather than `devices['iPhone SE']` — that preset would pull in
+      # WebKit for assertions that are not engine-specific.
+      - name: Install Chromium for the visual suite
+        run: npx playwright install chromium --only-shell --with-deps
+
+      - name: Visual and layout suite
+        # Boots its own `next dev` against a throwaway mock store on port 3100.
+        # Needs no secrets, like everything else in this workflow.
+        run: npm run verify:visual
+
+      # Only on a failure, and only the traces — a green run of a layout suite
+      # should not fill the artifact store with identical screenshots.
+      - name: Upload failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7

@@ -32,6 +32,8 @@
  * `src/`.
  */
 
+import sharp from 'sharp';
+
 import { createSupabaseServerClient } from '@/lib/data/supabase/serverClient';
 import { DataError } from '@/lib/data/types';
 import { dataBackend, supabaseUrl } from '@/lib/env';
@@ -130,12 +132,19 @@ export async function uploadAvatar(userId: string, file: File): Promise<string> 
   const extension = EXTENSION_FOR_MIME[file.type];
   if (!extension) throw new DataError('invalid', 'Use a PNG, JPEG or WebP image.');
 
-  const path = `${userId}/avatar.${extension}`;
+  const { bytes, contentType } = await normaliseAvatar(file);
+
+  // The stored EXTENSION comes from the normalised output, not from the upload.
+  // A PNG that arrives and leaves as WebP must not be stored as `avatar.png`:
+  // the object name is what `EXTENSION_FOR_MIME` maps back from, and a mismatch
+  // would serve the right bytes under the wrong `Content-Type`.
+  const storedExtension = EXTENSION_FOR_MIME[contentType] ?? extension;
+  const path = `${userId}/avatar.${storedExtension}`;
   const supabase = await createSupabaseServerClient();
 
-  const { error } = await supabase.storage.from(AVATAR_BUCKET).upload(path, file, {
+  const { error } = await supabase.storage.from(AVATAR_BUCKET).upload(path, bytes, {
     upsert: true,
-    contentType: file.type,
+    contentType,
     // Long, because the object name only changes when the file type does. The
     // cache buster on the rendered URL is what makes a replacement visible.
     cacheControl: '3600',
@@ -149,6 +158,89 @@ export async function uploadAvatar(userId: string, file: File): Promise<string> 
   }
 
   return path;
+}
+
+/**
+ * The longest edge of a stored avatar, in pixels.
+ *
+ * The tile renders at 44px (`h-11`) in a directory grid and 64px (`h-16`) on a
+ * profile. 256 covers both at 3x for a dense display and stops there: this is a
+ * square crop of somebody's face at thumbnail size, and every pixel past what a
+ * screen can show is bytes a stranger downloads for nothing.
+ */
+const AVATAR_EDGE_PX = 256;
+
+/**
+ * =============================================================================
+ * Downscaling — the half of the avatar story that was missing.
+ * =============================================================================
+ *
+ * `checkAvatarFile` caps an upload at 2 MB, and until now that cap WAS the
+ * stored size: whatever a phone camera produced went into a public bucket at
+ * full resolution, and a directory grid of twelve coaches downloaded twelve of
+ * them to draw twelve 44px squares.
+ *
+ * `initials-avatar.tsx` argues — correctly — that `next/image` is the wrong
+ * instrument here: the optimizer needs `images.remotePatterns` naming a host
+ * that is an environment value, and for a 44px tile behind a CDN there is
+ * little left for it to win. **That argument is about the READ.** It says
+ * nothing about the write, and the write is where the bytes were.
+ *
+ * So the fix is here instead, once, at the moment the file arrives:
+ *
+ *   * **resized** to fit inside a 256px box, never enlarged (`withoutEnlargement`)
+ *     — upscaling a small avatar makes a bigger file out of the same picture;
+ *   * **re-encoded as WebP**, which is already one of the three types the bucket
+ *     admits, so nothing downstream learns a new format;
+ *   * **stripped of metadata**, which is the part that matters beyond size:
+ *     a JPEG straight off a phone carries EXIF, and EXIF carries GPS. The
+ *     bucket is PUBLIC. Uploading a profile picture should not publish where it
+ *     was taken, and nothing else in this app was removing it.
+ *
+ * `rotate()` with no argument applies the EXIF orientation before that metadata
+ * is discarded — without it, a portrait photo from a phone is stored on its
+ * side.
+ *
+ * MEASURED, not assumed. A 1200x900 JPEG carrying EXIF with a GPS tag comes out
+ * as a 256x256 WebP with no EXIF at all; a 64x64 input is stored at 64x64
+ * rather than blown up to 256; and `Buffer.from('not an image')` is rejected
+ * rather than stored. Re-check those four if this pipeline is ever changed —
+ * the EXIF one is the easiest to lose, because keeping metadata is a one-word
+ * addition (`.withMetadata()`) that looks like a courtesy.
+ *
+ * IT FAILS CLOSED, and deliberately: a file `sharp` cannot decode is a file
+ * this app should not be storing in a public bucket. `checkAvatarFile` has
+ * already accepted the declared MIME type, and the declared type is the
+ * UPLOADER'S claim — this is the first thing in the chain that reads the actual
+ * bytes and can disagree with it. That makes it a content check as much as a
+ * resize, which is why the refusal is a `DataError` rather than a fallback to
+ * the original.
+ */
+async function normaliseAvatar(file: File): Promise<{ bytes: Buffer; contentType: string }> {
+  const input = Buffer.from(await file.arrayBuffer());
+
+  try {
+    const bytes = await sharp(input)
+      // Before the metadata is dropped, or a portrait photo is stored sideways.
+      .rotate()
+      .resize({
+        width: AVATAR_EDGE_PX,
+        height: AVATAR_EDGE_PX,
+        fit: 'cover',
+        withoutEnlargement: true,
+      })
+      // No `.withMetadata()`, which is the point: sharp drops EXIF unless asked
+      // to keep it, and this bucket is public.
+      .webp({ quality: 82 })
+      .toBuffer();
+
+    return { bytes, contentType: 'image/webp' };
+  } catch {
+    throw new DataError(
+      'invalid',
+      'That picture could not be read. Use a PNG, JPEG or WebP image that is not damaged.',
+    );
+  }
 }
 
 /**
