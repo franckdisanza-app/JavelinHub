@@ -13,18 +13,31 @@ to `verify:supabase` once it is applied, and a rollback. Read them before
 **Bootstrapped.** An administrator exists, minted an invite code, and that code
 has been redeemed — so the approval path is open end to end.
 
-**AND THEN SEEDED, WHICH IS THE THING TO KNOW BEFORE ANY LAUNCH.** An earlier
-revision of this paragraph said the project held 5 profiles and no listings and
-that "`seed.sql` has still never been run, so there is no fabricated data".
-That has not been true since `demo-seed.sql` was applied. As measured through
-PostgREST with the anon key:
+**AND THEN SEEDED, AND THEN TORN DOWN AGAIN.** This paragraph has now said
+three different things, so here is the current one, measured rather than
+remembered:
 
 | | |
 |---|---|
-| profiles | 41 |
-| approved coaches | 6 |
-| published listings | 40 |
-| reviews | 31 |
+| profiles | 1 — the administrator, and nobody else |
+| approved coaches | 0 |
+| published listings | 0 |
+| orders / reviews | 0 |
+| unredeemed invite codes | 2, both minted by the administrator, neither `is_demo` |
+
+`demo-seed.sql` had put 167 fabricated rows in — 41 profiles, 40 published
+listings, 31 reviews — and every one of them fed `offer_stats` and `coach_stats`
+exactly as a real row would. They are gone, and `npm run check:demo-data` exits
+0 against this project. The four `@javelinhub-verify.test` accounts are gone
+too, through `verify-fixtures-teardown.sql`; the write tiers will create fresh
+ones the next time they run.
+
+**The two remaining invite codes are the thing to decide about**, and they are
+not covered by any teardown: an unredeemed code grants approved-coach status to
+whoever redeems it, and one of these has no expiry. See `docs/DEPLOY.md` step 3.
+
+What follows describes the seeded state, and is kept because the reasoning about
+why fabricated rows are dangerous is unchanged:
 
 **Nobody bought any of it and nobody wrote a word of those reviews**, and they
 feed `offer_stats` and `coach_stats` exactly as real rows would — which is the

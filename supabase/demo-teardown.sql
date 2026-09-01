@@ -26,6 +26,13 @@ begin;
 delete from public.reports          where is_demo;
 delete from public.removed_reviews  where is_demo;
 delete from public.deliverables     where is_demo;
+-- Before the reviews they hang off. `review_replies.review_id` is
+-- `on delete cascade`, so the next statement would take them anyway — this is
+-- here because every other table in this file is deleted on the flag
+-- explicitly, and a reader should not have to know the cascade to believe the
+-- list is complete. Added in 0032, which is also when the table joined
+-- `demo_data_summary`.
+delete from public.review_replies   where is_demo;
 delete from public.reviews          where is_demo;
 delete from public.orders           where is_demo;
 delete from public.listings         where is_demo;

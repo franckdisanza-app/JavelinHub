@@ -12,20 +12,15 @@ Read [`supabase/README.md`](../supabase/README.md) for the schema and
 
 ## Before the first real user — the order matters
 
-### 1. Remove the fabricated data
+### 1. Remove the fabricated data — ✅ DONE
 
-The live project was seeded from `demo-seed.sql`. Those rows feed
-`offer_stats` and `coach_stats` exactly as real ones would, which is the whole
-reason `is_demo` exists.
-
-```sql
--- supabase/demo-teardown.sql, in the SQL editor
-```
-
-Then confirm, and **do not skip the confirmation** — the teardown deletes on the
-flag, and anything that was inserted without it survives:
+**The live project is clean.** 167 fabricated rows across 7 tables were removed
+and the result confirmed; the four `@javelinhub-verify.test` accounts went with
+them. Kept here because it has to be repeated after any of the seed-and-look
+cycles below, and because both scripts are re-runnable.
 
 ```bash
+npx supabase db query --linked -f supabase/demo-teardown.sql
 npm run check:demo-data
 ```
 
@@ -33,22 +28,102 @@ Exit 0 means clean. Exit 1 lists what remains. **Exit 2 means it could not
 reach the database, which is not the same as a pass** and is deliberately a
 different code.
 
-#### The four accounts the teardown does not touch
+#### The four accounts the flag could not reach
 
 `@javelinhub-verify.test` — created by the write tiers of `verify:supabase`
-before `is_demo` existed, so they carry `false`. One of them, **Verify Coach**,
-is a visible row in the public coach directory. Remove them by hand:
+through the ordinary signup path, before `is_demo` existed, so they carry
+`false` honestly. One of them, **Verify coach**, was a visible row in the public
+coach directory. The write tiers mint fresh ones on every run, so this is a
+standing chore rather than a one-off:
 
-```sql
--- Check first. This should return four rows and nothing else.
-select id, email, full_name, role, coach_status
-  from public.profiles
- where email like '%@javelinhub-verify.test';
+```bash
+npx supabase db query --linked -f supabase/verify-fixtures-teardown.sql
 ```
 
-They cannot simply be deleted while they own listings or have sold anything —
-the foreign-key graph is the same one that makes account deletion anonymise
-rather than erase. Withdraw their offers first, then use the ordinary path.
+**Read that file before running it.** The order of its statements is the whole
+point: `listings.coach_id` cascades while `orders.listing_id` is `RESTRICT`, so
+a single `delete from auth.users` asks Postgres to remove a listing and a sale
+in one statement and succeeds or fails depending on which referential action it
+processes first. It also does not reach storage — an avatar or delivery file
+uploaded by a fixture survives as an orphan.
+
+### 1b. Putting data back, when you need to look at a page
+
+**An empty database renders empty states, and empty states are a small
+fraction of what this product looks like.** Once the teardown has run, `/offers`
+is a heading over nothing — which is correct, and useless for checking that a
+card still lays out at 375px or that a rating still renders.
+
+Three ways to get a populated screen, cheapest and safest first.
+
+#### The right answer for almost every case: don't use production at all
+
+```bash
+DATA_BACKEND=mock npm run dev
+```
+
+The mock store seeds itself at `./data/db.json` on the first request — 6
+coaches, offers across all eight categories, orders, reviews, and the awkward
+states the live seed does not contain (a coach who is no longer approved but
+still has a published offer, an offer that has sold and never been reviewed).
+Delete the file to reset. **It cannot touch the live database**, and it needs no
+credentials.
+
+```bash
+npm run verify:visual     # the same thing, asserted rather than eyeballed
+npm run verify:pages      # renders 396 assertions against a throwaway store
+```
+
+Both suites provision and tear down their own store. Neither can reach
+production — they hard-set `DATA_BACKEND=mock`.
+
+#### If you genuinely need the Supabase path rendered
+
+Point a local dev server at a **second, test-only Supabase project** (see the
+last section of this file) and seed that. The Supabase backend differs from the
+mock in ways that matter — RLS, the read models, PostgREST's `count=exact`
+behaviour on a keyset filter — so there are real questions only it can answer.
+None of them requires the *live* project.
+
+#### If you must seed production — the cycle, in full
+
+Only for something you cannot reproduce anywhere else, and never while a real
+user has an account.
+
+```bash
+# 1. Confirm it is still empty, so you know what you are adding.
+npm run check:demo-data          # expect: exit 0, "This database is clean"
+
+# 2. Add the fabricated rows. Every one is flagged is_demo = true.
+npx supabase db query --linked -f supabase/demo-seed.sql
+
+# 3. Look at whatever you needed to look at.
+
+# 4. Take it out again, and CONFIRM.
+npx supabase db query --linked -f supabase/demo-teardown.sql
+npm run check:demo-data          # expect: exit 0 again
+```
+
+**Step 4 is not optional and the confirmation is the point.** `is_demo` existed
+for twenty-odd migrations with nothing that asked, and the live project was
+seeded past every warning in the schema comments because the check was a query
+somebody had to remember to run.
+
+Three things the cycle does not cover, and each will outlive it:
+
+- **Anything you create by hand through the UI carries `is_demo = false`**, so
+  the teardown will not remove it and `check:demo-data` will report clean while
+  it sits there. That is exactly how the four `@javelinhub-verify.test` accounts
+  survived — use `supabase/verify-fixtures-teardown.sql` for those, and think
+  before clicking "publish" on a live database.
+- **Storage objects are not reached by any cascade.** An avatar or a delivery
+  file uploaded during a look-around stays in its bucket after every row that
+  pointed at it is gone. Check the three buckets.
+- **Invite codes minted while testing.** They are not `is_demo` if you created
+  them yourself, and an unredeemed code grants approved-coach status to whoever
+  redeems it. `select code, created_at, expires_at from public.invites where
+  redeemed_by is null and revoked_at is null;` — and revoke what you are not
+  about to use.
 
 ### 2. Push the schema
 
@@ -62,11 +137,24 @@ npm run verify:supabase                   # immediately after, every time
 Migrations `0029`–`0032` are applied. Anything later is not until this is run
 again.
 
-### 3. Revoke the demo invite codes
+### 3. Revoke the invite codes you are not about to use
 
-Redeeming one promotes the holder straight to approved coach, and the codes are
-identical in every clone of this repository. `demo-teardown.sql` deletes the
-ones flagged `is_demo`; this catches anything else:
+Redeeming one promotes the holder straight to approved coach. The **demo** codes
+were identical in every clone of this repository and are gone with the rest of
+the seed.
+
+**Two live codes remain and they are not demo data** — they were minted by the
+project's own administrator account, so `is_demo` is `false` and no teardown
+will touch them. One of them has no expiry at all. Check what they are before
+deciding:
+
+```sql
+select code, created_at, expires_at
+  from public.invites
+ where redeemed_by is null and revoked_at is null;
+```
+
+Keep one if a real coach is about to use it. Otherwise:
 
 ```sql
 update public.invites
