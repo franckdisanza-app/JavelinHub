@@ -333,6 +333,20 @@ an administrator's takedown.
   | "you have a new order", to the coach | blocked: the buyer's session may not read the coach's address |
   | "your file is ready", to the buyer | blocked: the same, in the other direction |
 
+  **DECIDED 2026-09-10: BUILD IT WHEN MAIL WORKS, NOT BEFORE.** The drain was
+  scoped — a `notifications` table written by triggers on `orders` and
+  `deliverables` (so nothing client-callable can enqueue mail to anybody), a
+  privileged RPC that claims a batch, and a route that sends it with one `fetch`
+  in the shape `account-deletion.ts` already uses. It was not built, and the
+  reason is sequencing rather than difficulty: `RESEND_API_KEY` is unset, so
+  `sendEmail()` logs and skips, and an outbox shipped today would be a privileged
+  path that provably cannot deliver anything — untestable end to end in a
+  repository whose standard is that every privileged path is asserted. The
+  ticker is also plan-dependent: Vercel Cron runs once a DAY on the Hobby plan,
+  which is useless for an order notification, so the choice between it and
+  pg_cron cannot be made without knowing the plan. Build it the day a verified
+  sending domain exists, and verify it end to end then.
+
   **The fix is an outbox, not a privileged client.** A `notifications` table the
   action writes a row into naming a USER ID, drained by something that
   legitimately holds privilege. Building a service-role client to read the
@@ -773,6 +787,21 @@ CI runs as artefacts in their own right, not as things the code implies.
   What it deliberately does not do is verify anything. Nothing asks for a date
   of birth, and all three places say so rather than implying an assurance that
   is not there.
+
+  **ANSWERED THE SAME DAY: 18.** It keeps the product adult-to-adult, which is
+  what the delivery design already assumed — there is no children's-data regime
+  to build to and no guardian consent to collect, and an adult buying coaching
+  intended for a young athlete remains a supported case with the account and the
+  contract theirs. `LEGAL_LAST_UPDATED` moved to `2026-09-10` with it, because
+  it is what `signUpAction` records as `termsVersion` and the consent sentence
+  changed. The other nine facts are still `null`, so the three documents remain
+  `noindex` and still print their gap banner.
+
+  It also became the first thing the visual suite asserts against `LEGAL` rather
+  than against a literal: *"states the minimum age, once there is one to state"*
+  reads `LEGAL.minimumAge` and checks the signup label agrees with it, so
+  changing the age is one edit and setting it back to `null` is a legitimate
+  state rather than a red suite.
 
 * **The mock skipped rows whenever two shared a timestamp**, and this one was
   found BY the CI fix rather than beside it — the first run of `verify:authz`

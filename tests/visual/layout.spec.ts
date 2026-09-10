@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 
+import { LEGAL } from '@/lib/legal';
+
 /**
  * =============================================================================
  * The assertions the other two suites cannot make.
@@ -383,5 +385,25 @@ test.describe('signup requires agreeing to the terms', () => {
     // Never pre-ticked. Pre-ticked consent is not consent, and it would make the
     // record the database stamps meaningless.
     await expect(page.locator('#acceptTerms')).not.toBeChecked();
+  });
+
+  /*
+   * The age half of the sentence, asserted against `LEGAL.minimumAge` rather
+   * than against the number 18 — so raising or lowering the age is one edit to
+   * `src/lib/legal.ts` and not a test to remember, and so that setting it back
+   * to `null` is a legitimate state rather than a failure. The point being
+   * asserted is that the consent sentence and the terms cannot disagree about
+   * who may hold an account.
+   */
+  test('states the minimum age, once there is one to state', async ({ page }) => {
+    await page.goto('/signup');
+    const label = page.locator('label[for="acceptTerms"]');
+
+    if (LEGAL.minimumAge === null) {
+      await expect(label).not.toContainText('at least');
+      return;
+    }
+
+    await expect(label).toContainText(`at least ${LEGAL.minimumAge}`);
   });
 });

@@ -159,18 +159,26 @@ Redeeming one promotes the holder straight to approved coach. The **demo** codes
 were identical in every clone of this repository and are gone with the rest of
 the seed.
 
-**Two live codes remain and they are not demo data** — they were minted by the
-project's own administrator account, so `is_demo` is `false` and no teardown
-will touch them. Checked on 2026-09-10, and the two are not equally urgent:
+**DONE, 2026-09-10 — there are no live codes.** Both remaining ones were
+revoked and the count is zero:
+
+```
+select count(*) from public.invites where redeemed_by is null and revoked_at is null;  -- 0
+```
+
+Kept below because it has to be re-checked after anybody mints one, and because
+minting is a click in `/admin/invites` that leaves no reminder behind. What was
+there:
 
 | minted | expires | |
 |---|---|---|
-| 2026-08-31 07:33 | 2026-09-02 | **already expired**, so it grants nothing. Still unrevoked, which is untidy rather than dangerous |
-| 2026-08-31 08:52 | **never** | **this is the one.** Unredeemed, unrevoked, no expiry: whoever holds it becomes an approved coach the moment the site answers again |
+| 2026-08-31 07:33 | 2026-09-02 | already expired, so it granted nothing. Revoked anyway — an expired credential that is still technically outstanding is a thing somebody has to reason about later |
+| 2026-08-31 08:52 | **never** | the one that mattered. Unredeemed, unrevoked, no expiry: whoever held it became an approved coach the moment the site answered again. Revoked |
 
-Nobody can redeem either while the deployment is down, which is the only reason
-this has not already been a problem. **Decide the second one before the site
-comes back up**, not after. Check the current state before deciding:
+**Mint codes with an expiry.** The open-ended one was minted for a reason
+nobody now remembers, which is exactly the property that made it dangerous: an
+unused code with no expiry is a permanent grant waiting on whoever kept the
+message. Check the current state before deciding anything here:
 
 ```sql
 select code, created_at, expires_at
@@ -190,8 +198,8 @@ update public.invites
 
 ### 4. Fill in the legal facts
 
-Every value in [`src/lib/legal.ts`](../src/lib/legal.ts) is `null`. While any
-of them is, `/legal/terms`, `/legal/privacy` and `/legal/refunds` render a
+**One of the ten is filled in: `minimumAge` is 18.** The other nine are still
+`null`, and while any of them is, `/legal/terms`, `/legal/privacy` and `/legal/refunds` render a
 red marker in place of the missing fact, list what is outstanding in a banner,
 and set `noindex` on themselves.
 

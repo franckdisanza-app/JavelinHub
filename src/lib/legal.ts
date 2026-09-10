@@ -45,7 +45,7 @@
  */
 
 /** ISO date the drafts were last edited. Shown on each page. */
-export const LEGAL_LAST_UPDATED = '2026-09-01';
+export const LEGAL_LAST_UPDATED = '2026-09-10';
 
 export interface LegalFacts {
   /** Registered company name, e.g. "JavelinHub Ltd". Not the product name. */
@@ -125,7 +125,24 @@ export const LEGAL: LegalFacts = {
   privacyEmail: null,
   governingLaw: null,
   supervisoryAuthority: null,
-  minimumAge: null,
+  /**
+   * DECIDED: 18. The first of these to be filled in, and the reason it could be
+   * is that it is a decision rather than a lookup — nobody has to find a
+   * company number to answer it.
+   *
+   * It keeps the product adult-to-adult, which is what the delivery design
+   * wanted: personalised delivery is an adult coach and a buyer exchanging
+   * private video against an order, and at 18 there is no children's-data
+   * regime and no guardian consent to collect. An adult buying coaching
+   * intended for a young athlete is still a real and supported case — the terms
+   * say the account, the order and the agreement with the coach are theirs.
+   *
+   * `LEGAL_LAST_UPDATED` moved with it, and had to: it is what `signUpAction`
+   * records as `termsVersion`, and the signup checkbox now reads "I am at least
+   * 18, and I agree to…". Filing somebody who agreed to the new sentence under
+   * the version of the old one is the one thing a consent record must not do.
+   */
+  minimumAge: 18,
   refundWindowDays: null,
   platformFeePercent: null,
 };
