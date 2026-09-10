@@ -200,8 +200,45 @@ export function newId(): string {
   return randomUUID();
 }
 
+/**
+ * The mock's clock — **strictly increasing**, which the wall clock is not.
+ *
+ * `new Date().toISOString()` has MILLISECOND resolution. Postgres's `now()` has
+ * microsecond resolution and returns the transaction timestamp, so two
+ * statements in one Postgres session effectively never share a `created_at`.
+ * Two mock writes in one tick share one constantly — and every ordered read in
+ * this file sorts on `created_at` with `id` as the tie-break, where `id` is a
+ * random uuid. So a tie is not merely a tie: it orders two rows by the roll of
+ * `randomUUID()`, and the newer one can sort second.
+ *
+ * That is a resolution difference masquerading as a behaviour difference, and
+ * it is the second bug of the day to come out of the same millisecond. The
+ * first was `byCreatedAtDesc` skipping rows; this one made the newest edit of
+ * an offer not be the newest revision — *"expected 'Saved again at the same
+ * price', got 'Completely different offer, same price'"* — on a CI runner, and
+ * never on a developer's machine, because the failure is a property of how fast
+ * two writes happen rather than of the code.
+ *
+ * So the clock never repeats itself: a value that would not be strictly after
+ * the last one becomes the last one plus a millisecond. It never runs backwards,
+ * it converges on the wall clock as soon as real time catches up, and it makes
+ * "written later sorts first" true in the mock the way the database already
+ * makes it true.
+ *
+ * PER PROCESS, deliberately. The store is a JSON file that outlives the process
+ * that wrote it, and there is nothing to carry across — between two runs, real
+ * time has moved.
+ */
+let lastIso = '';
+
 export function nowIso(): string {
-  return new Date().toISOString();
+  const wall = new Date().toISOString();
+  // Lexicographic comparison is the right one: an ISO-8601 UTC string with a
+  // fixed shape sorts the same way the instants do, which is why every read in
+  // this backend already compares these values as strings.
+  const next = wall > lastIso ? wall : new Date(new Date(lastIso).getTime() + 1).toISOString();
+  lastIso = next;
+  return next;
 }
 
 export function normalizeEmail(email: string): string {

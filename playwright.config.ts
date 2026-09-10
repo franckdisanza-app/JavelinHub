@@ -87,6 +87,15 @@ export default defineConfig({
     { name: 'desktop-1280', use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 900 } } },
   ],
 
+  /*
+   * Deletes `.playwright-store.json` before anything starts. Its own header
+   * says why: the store is meant to be throwaway and was not being thrown
+   * away, so the rate-limit rows survived between runs and the third run of
+   * the signup spec inside an hour failed on `signupIp` rather than on
+   * anything the suite is about.
+   */
+  globalSetup: './tests/visual/global-setup.ts',
+
   webServer: {
     command: 'npm run dev',
     url: `http://127.0.0.1:${PORT}`,

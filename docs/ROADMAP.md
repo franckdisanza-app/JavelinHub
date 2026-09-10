@@ -798,6 +798,25 @@ CI runs as artefacts in their own right, not as things the code implies.
   handed are not in keyset order, naming the read, and `tests/unit/pagination.test.mts`
   ties the timestamps by construction rather than by luck.
 
+* **And the same millisecond produced a second bug**, found by fixing the
+  first: with the tie-break in place, CI failed one assertion instead of ten —
+  *"the newest revision is the version the last edit REPLACED — expected 'Saved
+  again at the same price', got 'Completely different offer, same price'"*.
+
+  A tie on `created_at` is not merely a tie. The tie-break is `id`, and `id` is
+  a random uuid, so two rows written in the same millisecond are ordered by the
+  roll of `randomUUID()` and the newer one can sort second. The root cause is a
+  RESOLUTION difference rather than a logic one: `new Date().toISOString()`
+  keeps milliseconds, while Postgres's `now()` keeps microseconds and is the
+  transaction timestamp — so the database effectively never generates the tie
+  that the mock generated constantly.
+
+  `nowIso()` is now strictly increasing: a value that would not be after the
+  last one becomes the last one plus a millisecond. It never runs backwards and
+  converges on the wall clock as soon as real time catches up.
+  `tests/unit/mock-clock.test.mts` asserts the property, because "two writes in
+  one tick" is not something a suite can be relied on to attempt.
+
 **Corrected from the same audit**: uploaded images are *not* unchecked, which an
 earlier reading of this round had recorded as a gap. `normaliseAvatar()` re-encodes
 every avatar through `sharp` and fails closed on anything it cannot decode, which
