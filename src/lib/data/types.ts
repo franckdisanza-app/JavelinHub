@@ -233,6 +233,33 @@ export interface Profile {
    * `src/lib/auth/account-deletion.ts`.
    */
   deleted_at: string | null;
+  /**
+   * When this account agreed to the terms and the privacy notice, or `null`.
+   *
+   * `null` means NO RECORD, and it is the honest value for two populations that
+   * both really exist: every account created before signup asked, and any
+   * account created by calling GoTrue directly rather than through the signup
+   * form. It must never be backfilled to a timestamp — a consent record that
+   * was invented is worse than no consent record, because it cannot be told
+   * apart from a real one.
+   *
+   * WRITTEN ONCE, AT SIGNUP, AND NEVER BY THE SUBJECT. Pinned against a
+   * self-update by `guard_profile_privilege_columns` on Supabase and by having
+   * no write path at all in `mockClient` — a record the person it describes can
+   * edit is not a record. Changing the documents means a NEW acceptance, not a
+   * rewritten one.
+   */
+  terms_accepted_at: string | null;
+  /**
+   * Which version of the documents was accepted — `LEGAL_LAST_UPDATED` at the
+   * time, e.g. `2026-09-01`.
+   *
+   * The date and not a hash: `src/lib/legal.ts` publishes exactly one version
+   * marker, it is what the documents themselves display, and a value a person
+   * can compare against the page they are reading is worth more here than one
+   * only a program can check.
+   */
+  terms_version: string | null;
 }
 
 /**

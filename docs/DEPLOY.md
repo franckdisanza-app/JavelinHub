@@ -7,6 +7,8 @@ prevents are the ones that leave a deployment looking healthy.
 
 Read [`supabase/README.md`](../supabase/README.md) for the schema and
 [`README.md`](../README.md) for the environment variables themselves.
+[`RUNBOOK.md`](RUNBOOK.md) beside this file is the other half: what to do once
+something has gone wrong rather than how to get it out.
 
 ---
 
@@ -134,8 +136,22 @@ npm run db:push
 npm run verify:supabase                   # immediately after, every time
 ```
 
-Migrations `0029`–`0032` are applied. Anything later is not until this is run
-again.
+**Every migration through `0033` is applied**, `0033_terms_acceptance.sql`
+included — it was the last one outstanding, and it was not optional: it adds the
+two columns that record a user's agreement to the terms, and it replaces
+`handle_new_user()` and `guard_profile_privilege_columns()`. Until it was pushed,
+every signup wrote a `terms_version` into user metadata that no trigger read.
+No account was created in that window, so nothing is missing a consent record
+that should have one.
+
+Anything later than `0033` is not applied until this is run again.
+
+**STOP TRACKING THAT BY HAND.** Which migration is applied used to be a fact
+this page asserted and a reader had to trust, and it was wrong for as long as it
+took somebody to notice. `verify:supabase` now asks the database instead — *"0033
+is applied — the two columns exist"* — so a missing migration is a failed
+assertion rather than a stale paragraph. Add the same shape when a migration
+introduces something a client can see.
 
 ### 3. Revoke the invite codes you are not about to use
 
@@ -145,8 +161,16 @@ the seed.
 
 **Two live codes remain and they are not demo data** — they were minted by the
 project's own administrator account, so `is_demo` is `false` and no teardown
-will touch them. One of them has no expiry at all. Check what they are before
-deciding:
+will touch them. Checked on 2026-09-10, and the two are not equally urgent:
+
+| minted | expires | |
+|---|---|---|
+| 2026-08-31 07:33 | 2026-09-02 | **already expired**, so it grants nothing. Still unrevoked, which is untidy rather than dangerous |
+| 2026-08-31 08:52 | **never** | **this is the one.** Unredeemed, unrevoked, no expiry: whoever holds it becomes an approved coach the moment the site answers again |
+
+Nobody can redeem either while the deployment is down, which is the only reason
+this has not already been a problem. **Decide the second one before the site
+comes back up**, not after. Check the current state before deciding:
 
 ```sql
 select code, created_at, expires_at
@@ -154,7 +178,8 @@ select code, created_at, expires_at
  where redeemed_by is null and revoked_at is null;
 ```
 
-Keep one if a real coach is about to use it. Otherwise:
+Keep one if a real coach is about to use it — that is a real case and the
+reason this is not simply revoked as a matter of course. Otherwise:
 
 ```sql
 update public.invites
@@ -174,6 +199,12 @@ and set `noindex` on themselves.
 they are on the critical path to payments rather than beside it. They are drafts
 and have not been reviewed by a lawyer; the banner saying so is unconditional
 and removing it is a deliberate edit somebody makes after the review.
+
+**`contactEmail` is now load-bearing for a fourth page.** `/help` is the only
+route through which a user can reach a human being, and it renders the same red
+marker and sets the same `noindex` while that value is `null`. Of the nine
+facts, it is the one to fill in first: without it there is nowhere for anybody to
+report any of the situations in [`RUNBOOK.md`](RUNBOOK.md).
 
 ---
 
@@ -247,6 +278,19 @@ in the response.
 
 **Point an uptime monitor at that path and alert on 503.** It exists to catch
 the failures where the marketing page renders perfectly and the product is dead.
+
+**There is now a stopgap in the repository**, because that instruction went
+uncarried-out and the deployment spent an unknown period answering 500 to every
+request with nothing raising it: `.github/workflows/uptime.yml` asks this
+endpoint every 15 minutes and fails the run unless it answers `200` with
+`"backend":"supabase"`. Read its header before relying on it — a scheduled
+workflow can be delayed, GitHub disables one in a repository with no pushes for
+60 days, and the only alert is a failed run. It is better than nothing and worse
+than a monitoring service; replace it with one before the first real user.
+
+**When it goes red, `docs/RUNBOOK.md` §1 is the procedure.** The distinction it
+turns on: 500 on `/` as well means the server did not start, which is the boot
+check and not the database.
 
 Then, once and for real:
 

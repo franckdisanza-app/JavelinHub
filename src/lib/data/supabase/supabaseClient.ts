@@ -869,12 +869,27 @@ export class SupabaseDataClient implements DataClient {
     // NOT requireText: a password is never trimmed — see requirePassword.
     const password = requirePassword(input?.password);
 
+    const termsVersion = requireText(input?.termsVersion, 'Terms version', 40);
+
     const supabase = await createSupabaseServerClient();
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        data: { full_name: fullName },
+        /*
+         * BOTH VALUES RIDE IN USER METADATA, and neither is written by this
+         * client — `handle_new_user()` reads them when it creates the profile
+         * row (0033). That indirection is forced rather than chosen: with email
+         * confirmation on, `signUp` returns no session, so there is no
+         * authenticated context here to write a profile column from, and the
+         * row exists only because the trigger made it.
+         *
+         * The TIMESTAMP is deliberately NOT passed. The trigger stamps
+         * `now()` from the database clock, so the recorded moment cannot be
+         * chosen by whoever called GoTrue — see `SignUpInput.termsVersion` on
+         * what a direct caller can and cannot do here.
+         */
+        data: { full_name: fullName, terms_version: termsVersion },
         /*
          * WHERE THE CONFIRMATION LINK LANDS. Without this GoTrue uses the
          * project's Site URL — `https://javelin-hub.vercel.app/` — where
@@ -2751,6 +2766,31 @@ export class SupabaseDataClient implements DataClient {
     if (error) throwDataError(error, true);
 
     const window = windowOf(KEYSETS.myReports, (data ?? []) as Report[], limit, byCreatedAt, totalOf(count));
+    return pageOf(window, window.rows);
+  }
+
+  /**
+   * Mirrors policy `reviews_select_own_author`.
+   *
+   * The `author_id` filter is not the authorization — the policy is, and it
+   * would return zero rows for anybody else's id regardless. It is here so the
+   * query asks for what it wants rather than relying on the policy to narrow
+   * it, which is the same construction every other self-scoped read here uses.
+   */
+  async listMyReviews(actor: Actor, page?: PageRequest): Promise<Page<Review>> {
+    const ctx = await openAuthedContext(actor);
+    const limit = normaliseLimit(page?.limit);
+    const cursor = decodeCursor(KEYSETS.myReviews, page?.cursor);
+
+    const { data, error, count } = await runPaged(
+      (opts: CountOptions) => ctx.supabase.from('reviews').select('*', opts).eq('author_id', ctx.userId),
+      KEYSETS.myReviews,
+      cursor,
+      limit,
+    );
+    if (error) throwDataError(error, true);
+
+    const window = windowOf(KEYSETS.myReviews, (data ?? []) as Review[], limit, byCreatedAt, totalOf(count));
     return pageOf(window, window.rows);
   }
 

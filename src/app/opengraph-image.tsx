@@ -13,10 +13,14 @@ import { ImageResponse } from 'next/og';
  * GENERATED AT BUILD TIME, not per request. `opengraph-image` is a static file
  * convention: nothing here reads a request, a cookie or `siteUrl()`, so Next
  * renders it once during `next build` and serves it as an immutable asset. That
- * is deliberate — it is also why this file must never grow a data read. A
- * per-offer card would be `app/offers/[id]/opengraph-image.tsx`, a different
- * file with a different cost, and it should be added only once somebody wants
- * the offer's own title on it.
+ * is deliberate — it is also why this file must never grow a data read.
+ *
+ * THE PER-ENTITY CARDS NOW EXIST, in the two files this note predicted:
+ * `app/offers/[id]/opengraph-image.tsx` and `app/coaches/[id]/opengraph-image.tsx`.
+ * They read, so they render per request, which is the different cost mentioned
+ * here and is paid there rather than smuggled into this file. This one stays
+ * static and stays the fallback: it is what `/`, the browse pages and anything
+ * without a card of its own still share as.
  *
  * NO CUSTOM FONT, AND THE LOCKUP IS ADAPTED RATHER THAN FAKED. The real mark is
  * Barlow Condensed at 100 for JAVELIN against 900 for HUB — the run-up against

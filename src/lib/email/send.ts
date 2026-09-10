@@ -19,25 +19,37 @@
  *      integration, templates and call sites, and this is it.
  *
  * -----------------------------------------------------------------------------
- * IT DOES NOT SEND ANYTHING YET, AND SAYS SO LOUDLY
+ * IT SENDS NOTHING UNTIL IT IS CONFIGURED, AND SAYS SO LOUDLY
  * -----------------------------------------------------------------------------
- * `RESEND_API_KEY` is unset, so {@link sendEmail} logs the message it would
- * have sent and returns `skipped`. That is deliberate rather than unfinished:
+ * With `RESEND_API_KEY` unset, {@link sendEmail} logs the message it would have
+ * sent and returns `skipped`. That is the supported local and CI state rather
+ * than an unfinished one:
  *
- *   * every call site can be written, reviewed and merged now, against a real
- *     signature, without an account existing;
+ *   * every call site can be written, reviewed and merged without an account
+ *     existing;
  *   * a developer running the app locally never sends mail to a real person by
  *     accident, which is the classic way a staging environment emails a
  *     customer;
  *   * turning it on is one environment variable, and the failure mode until
  *     then is a log line rather than a crash.
  *
- * **The HTTP call itself is deliberately NOT written.** Resend's API is one
- * `POST https://api.resend.com/emails` with a JSON body, and guessing at the
- * exact field names and error shape from memory is how you ship an integration
- * that fails silently on the first real send. The single place it goes is
- * marked below. Everything around it — the guard, the address policy, the
- * result type, the logging, the templates — is real.
+ * **The provider call is now written.** It was deliberately left out while the
+ * field names were a recollection rather than a reading — an integration that is
+ * subtly wrong fails by silently not sending. They have since been read from
+ * Resend's current API reference, and the two that bite are recorded at the call
+ * site: `reply_to` is snake_case in the REST API (the Node SDK spells it
+ * `replyTo`, and an unknown field is ignored rather than rejected), and the
+ * documented success body is `{ id }`.
+ *
+ * TWO THINGS STILL HAVE TO HAPPEN OUTSIDE THIS FILE before a real message
+ * arrives anywhere, and neither is code:
+ *
+ *   1. the sending domain has to be verified in Resend, or every message is
+ *      rejected or filed as spam and the failure looks like this module;
+ *   2. `EMAIL_FROM` has to name a sender on that domain. `assertRuntimeConfig()`
+ *      refuses to start a production server that has a key set beside the
+ *      `.invalid` placeholder, which is the one arrangement that looks
+ *      configured and cannot deliver.
  *
  * -----------------------------------------------------------------------------
  * WHY IT NEVER THROWS
@@ -116,34 +128,113 @@ export async function sendEmail(message: EmailMessage): Promise<EmailResult> {
   }
 
   try {
-    // -----------------------------------------------------------------------
-    // GAP — the only unwritten line in this module.
-    // -----------------------------------------------------------------------
-    // Resend is one POST to https://api.resend.com/emails with a bearer token
-    // and a JSON body of { from, to, subject, text, html, reply_to }. It is not
-    // written here because the exact response and error shape should be read
-    // from Resend's current documentation rather than recalled, and an
-    // integration that is subtly wrong fails by silently not sending.
-    //
-    // When writing it:
-    //   * `config.from` is already validated to be a real address below;
-    //   * return `{ status: 'sent', id }` with Resend's message id, which is
-    //     what makes a support question answerable;
-    //   * return `{ status: 'failed', reason }` for a non-2xx, and DO NOT
-    //     THROW — see the header;
-    //   * do not add the `resend` SDK for one endpoint. `fetch` is enough and
-    //     is one fewer dependency to keep current.
-    //   * verify the sending domain in Resend first, or every message lands in
-    //     spam and the failure looks like this code.
-    // -----------------------------------------------------------------------
-    return {
-      status: 'failed',
-      reason:
-        'RESEND_API_KEY is set but the provider call is not implemented. See the GAP note in src/lib/email/send.ts.',
-    };
+    /*
+     * One POST, no SDK — the `resend` package wraps this single endpoint and
+     * would be one more dependency to keep current.
+     *
+     * The field names are Resend's REST names, which are NOT the SDK's:
+     * `reply_to` is snake_case here and `replyTo` in the Node client. Reading
+     * the wrong one is silent — an unknown field is ignored, so a mistyped
+     * `replyTo` sends the message with no reply address and reports success.
+     *
+     * `to` is sent as a one-element ARRAY even though the API accepts a bare
+     * string, because the array form is the one that cannot be misread as a
+     * comma-separated list if an address ever contains one.
+     */
+    const response = await fetch(RESEND_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: config.from,
+        to: [message.to],
+        subject: message.subject,
+        text: message.text,
+        ...(message.html === undefined ? {} : { html: message.html }),
+        ...(message.replyTo === undefined ? {} : { reply_to: message.replyTo }),
+      }),
+      /*
+       * A notification is not the transaction, and this call sits inside a
+       * Server Action that has already written to the database. Without a
+       * deadline a provider that accepts the connection and never answers holds
+       * the user's request open until the platform's own timeout kills it —
+       * turning "the receipt did not send" into "the purchase appears to have
+       * failed". Ten seconds is far longer than a healthy send and far shorter
+       * than any request budget.
+       */
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+    });
+
+    if (!response.ok) {
+      return { status: 'failed', reason: await describeFailure(response) };
+    }
+
+    /*
+     * Documented success shape is `{ "id": "<uuid>" }`. Read it defensively
+     * anyway: the id is for answering a support question later, and a message
+     * that was accepted but whose id could not be parsed has still been sent —
+     * reporting that as a failure would be a lie in the more alarming direction.
+     */
+    const id = await readMessageId(response);
+    return { status: 'sent', id };
   } catch (error) {
+    /*
+     * `AbortSignal.timeout` rejects with a `TimeoutError` DOMException, whose
+     * message ("The operation was aborted due to timeout") does not say what
+     * timed out. Named here so a log line is answerable.
+     */
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      return { status: 'failed', reason: `Resend did not answer within ${SEND_TIMEOUT_MS}ms.` };
+    }
     return { status: 'failed', reason: error instanceof Error ? error.message : String(error) };
   }
+}
+
+const RESEND_ENDPOINT = 'https://api.resend.com/emails';
+const SEND_TIMEOUT_MS = 10_000;
+
+/**
+ * Turns a non-2xx into one line worth logging.
+ *
+ * **Resend does not document the error body's shape**, only its status codes
+ * and error names — so nothing here assumes a field exists. It looks for the
+ * two names that appear in practice, and falls back to the status line and a
+ * truncated body, which is always better than "request failed".
+ *
+ * The body is truncated because it is provider output going into our log, and
+ * an unbounded one is a way to make a log line unreadable.
+ */
+async function describeFailure(response: Response): Promise<string> {
+  let detail = '';
+  try {
+    const body: unknown = await response.json();
+    if (body !== null && typeof body === 'object') {
+      const record = body as Record<string, unknown>;
+      const parts = [record.name, record.message].filter((part): part is string => typeof part === 'string');
+      detail = parts.join(': ');
+    }
+  } catch {
+    // Not JSON, or no body at all. The status line below is then all there is.
+  }
+
+  const suffix = detail === '' ? '' : ` — ${detail.slice(0, 300)}`;
+  return `Resend answered ${response.status} ${response.statusText}${suffix}`;
+}
+
+/** The provider's message id, or `null` when the body was not what we expected. */
+async function readMessageId(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.json();
+    if (body !== null && typeof body === 'object') {
+      const id = (body as Record<string, unknown>).id;
+      if (typeof id === 'string' && id !== '') return id;
+    }
+  } catch {
+    // Accepted with an unreadable body. Still sent.
+  }
+  return null;
 }
 
 /**

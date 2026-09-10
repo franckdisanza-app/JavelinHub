@@ -7,14 +7,15 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "verify:authz": "node --import ./scripts/register-ts.mjs scripts/verify-authz.mts",
     "verify:pages": "node --import ./scripts/register-ts.mjs scripts/verify-pages.mts",
     "verify:supabase": "node --import ./scripts/register-ts.mjs scripts/verify-supabase.mts",
     "check:demo-data": "node --import ./scripts/register-ts.mjs scripts/check-demo-data.mts",
     "db:link": "supabase link --project-ref trocsdetpwyqcgyfclir",
     "db:push": "supabase db push",
-    "verify:visual": "playwright test"
+    "verify:visual": "playwright test",
+    "test:unit": "node --import ./scripts/register-ts.mjs --test \"tests/unit/*.test.mts\""
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.5",

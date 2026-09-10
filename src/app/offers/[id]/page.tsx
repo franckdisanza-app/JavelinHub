@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import { JsonLd } from '@/components/json-ld';
 import { ListingCard } from '@/components/listing-card';
 import { Pager } from '@/components/pager';
 import { ReportForm } from '@/components/report-form';
@@ -15,6 +16,7 @@ import { Rating, Stat, StatEmpty } from '@/components/ui/stat';
 import { ClaimForm } from '@/app/offers/[id]/claim-form';
 import { getActor } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
+import { dataIsFabricated } from '@/lib/demo-data';
 import {
   cachedListingsByCoach,
   cachedOfferStats,
@@ -31,6 +33,7 @@ import {
 } from '@/lib/data/types';
 import { firstValue } from '@/lib/search-params';
 import { formatDate, formatPrice } from '@/lib/format';
+import { offerStructuredData } from '@/lib/structured-data';
 
 type PageProps = {
   // Both are Promises in this version of Next.
@@ -211,13 +214,27 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
   // cards below, which are invented in exactly the same way. A brand-new offer
   // by a coach with nothing else on sale has none of it, and a disclaimer that
   // fires unconditionally is one a reader learns to skip where it matters.
+  //
+  // GATED ON THE BACKEND FIRST, and that clause is the whole point of it: the
+  // three conditions after it mean "there is content here", not "the content is
+  // invented", and on the deployed database they are now true of REAL reviews.
+  // See `src/lib/demo-data.ts`.
   const hasDemoContent =
-    reviews.length > 0 ||
-    salesCount > 0 ||
-    shownOfferStats.some((row) => row.rating_average !== null || row.sales_count > 0);
+    dataIsFabricated() &&
+    (reviews.length > 0 ||
+      salesCount > 0 ||
+      shownOfferStats.some((row) => row.rating_average !== null || row.sales_count > 0));
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
+      {/*
+        Only reached for an offer that is published and not withdrawn: the
+        tombstone and the 404 both return above this. So the `InStock`
+        availability the payload asserts is true by construction rather than by
+        a check nobody would maintain.
+      */}
+      <JsonLd data={offerStructuredData({ listing, coach, stats })} />
+
       <p className="text-sm">
         <Link
           href={backHref}
@@ -559,13 +576,16 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
         above uses, explaining itself immediately below itself, and the same
         construction `/coaches/[id]` ships.
 
-        This is not the same kind of stub as an inert button: the reviews are
-        fabricated opinions attributed to named people, and every count on the
-        page is computed from purchases nobody made. There is deliberately NO
-        JSON-LD `Review` or `AggregateRating` markup anywhere while that is
+        This is not the same kind of stub as an inert button: on a fabricated
+        store the reviews are invented opinions attributed to named people, and
+        every count on the page is computed from purchases nobody made. There is
+        deliberately NO JSON-LD `AggregateRating` on this page while that is
         true — structured data is the half that travels into search results,
         where no note travels with it, and it is also the version a search
-        engine penalises when the reviews are not real.
+        engine penalises when the reviews are not real. That suppression is
+        enforced inside `offerStructuredData()` rather than here, so no call
+        site can forget it; the `Product` block itself is published either way,
+        because a title, a price and a seller are facts on every backend.
 
         IT SITS AFTER BOTH BLOCKS, and that placement is the fix to a gap the
         first draft had. The note was inside the reviews-and-sales section and
@@ -576,7 +596,8 @@ export default async function OfferDetailPage({ params, searchParams }: PageProp
         twice on one page is one they learn to skip on the pages where it
         matters.
 
-        Rendered ONLY when something on this page really is fabricated. A
+        Rendered ONLY when something on this page really is fabricated — which
+        now includes asking whether this backend fabricates anything at all. A
         brand-new offer by a coach with nothing else on sale has no fiction to
         disclaim, and a note about numbers that are not there is the same
         mistake in the other direction.

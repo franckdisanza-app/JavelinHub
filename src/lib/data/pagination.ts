@@ -173,6 +173,8 @@ export const KEYSETS = {
   revisions: { scope: 'revisions', column: 'created_at' },
   /** A reporter's own reports. */
   myReports: { scope: 'my-reports', column: 'created_at' },
+  /** The reviews an account has written, for its owner. */
+  myReviews: { scope: 'my-reviews', column: 'created_at' },
   /** The moderation queue for reports. */
   reports: { scope: 'reports', column: 'created_at' },
   /** The administrator audit log. */

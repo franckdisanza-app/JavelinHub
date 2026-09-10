@@ -8,6 +8,7 @@ import { Button, linkButtonClass } from '@/components/ui/button';
 import { Field } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { cachedCoachStatsFor, cachedCoaches } from '@/lib/data/cached';
+import { dataIsFabricated } from '@/lib/demo-data';
 import { firstValue } from '@/lib/search-params';
 
 /**
@@ -155,15 +156,20 @@ export default async function CoachesPage({ searchParams }: PageProps<'/coaches'
             number on it, and a note about numbers that are not there teaches a
             reader to skip the note on the pages where it matters.
 
+            GATED ON THE BACKEND FIRST: "a card is showing a rating" means the
+            data exists, not that it is invented, and on the deployed database
+            those ratings are real. See `src/lib/demo-data.ts`.
+
             The demo-data note, attached to the block where the fiction actually
             is — the same pattern as the disabled Buy button explaining itself
-            immediately below itself. Every rating above is computed from
-            fabricated purchases and fabricated reviews written by nobody, and a
-            number attributed to named people is not the same kind of stub as an
-            inert button. There is deliberately no JSON-LD `AggregateRating`
-            anywhere on this page while that is true.
+            immediately below itself. On a fabricated store every rating above is
+            computed from fabricated purchases and reviews written by nobody, and
+            a number attributed to named people is not the same kind of stub as
+            an inert button. There is deliberately no JSON-LD `AggregateRating`
+            anywhere on this page, on any backend: these are cards, and the
+            rating belongs to the page each one links to.
           */}
-          {stats.some((s) => s.rating_average !== null) ? (
+          {dataIsFabricated() && stats.some((s) => s.rating_average !== null) ? (
             <p className="mt-6 border-t border-line pt-4 text-body-15 text-muted">
               <strong className="font-semibold text-ink">The ratings on this page are demo data.</strong>{' '}
               Nobody has bought anything and nobody wrote any of the reviews behind these numbers.

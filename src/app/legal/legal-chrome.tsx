@@ -17,6 +17,13 @@ import { LEGAL, LEGAL_LAST_UPDATED, legalGaps, type LegalFacts } from '@/lib/leg
  * legal document, and a shared primitive that has exactly one kind of consumer
  * belongs next to it.
  *
+ * ONE THING HAS SINCE ESCAPED THAT FOLDER: `/help` imports {@link Fact} for the
+ * contact address, which is a `LEGAL` fact like any other. It does NOT import
+ * `LegalPage`, because the unreviewed-draft banner is a claim about a legal
+ * document and a help page is not one. If a third consumer appears, move `Fact`
+ * to `components/` rather than copying it — two markers meant to look identical
+ * stop being identical the first time one is touched.
+ *
  * ON THE TYPE. These are the only pages in the product that are *read* at
  * length rather than scanned, so the measure is capped near 68 characters and
  * the body face carries everything. Headings are display type at the two steps

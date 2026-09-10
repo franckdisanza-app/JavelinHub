@@ -53,18 +53,28 @@ export function SiteFooter() {
       <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-8 sm:flex-row sm:items-center sm:justify-between sm:px-6">
         <div className="flex flex-col gap-2">
           <Wordmark />
+          {/*
+            THIS LINE USED TO SAY the site was "a local proof of concept" whose
+            "accounts, offers, reviews and invite codes are demo data". That was
+            true of a mock store on a laptop and became false the moment the
+            fabricated rows were removed from the live database — at which point
+            it was telling a real coach that their real offer was a fixture.
+            What replaces it is the one commercial fact a visitor needs before
+            they click anything, and it is the same sentence the offer page
+            makes: claiming is free for now.
+          */}
           <p className="max-w-sm text-body-15 text-muted">
-            A local proof of concept. Accounts, offers, reviews and invite codes are demo data.
+            Coaching and video review for throwers. Claiming is free while JavelinHub is in pilot.
           </p>
         </div>
         {/*
           TWO NAVS, NOT ONE ROW OF EIGHT. The first four are places to go; the
-          last three are documents you consult, and they are set at the body
-          scale rather than the display one because a legal link that shouts as
-          loudly as "Offers" is a legal link nobody believes is load-bearing.
-          Stripe requires all three to be reachable from the site during Connect
-          onboarding, so they are in the footer of every page rather than on a
-          single page somewhere.
+          last four are pages you consult, and they are set at the body scale
+          rather than the display one because a legal link that shouts as loudly
+          as "Offers" is a legal link nobody believes is load-bearing. Stripe
+          requires the three legal documents to be reachable from the site during
+          Connect onboarding, so they are in the footer of every page rather than
+          on a single page somewhere.
         */}
         <div className="flex flex-col gap-4 sm:items-end">
           <nav aria-label="Footer" className="flex flex-wrap gap-x-6">
@@ -81,7 +91,12 @@ export function SiteFooter() {
               Redeem an invite
             </Link>
           </nav>
-          <nav aria-label="Legal" className="flex flex-wrap gap-x-5 gap-y-1">
+          <nav aria-label="Help and legal" className="flex flex-wrap gap-x-5 gap-y-1">
+            {/* First in the row on purpose: of the four, it is the only one
+                somebody reaches for when something has gone wrong. */}
+            <Link href="/help" className={LEGAL_LINK}>
+              Help
+            </Link>
             <Link href="/legal/terms" className={LEGAL_LINK}>
               Terms
             </Link>

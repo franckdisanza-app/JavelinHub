@@ -16,10 +16,11 @@
 # can reach. It stays a manual, operator-run check until there is a second,
 # test-only project to aim it at.
 #
-# NO SECRETS ARE NEEDED, and that is a property worth preserving. Both suites
+# NO SECRETS ARE NEEDED, and that is a property worth preserving. The suites
 # hard-set `DATA_BACKEND=mock` and provision their own throwaway store; the
 # build below is given the same mock values explicitly rather than inheriting
-# a `.env.local` that does not exist in CI.
+# a `.env.local` that does not exist in CI. The unit tests need no environment
+# at all — they import pure functions and call them.
 
 name: verify
 
@@ -62,6 +63,23 @@ jobs:
       - name: Install
         run: npm ci
 
+      # `npm run typecheck` is `next typegen && tsc --noEmit`, and the first
+      # half is not decoration. Next 16 GENERATES `PageProps`, `LayoutProps`
+      # and `RouteContext` into `.next/types/routes.d.ts`, which
+      # `tsconfig.json` includes — so on a clean checkout, which is what this
+      # runner is, `tsc` alone fails with eight `TS2304: Cannot find name
+      # 'PageProps'` errors before it has type-checked a line of the app.
+      #
+      # THAT IS NOT HYPOTHETICAL: it is why every run of this workflow that
+      # has ever existed failed here in about thirty seconds, and therefore
+      # why nothing below it has ever gated anything. It passed on a
+      # developer's machine for the one reason CI cannot reproduce — a `.next`
+      # left behind by the last `next dev`.
+      #
+      # `typegen` is in the SCRIPT rather than in a step here so that a fresh
+      # `git clone && npm ci && npm run typecheck` behaves the same way this
+      # runner does. A fix that only exists in the workflow leaves the trap
+      # set for the next person to check out the repository.
       - name: Typecheck
         run: npm run typecheck
 
@@ -75,11 +93,34 @@ jobs:
         # database. `SESSION_SECRET` is required on both backends since it keys
         # the rate limiter's bucket HMAC; the value here is throwaway and signs
         # nothing that outlives the job.
+        #
+        # `NEXT_PUBLIC_SITE_URL` IS REQUIRED FOR THE BUILD ITSELF, and its
+        # absence here was breaking this step. `next build` sets
+        # `NODE_ENV=production`, and it PRERENDERS `/_not-found` — which runs the
+        # root layout's `generateMetadata`, which calls `siteUrl()`, which throws
+        # in production rather than falling back to localhost. So the build
+        # failed with "Missing required environment variable
+        # NEXT_PUBLIC_SITE_URL" and took the whole workflow red with it, which
+        # meant none of the suites below were gating anything.
+        #
+        # The value is deliberately NOT the real origin. Nothing in a CI build
+        # should know a deployment's address, and `metadataBase` is the only
+        # thing that consumes it here — an absolute URL in markup nobody serves.
         env:
           DATA_BACKEND: mock
           SESSION_SECRET: ci-throwaway-session-secret
           SEED_ADMIN_PASSWORD: ci-throwaway-admin-password
+          NEXT_PUBLIC_SITE_URL: https://ci.invalid
         run: npm run build
+
+      # The fastest of the four and therefore the first: pure functions, no
+      # server, no store, no browser. It covers the three boundaries the other
+      # suites are structurally unable to reach — `safeNextPath`, which decides
+      # where a login may redirect to; the price parser, whose own comment
+      # records a hundredfold overcharge; and the upload checks, which need a
+      # `File` and a storage backend the mock does not have.
+      - name: Unit tests
+        run: npm run test:unit
 
       - name: Authorization suite
         # The RLS twin: every rule the policy set encodes, asserted against the

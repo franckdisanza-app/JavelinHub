@@ -829,6 +829,7 @@ and the coach's dashboard flags it as *Needs a file*.
 | `reportReview` | signed in, **and the coach who owns the offer the review is about** — a join, not a column comparison. Everyone else, including the review's author and an admin, gets `not_found`, in the same words an unknown id gets |
 | `reportCoach` | any signed-in actor, about any **approved** coach who is not themselves |
 | `listMyReports` | any signed-in actor; scoped to the actor, with no subject parameter to point elsewhere |
+| `listMyReviews` | the same shape, for the reviews an account WROTE. Mirrors `reviews_select_own_author`, which existed from 0002 with nothing calling it. Returns the full `Review` row rather than the `PublicReview` projection, because the caller is the author and `/settings/export` needs `order_id` and `price_epoch` for the export to be a copy rather than a summary |
 | `listReports`, `resolveReport`, `setCoachStatus`, `listCoachesForAdmin`, `listListingsForAdmin`, `listAdminActions` | the actor's **stored** `role` is `'admin'` |
 
 The two routes to `coach_status: 'approved'`:

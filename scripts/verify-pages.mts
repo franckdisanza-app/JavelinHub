@@ -165,7 +165,10 @@ const db0 = getDataClient();
  * actor, and the failure would look like an authorization bug.
  */
 async function signUpProfile(input: { email: string; password: string; fullName: string }): Promise<Profile> {
-  const result = await db0.signUp(input);
+  // The version is the fixture's, not `LEGAL_LAST_UPDATED`: these accounts
+  // exist to render pages, and pinning a literal keeps a change to the
+  // documents from touching this suite.
+  const result = await db0.signUp({ ...input, termsVersion: '1999-01-01' });
   if (result.status !== 'signed_in') {
     throw new Error(`the mock signUp returned "${result.status}" — it has no mail and must always sign in`);
   }
@@ -914,9 +917,22 @@ try {
       );
     }
     check(`${path}: no star glyphs`, /[★☆⭐⚝]|&#9733|&#9734/.test(page.text), false);
+    /*
+     * `PROGRESS.md`: "No JSON-LD `Review` / `AggregateRating` markup while the
+     * data is fake." This suite runs against the MOCK store, where it always
+     * is, so the rule is absolute here.
+     *
+     * IT USED TO BAN `ld+json` ALTOGETHER, which was the right check while the
+     * app emitted none. It emits `Product` and `ProfilePage` blocks now, and a
+     * ban on the container would have forced a choice between structured data
+     * and this control. Narrowed to the two things the rule is actually about —
+     * a rating and a review — and paired with the positive control below, which
+     * proves the block it is reading into is really there. Without that pair,
+     * deleting all the structured data would make this line pass.
+     */
     check(
       `${path}: no JSON-LD Review / AggregateRating`,
-      /ld\+json|AggregateRating|"@type"\s*:\s*"Review"|itemprop=/i.test(page.html),
+      /AggregateRating|"@type"\s*:\s*"Review"|ratingValue|itemprop=/i.test(page.html),
       false,
     );
   }
@@ -935,6 +951,37 @@ try {
     'control: ...and the well-reviewed offer page has 3',
     reviewRatings((await get(`/offers/${OFFER.fundamentals}`)).html).length,
     3,
+  );
+
+  // The positive half of the JSON-LD rule, and the control for the negative one
+  // above. The offer page publishes a `Product` block on every backend — a
+  // title, a price and a seller are facts wherever the reviews came from — and
+  // it is the suppression of the RATING inside that block that the sweep above
+  // is asserting. Reading them apart is what keeps "no rating markup" from being
+  // satisfied by "no markup at all".
+  const wellReviewed = await get(`/offers/${OFFER.fundamentals}`);
+  check(
+    'the offer page publishes a Product block',
+    /"@type"\s*:\s*"Product"/.test(wellReviewed.html),
+    true,
+  );
+  check(
+    '...naming the offer and its price, in the currency the page displays',
+    /"priceCurrency"\s*:\s*"GBP"/.test(wellReviewed.html),
+    true,
+  );
+  check(
+    '...and the coach page publishes a ProfilePage block',
+    /"@type"\s*:\s*"ProfilePage"/.test(coachPage.html),
+    true,
+  );
+  // The escape that stops a coach's own copy from closing the script element.
+  // Asserted on the rendered HTML rather than on the helper, because the helper
+  // being right is worth nothing if a page stops using it.
+  check(
+    'no JSON-LD block contains a raw < character',
+    /<script type="application\/ld\+json"[^>]*>[^<]*<(?!\/script>)/.test(wellReviewed.html),
+    false,
   );
 
   // =========================================================================

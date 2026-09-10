@@ -26,6 +26,7 @@ import { getDataClient } from '@/lib/data';
 import { guessAuthField, toFormState, type FormState } from '@/lib/forms';
 import { clientIp } from '@/lib/client-ip';
 import { consume, consumeBoth, TOO_MANY_MESSAGE } from '@/lib/rate-limit';
+import { LEGAL_LAST_UPDATED } from '@/lib/legal';
 
 /** Where a user lands after signing in or signing up, unless `?next=` says otherwise. */
 const DEFAULT_LANDING = '/offers';
@@ -34,6 +35,12 @@ export async function signUpAction(_prev: FormState, formData: FormData): Promis
   const fullName = String(formData.get('fullName') ?? '').trim();
   const email = String(formData.get('email') ?? '').trim();
   const password = String(formData.get('password') ?? '');
+  /*
+   * An unchecked checkbox is ABSENT from the form data — it is not `"false"` —
+   * so this reads as "did the box arrive at all", which is the only question a
+   * checkbox can answer.
+   */
+  const acceptedTerms = formData.get('acceptTerms') !== null;
   // Never echo a password back into the rendered HTML.
   const values = { fullName, email };
 
@@ -46,6 +53,16 @@ export async function signUpAction(_prev: FormState, formData: FormData): Promis
   else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fieldErrors.email = 'Enter a valid email address.';
   if (password === '') fieldErrors.password = 'Choose a password.';
   else if (password.length < 8) fieldErrors.password = 'Passwords must be at least 8 characters.';
+  /*
+   * NOT `required` on the input alone. A required checkbox in the markup is a
+   * convenience for the person filling the form in and no kind of check: a
+   * Server Action is a public endpoint, and a POST that simply omits the field
+   * would otherwise create an account whose consent record says it agreed to
+   * the current documents. The record has to be true or it is worthless.
+   */
+  if (!acceptedTerms) {
+    fieldErrors.acceptTerms = 'Please agree to the terms and the privacy notice.';
+  }
 
   if (Object.keys(fieldErrors).length > 0) {
     return { status: 'error', message: 'Please correct the highlighted fields.', fieldErrors, values };
@@ -66,7 +83,19 @@ export async function signUpAction(_prev: FormState, formData: FormData): Promis
 
   let userId: string | null = null;
   try {
-    const result = await getDataClient().signUp({ email, password, fullName });
+    /*
+     * `LEGAL_LAST_UPDATED` is the version the form just displayed a link to,
+     * and it is passed rather than assumed so that the stored record says WHICH
+     * documents were agreed to. When the documents change, that constant
+     * changes with them and new accounts record the new value; existing rows
+     * keep the version they actually saw.
+     */
+    const result = await getDataClient().signUp({
+      email,
+      password,
+      fullName,
+      termsVersion: LEGAL_LAST_UPDATED,
+    });
 
     /*
      * TWO SUCCESSES, not a success and a failure.

@@ -18,10 +18,24 @@ const DATE_FORMAT = new Intl.DateTimeFormat('en-GB', {
  * once, so that making it per-listing later is a schema change plus one call
  * site rather than a hunt through the pages.
  */
+export const PRICE_CURRENCY = 'GBP';
+
 const PRICE_FORMAT = new Intl.NumberFormat('en-GB', {
   style: 'currency',
-  currency: 'GBP',
+  currency: PRICE_CURRENCY,
 });
+
+/**
+ * The same amount as a machine-readable decimal — `4500` becomes `"45.00"`.
+ *
+ * For structured data, never for a person: it carries no symbol and no
+ * grouping, because `schema.org/price` is defined as a number and a crawler
+ * reading "£1,234.00" gets 1.
+ */
+export function priceAmount(cents: number): string {
+  if (!Number.isFinite(cents)) return '0.00';
+  return (cents / 100).toFixed(2);
+}
 
 /** A date only — "18 Aug 2026". Returns a safe placeholder for unparseable input. */
 export function formatDate(iso: string): string {

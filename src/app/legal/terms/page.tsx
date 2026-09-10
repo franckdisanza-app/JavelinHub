@@ -70,6 +70,32 @@ export default function TermsPage() {
         </p>
       </LegalSection>
 
+      <LegalSection id="eligibility" title="Who may use JavelinHub">
+        <p>
+          You must be at least <Fact name="minimumAge" /> years old to hold an account. You confirm
+          that when you create one. <strong>We do not ask for a date of birth and we do not verify
+          anyone&rsquo;s age</strong> &mdash; that is a statement about what this software does, not
+          a suggestion that the requirement is optional. An account we find is held by someone below
+          that age will be closed.
+        </p>
+        <p>
+          An adult may buy coaching intended for a young athlete. If you do, the account, the order
+          and the agreement with the coach are yours, and you are responsible for deciding what is
+          appropriate for the person you are buying for and for anything you upload about them.
+        </p>
+        <p>
+          Coaches: approval to publish here is not a background check, a safeguarding clearance or a
+          qualification check, and we do not carry out any of the three. If you coach children, in
+          any setting, meeting the safeguarding requirements of your sport and your jurisdiction is
+          your responsibility and not something a listing on this site provides. If something here
+          concerns you, report it &mdash; every page footer links to{' '}
+          <Link href="/help" className="underline underline-offset-2">
+            help
+          </Link>
+          , which says where each kind of report goes.
+        </p>
+      </LegalSection>
+
       <LegalSection id="accounts" title="Your account">
         <p>
           You must be able to form a binding contract to hold an account, and the details you give us

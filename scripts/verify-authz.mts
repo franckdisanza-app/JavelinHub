@@ -111,6 +111,7 @@ const all = {
   listReviewsForModeration: (actor: Actor) => drain((page) => db.listReviewsForModeration(actor, page)),
   listRemovedReviews: (actor: Actor) => drain((page) => db.listRemovedReviews(actor, page)),
   listMyReports: (actor: Actor) => drain((page) => db.listMyReports(actor, page)),
+  listMyReviews: (actor: Actor) => drain((page) => db.listMyReviews(actor, page)),
   listReports: (actor: Actor, status?: Parameters<typeof db.listReports>[1]) =>
     drain((page) => db.listReports(actor, status, page)),
   listCoachesForAdmin: (actor: Actor) => drain((page) => db.listCoachesForAdmin(actor, page)),
@@ -121,6 +122,16 @@ const all = {
 };
 
 /**
+ * The version string every fixture account accepts.
+ *
+ * A literal rather than `LEGAL_LAST_UPDATED`, deliberately: the assertions
+ * below check that the value the CALLER passed is what gets stored, and reading
+ * the same constant the implementation reads would make that assertion pass
+ * even if the column were written from the wrong place.
+ */
+const FIXTURE_TERMS_VERSION = '1999-01-01';
+
+/**
  * `signUp` returns a {@link SignUpResult} union, because on Supabase a
  * successful signup with email confirmation on yields no session. **The mock
  * has no mail and must therefore always sign the user in**, and this helper
@@ -129,7 +140,7 @@ const all = {
  * actor, and the failure would look like an authorization bug.
  */
 async function signUpProfile(input: { email: string; password: string; fullName: string }): Promise<Profile> {
-  const result = await db.signUp(input);
+  const result = await db.signUp({ ...input, termsVersion: FIXTURE_TERMS_VERSION });
   if (result.status !== 'signed_in') {
     throw new Error(`the mock signUp returned "${result.status}" — it has no mail and must always sign in`);
   }
@@ -463,6 +474,13 @@ const PROFILE_COLUMNS = [
   'coach_bio',
   'coach_years_coaching',
   'avatar_path',
+  // Added with the terms checkbox (0033). In the list for the reason every
+  // other nullable column here is: a stored profile missing them still reads
+  // correctly everywhere (both consumers test for `null`), so their absence is
+  // invisible to every behavioural assertion — and the one place it would
+  // surface is a consent record that silently stopped being written.
+  'terms_accepted_at',
+  'terms_version',
   // Added with account deletion. IN THE LIST for the same reason `deleted_at`
   // is on a listing row: a stored profile missing it would still READ as active
   // everywhere (every consumer tests for `null`), so its absence is invisible
@@ -5118,6 +5136,46 @@ expectEqual(
   false,
 );
 
+// ---------------------------------------------------------------------------
+section("listMyReviews — the author's own words, and nobody else's");
+// ---------------------------------------------------------------------------
+// Mirrors policy `reviews_select_own_author`, which has existed since 0002 with
+// no code path calling it. `/settings/export` is the first, and an export is
+// exactly the wrong place to discover a scoping bug — so the scoping is asserted
+// here rather than trusted.
+
+const myReviews = await allows(
+  'an author reads the reviews they wrote',
+  () => all.listMyReviews(MARCUS),
+  (rows) => `${rows.length} review(s)`,
+);
+expectEqual('...and there is at least one to read', (myReviews?.length ?? 0) > 0, true);
+expectEqual(
+  '...every one of them written by them',
+  myReviews?.every((r) => r.author_id === MARCUS.userId),
+  true,
+);
+// The one that matters. A review written by somebody else is on the same table,
+// is publicly READABLE through `listReviewsForListing`, and must not appear in
+// an export of this account: it is the other person's writing.
+const otherAuthored = await all.listMyReviews(AISHA);
+expectEqual(
+  'a different account reads a different set',
+  otherAuthored.some((r) => myReviews?.some((mine) => mine.id === r.id)),
+  false,
+);
+expectEqual(
+  '...scoped to that account too',
+  otherAuthored.every((r) => r.author_id === AISHA.userId),
+  true,
+);
+// Anonymous has no "own", and this must be a refusal rather than an empty list:
+// an export route that got `[]` for a signed-out caller would hand back a valid
+// file describing nobody.
+await refuses('anonymous has no reviews of their own to read', 'unauthorized', () =>
+  db.listMyReviews(null),
+);
+
 // --- the queue --------------------------------------------------------------
 const reportQueue = await allows(
   'an ADMIN reads the queue',
@@ -5815,7 +5873,13 @@ section('signUp reports TWO successes, not a success and a failure');
 
 const signUpShape = await allows(
   'the mock signs a new account in immediately',
-  () => db.signUp({ email: 'union-probe@javelin.test', password: 'union-probe-password', fullName: 'Uma Union' }),
+  () =>
+    db.signUp({
+      email: 'union-probe@javelin.test',
+      password: 'union-probe-password',
+      fullName: 'Uma Union',
+      termsVersion: FIXTURE_TERMS_VERSION,
+    }),
   (r) => r.status,
 );
 expectEqual('...reporting the signed_in arm', signUpShape?.status, 'signed_in');
@@ -5836,7 +5900,68 @@ expectEqual(
 // A duplicate is still a conflict, and still a THROW rather than a third arm:
 // it is a failure, not an outcome.
 await refuses('a duplicate address is still a conflict', 'conflict', () =>
-  db.signUp({ email: 'union-probe@javelin.test', password: 'another-password', fullName: 'Ursula Union' }),
+  db.signUp({
+    email: 'union-probe@javelin.test',
+    password: 'another-password',
+    fullName: 'Ursula Union',
+    termsVersion: FIXTURE_TERMS_VERSION,
+  }),
+);
+
+// ---------------------------------------------------------------------------
+section('The terms acceptance is recorded, and its subject cannot rewrite it');
+// ---------------------------------------------------------------------------
+// Mirrors 0033: `handle_new_user()` stamps both columns, and
+// `guard_profile_privilege_columns()` pins them against a self-update. The
+// mock's half of that is `signUp()` writing them and NO method offering a way
+// to change them — asserted here as the absence it is, because a column nothing
+// can write is only provably unwritable if something looks.
+
+const consentProfile =
+  signUpShape?.status === 'signed_in' ? await db.getProfile({ userId: signUpShape.profile.id }, signUpShape.profile.id) : null;
+
+expectEqual(
+  'the version the caller passed is the version stored',
+  consentProfile?.terms_version,
+  FIXTURE_TERMS_VERSION,
+);
+expectEqual(
+  '...beside a timestamp, not a null',
+  typeof consentProfile?.terms_accepted_at === 'string' && consentProfile.terms_accepted_at !== '',
+  true,
+);
+// The server's clock, not the caller's: there is no input that could have set
+// this, so the only thing to assert is that it is a real, recent instant.
+expectEqual(
+  '...which is a real instant within the last minute',
+  consentProfile?.terms_accepted_at != null &&
+    Date.now() - new Date(consentProfile.terms_accepted_at).getTime() < 60_000,
+  true,
+);
+// Mirrors: the CHECK constraint and `requireText(..., 40)`. A version is a
+// short marker, and the one field a direct GoTrue caller controls.
+await refuses('a signup with no terms version is invalid', 'invalid', () =>
+  db.signUp({
+    email: 'no-terms@javelin.test',
+    password: 'no-terms-password',
+    fullName: 'Nora Noterms',
+    termsVersion: '   ',
+  }),
+);
+await refuses('...and one with an essay for a version is too', 'invalid', () =>
+  db.signUp({
+    email: 'long-terms@javelin.test',
+    password: 'long-terms-password',
+    fullName: 'Lena Long',
+    termsVersion: 'v'.repeat(41),
+  }),
+);
+// A SEEDED account never saw a form, so it must carry no record at all. This is
+// the assertion that would catch a well-meaning backfill.
+expectEqual(
+  'a seeded account has no consent record, and none was invented for it',
+  (await db.getProfile(ADMIN, LEARNER.userId))?.terms_accepted_at,
+  null,
 );
 
 // ---------------------------------------------------------------------------

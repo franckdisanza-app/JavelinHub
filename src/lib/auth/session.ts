@@ -54,6 +54,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { safeNextPath } from '@/lib/auth/paths';
 
 import { cookies } from 'next/headers';
 import { notFound, redirect } from 'next/navigation';
@@ -310,76 +311,18 @@ export function loginPath(nextPath?: string | null): string {
   return safe ? `/login?next=${encodeURIComponent(safe)}` : '/login';
 }
 
-/**
- * Origin used to resolve a candidate `?next=` value. `.invalid` is reserved by
- * RFC 6761 and can never be a real host, so nothing can collide with it.
+/*
+ * `safeNextPath` USED TO LIVE HERE and now lives in `paths.ts`, re-exported
+ * below so no call site changed.
+ *
+ * It moved for the reason `paths.ts` exists at all, stated in that file's own
+ * header: it imports nothing, so it can be read by code outside the Next
+ * runtime. This module cannot — it imports `next/headers`, which does not
+ * resolve under plain `node` — and that made the single most
+ * security-sensitive pure function in the app the one function no unit test
+ * could reach. `tests/unit/safe-next-path.test.mts` reaches it now.
  */
-const NEXT_PATH_BASE = 'http://x.invalid';
-
-/** Longer than any route this app will ever have; a cheap ceiling on silly input. */
-const NEXT_PATH_MAX_LENGTH = 2048;
-
-/**
- * Normalises a `?next=` value to a safe same-site path, or `null`.
- *
- * -----------------------------------------------------------------------------
- * Why this parses instead of pattern-matching
- * -----------------------------------------------------------------------------
- * An earlier version of this function rejected `//` and `/\` by prefix and
- * banned backslashes. That is a denylist, and it lost:
- *
- *     next = "/\t/evil.example"
- *
- * starts with exactly one slash, contains no backslash, and sailed through. The
- * WHATWG URL parser then *strips* the tab — browsers remove tab, CR and LF from
- * URLs — leaving `//evil.example`, a protocol-relative URL pointing off-site.
- * `new URL('/\t/evil.example', location.href).href` really does resolve to
- * `http://evil.example/`. The same input with a newline instead of a tab was
- * worse: it reached Node's header writer verbatim and threw
- * `ERR_INVALID_CHAR ["Location"]`, turning one crafted link into an
- * unauthenticated 500.
- *
- * Adding tab and newline to the denylist would have been the wrong fix — the
- * denylist itself was the defect. So:
- *
- *   1. Resolve the candidate against a throwaway origin with the *same* parser
- *      the browser uses. Anything that escapes the origin — `//host`,
- *      `/\host`, `/<tab>/host`, an absolute URL, a `javascript:` scheme — lands
- *      somewhere other than `NEXT_PATH_BASE` and is rejected by comparison
- *      rather than by pattern.
- *   2. Rebuild the return value from the parsed components. This is the
- *      load-bearing half: whatever we hand to `redirect()` is then normalised
- *      output from the URL serialiser and cannot carry a stray control
- *      character into a `Location` header, no matter what came in.
- *
- * Round-trips a real path with its query and fragment intact
- * (`/offers?q=x#y`), because losing those would silently break the "send me
- * back where I was" promise.
- */
-export function safeNextPath(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-
-  const candidate = value.trim();
-  if (candidate === '' || candidate.length > NEXT_PATH_MAX_LENGTH) return null;
-
-  // Must be a path reference, not a scheme or an authority. This is a fast
-  // reject, not the security boundary — the origin check below is.
-  if (!candidate.startsWith('/')) return null;
-
-  let url: URL;
-  try {
-    url = new URL(candidate, NEXT_PATH_BASE);
-  } catch {
-    // e.g. a bare `//` with no host.
-    return null;
-  }
-
-  if (url.origin !== NEXT_PATH_BASE) return null;
-
-  // Rebuilt from parsed parts — never the raw input.
-  const rebuilt = `${url.pathname}${url.search}${url.hash}`;
-  return rebuilt.startsWith('/') ? rebuilt : null;
-}
+export { safeNextPath };
 
 /**
  * Requires a signed-in user; redirects to `/login?next=…` otherwise.

@@ -70,6 +70,31 @@ export interface LegalFacts {
    */
   supervisoryAuthority: string | null;
   /**
+   * Minimum age to hold an account, in years.
+   *
+   * THIS ONE IS NOT LIKE THE OTHERS, and it is the reason it was added late.
+   * Every other fact here is a sentence the documents cannot write without
+   * being told. This is a decision that changes what the SOFTWARE has to do:
+   * a number here means the signup form states it and the terms carry it; a
+   * number low enough to admit children means UK/EU children's-data rules
+   * apply to the whole product, and the privacy notice is not the only thing
+   * that would have to change.
+   *
+   * It matters here more than it would on most marketplaces. Throwing is a
+   * school and club sport, so a meaningful share of the people a coach would
+   * want to reach are under 18 — and the personalised delivery mode has an
+   * adult coach and a buyer exchanging private video files against an order.
+   * A product that had not decided its answer to that question should not
+   * take its first real signup.
+   *
+   * What the number does NOT do is verify anything. Nothing in this app asks
+   * for a date of birth or checks one, and the terms say so rather than
+   * implying an assurance that is not there. A stated minimum with a
+   * self-declaration at signup is the floor, not the ceiling.
+   */
+  minimumAge: number | null;
+
+  /**
    * Days a buyer has to request a refund on a delivered offer. A number, not a
    * sentence, because `/legal/refunds` renders it in three places and they must
    * not be able to disagree.
@@ -100,6 +125,7 @@ export const LEGAL: LegalFacts = {
   privacyEmail: null,
   governingLaw: null,
   supervisoryAuthority: null,
+  minimumAge: null,
   refundWindowDays: null,
   platformFeePercent: null,
 };
@@ -113,6 +139,7 @@ const LABELS: Record<keyof LegalFacts, string> = {
   privacyEmail: 'a data-protection contact address',
   governingLaw: 'the governing law and jurisdiction',
   supervisoryAuthority: 'the supervisory authority for complaints',
+  minimumAge: 'the minimum age to hold an account',
   refundWindowDays: 'the refund window, in days',
   platformFeePercent: 'the commission percentage',
 };

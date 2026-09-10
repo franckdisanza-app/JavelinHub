@@ -15,6 +15,7 @@ import {
   cachedPublicProfiles,
 } from '@/lib/data/cached';
 import { emptyPage } from '@/lib/data/pagination';
+import { dataIsFabricated } from '@/lib/demo-data';
 import type { ListingWithCoach } from '@/lib/data/types';
 import {
   LISTING_CATEGORY_LABELS,
@@ -331,15 +332,22 @@ export default async function OffersPage({
           its rating grid.
 
           Rendered ONLY when at least one card is really showing a fabricated
-          number. A grid of nothing but brand-new offers has no fiction on it,
-          and a disclaimer that fires unconditionally is one a reader learns to
-          skip on the pages where it matters.
+          number — GATED ON THE BACKEND FIRST, because "a card is showing a
+          number" means the data exists rather than that it is invented, and on
+          the deployed database these are real sales. See
+          `src/lib/demo-data.ts`.
+
+          A grid of nothing but brand-new offers has no fiction on it, and a
+          disclaimer that fires unconditionally is one a reader learns to skip on
+          the pages where it matters.
 
           There is deliberately NO JSON-LD `AggregateRating` anywhere on this
-          page while the numbers are invented: structured data is the half that
-          travels into search results, where no note travels with it.
+          page, on any backend: these are cards, and each one's rating belongs to
+          the offer page it links to, where it is published as part of that
+          offer's own `Product` block.
         */}
-        {offerStats.some((stats) => stats.rating_average !== null || stats.sales_count > 0) ? (
+        {dataIsFabricated() &&
+        offerStats.some((stats) => stats.rating_average !== null || stats.sales_count > 0) ? (
           <p className="mt-6 border-t border-line pt-4 text-body-15 text-muted">
             <strong className="font-semibold text-ink">
               The ratings and sales counts on this page are demo data.

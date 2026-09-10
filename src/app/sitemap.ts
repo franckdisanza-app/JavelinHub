@@ -79,11 +79,16 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${origin}/offers`, changeFrequency: 'daily', priority: 0.9 },
     { url: `${origin}/coaches`, changeFrequency: 'daily', priority: 0.9 },
 
+    // Help sits above the documents and below the browse roots: it is a page
+    // somebody looks for by name when something has gone wrong.
+    { url: `${origin}/help`, changeFrequency: 'monthly', priority: 0.5 },
+
     // The three documents. Listed unconditionally rather than behind
     // `legalIsComplete()`: while they are incomplete each page carries its own
     // `noindex`, which is the stronger and more specific signal, and a sitemap
     // that silently changes shape is harder to reason about than one that does
-    // not. Low priority — they are consulted, not browsed.
+    // not. Low priority — they are consulted, not browsed. `/help` above is
+    // listed on the same terms and for the same reason.
     { url: `${origin}/legal/terms`, changeFrequency: 'yearly', priority: 0.3 },
     { url: `${origin}/legal/privacy`, changeFrequency: 'yearly', priority: 0.3 },
     { url: `${origin}/legal/refunds`, changeFrequency: 'yearly', priority: 0.3 },

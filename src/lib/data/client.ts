@@ -193,6 +193,28 @@ export interface SignUpInput {
   email: string;
   password: string;
   fullName: string;
+  /**
+   * The version of the terms and privacy notice the person just agreed to —
+   * `LEGAL_LAST_UPDATED`, e.g. `2026-09-01`.
+   *
+   * REQUIRED, so that no code path can create an account without saying what
+   * was agreed to. A form that forgets it fails to compile rather than
+   * producing an account with an empty consent record.
+   *
+   * IT IS NOT A CHECKBOX BOOLEAN, and the difference matters. A boolean records
+   * only that somebody ticked something; the version records WHAT they ticked,
+   * which is the question actually asked when the documents change. Both
+   * backends store it beside a server-clock timestamp — never a caller-supplied
+   * one, because the moment of agreement is ours to observe and not theirs to
+   * assert.
+   *
+   * THE HONEST LIMIT, on Supabase: `auth.signUp` is a public GoTrue endpoint and
+   * the anon key is in the browser, so somebody calling it directly bypasses
+   * this argument entirely. They end up with `terms_accepted_at = null`, which
+   * is exactly right — the record says no acceptance was observed, rather than
+   * claiming one that never happened.
+   */
+  termsVersion: string;
 }
 
 /**
@@ -1380,6 +1402,24 @@ export interface DataClient {
 
   /** The actor's own reports, newest first, so "did anything happen?" is answerable. */
   listMyReports(actor: Actor, page?: PageRequest): Promise<Page<Report>>;
+
+  /**
+   * Every review this account has WRITTEN, newest first.
+   *
+   * The full {@link Review} row, not the {@link PublicReview} projection: the
+   * caller is the author, so there is nothing here to withhold from them, and
+   * the columns a public reader never sees — `order_id`, `price_epoch` — are
+   * exactly what makes an export of somebody's own data complete rather than
+   * decorative.
+   *
+   * Added for the data export at `/settings/export`, and it needed no new
+   * policy: `reviews_select_own_author` (0002) has admitted this read since the
+   * schema landed and nothing had ever asked for it.
+   *
+   * NOT a moderation or admin path. An administrator reading somebody else's
+   * reviews goes through `listReviewsForModeration`, which is audited.
+   */
+  listMyReviews(actor: Actor, page?: PageRequest): Promise<Page<Review>>;
 
   /**
    * The queue. ADMIN ONLY, newest first, open ones by default.

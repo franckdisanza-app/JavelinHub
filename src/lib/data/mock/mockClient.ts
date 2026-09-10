@@ -707,6 +707,13 @@ export class MockDataClient implements DataClient {
     const fullName = requireText(input?.fullName, 'Full name', 120, 2);
     // NOT requireText: a password is never trimmed — see requirePassword.
     const password = requirePassword(input?.password);
+    /*
+     * Mirrors: `handle_new_user()` reading `raw_user_meta_data ->> 'terms_version'`.
+     * Validated here rather than trusted because it lands in a stored column,
+     * and 40 characters is far more than a date needs and far less than a
+     * paragraph somebody could park in the consent record.
+     */
+    const termsVersion = requireText(input?.termsVersion, 'Terms version', 40);
 
     return mutateDb((db) => {
       // Mirrors: Supabase auth's own duplicate-email rejection on
@@ -748,6 +755,11 @@ export class MockDataClient implements DataClient {
         // profile shape assertions, and "absent" and "null" must not be two
         // different rows in the store.
         deleted_at: null,
+        // The SERVER's clock, and the version they were shown. Mirrors the
+        // `now()` in `handle_new_user()`: the moment of agreement is observed
+        // here, never asserted by the caller.
+        terms_accepted_at: timestamp,
+        terms_version: termsVersion,
         created_at: timestamp,
         updated_at: timestamp,
       };
@@ -2485,6 +2497,16 @@ export class MockDataClient implements DataClient {
       const profile = resolveProfile(db, actor);
       const rows = db.reports.filter((r) => r.reporter_id === profile.id).sort(byCreatedAtDesc);
       const window = sliceWindow(KEYSETS.myReports, rows, page, byCreatedAt);
+      return pageOf(window, window.rows.map((r) => copy(r)));
+    });
+  }
+
+  /** Mirrors policy `reviews_select_own_author`. */
+  async listMyReviews(actor: Actor, page?: PageRequest): Promise<Page<Review>> {
+    return readDb((db) => {
+      const profile = resolveProfile(db, actor);
+      const rows = db.reviews.filter((r) => r.author_id === profile.id).sort(byCreatedAtDesc);
+      const window = sliceWindow(KEYSETS.myReviews, rows, page, byCreatedAt);
       return pageOf(window, window.rows.map((r) => copy(r)));
     });
   }

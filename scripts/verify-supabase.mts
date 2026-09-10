@@ -1104,6 +1104,52 @@ expectEqual('...and changes no row at all', rows(emailWrite).length, 0);
 // forgotten.
 
 // ===========================================================================
+section('The terms-acceptance record (0033)');
+// ===========================================================================
+// TWO COLUMNS THE SUBJECT MAY NOT WRITE. `handle_new_user()` stamps them from
+// the database clock at signup; `guard_profile_privilege_columns()` pins them
+// against every later client write, because a consent record its subject can
+// edit is not a record.
+//
+// WHY THIS SECTION EXISTS AT ALL, and it is not really about the guard. Until
+// it was written, "is 0033 applied to this project?" was a question somebody
+// answered by reading `supabase migration list` and remembering — and it went
+// unanswered long enough for `docs/DEPLOY.md` to carry a standing warning that
+// every signup in the meantime was writing a `terms_version` no trigger read.
+// A migration that must be applied before the product is honest deserves an
+// assertion rather than a paragraph.
+//
+// The columns are reachable through PostgREST as a projection because
+// `profiles` carries a TABLE-level select grant, not the column-level one
+// `listings` uses — RLS is what keeps anon out of the rows, and does: the read
+// below is admitted and returns nothing. A 404 or a 400 here means the
+// migration is missing.
+
+const consentColumns = await rest('profiles?select=terms_accepted_at,terms_version&limit=1');
+expectEqual('0033 is applied — the two columns exist', consentColumns.status, 200);
+expectEqual('...and anon reads no row of them', rows(consentColumns).length, 0);
+
+/*
+ * The same admitted-and-matching-nothing shape as the 0017 assertion above,
+ * and the same caveat: `profiles_update_own` is `using (id = auth.uid())` and
+ * `auth.uid()` is NULL for anon, so this never reaches the guard trigger — it
+ * runs out of rows first. What it proves is the outer boundary: there is no
+ * policy admitting an anonymous writer to the consent record.
+ *
+ * The guard ITSELF needs a session to reach, so it is asserted against the
+ * mock twin in `verify:authz` — "the terms acceptance is recorded, and its
+ * subject cannot rewrite it". Recorded here so the split is deliberate rather
+ * than an oversight, exactly as 0017's is.
+ */
+const consentWrite = await rest('profiles?id=eq.00000000-0000-4000-8000-000000000002&select=id', {
+  method: 'PATCH',
+  body: { terms_accepted_at: '2000-01-01T00:00:00Z', terms_version: 'forged' },
+  prefer: 'return=representation',
+});
+expectEqual('anon is admitted to the statement', consentWrite.status, 200);
+expectEqual('...and changes no consent record at all', rows(consentWrite).length, 0);
+
+// ===========================================================================
 section('Account deletion (0018)');
 // ===========================================================================
 // `delete_my_account()` anonymises the caller's own row rather than erasing it,

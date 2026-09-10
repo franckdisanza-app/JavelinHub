@@ -549,6 +549,14 @@ function upsertUser(
     // runtime through deleteMyAccount() — the same rule the seed follows for
     // withdrawn listings.
     deleted_at: null,
+    // NULL, AND DELIBERATELY NOT A TIMESTAMP. A seeded account never saw a
+    // signup form and never agreed to anything, so a stamped value here would
+    // be a fabricated consent record — the one kind of fixture that is worse
+    // than no fixture, because nothing downstream could tell it from a real
+    // one. `signUp()` stamps both columns; the seed leaves both empty, and
+    // the shape stays identical either way.
+    terms_accepted_at: null,
+    terms_version: null,
     created_at,
     updated_at: created_at,
   });
@@ -822,6 +830,15 @@ export function seedDatabase(db: MockDb): void {
     // (a cleared avatar saved badly) also lands on null.
     if (typeof profile.avatar_path !== 'string' || profile.avatar_path === '') {
       profile.avatar_path = null;
+    }
+    // Same repair, same reason, for the consent columns — and note which way
+    // the normalisation runs: a missing key becomes `null` ("no record"), and
+    // nothing here ever invents a timestamp for a row that lacks one.
+    if (typeof profile.terms_accepted_at !== 'string' || profile.terms_accepted_at === '') {
+      profile.terms_accepted_at = null;
+    }
+    if (typeof profile.terms_version !== 'string' || profile.terms_version === '') {
+      profile.terms_version = null;
     }
   }
 

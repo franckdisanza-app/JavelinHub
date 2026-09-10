@@ -107,6 +107,110 @@ export function checkDeliveryFile(file: File): DeliveryFileCheck {
 }
 
 /**
+ * =============================================================================
+ * Does the file's CONTENT match the type it claims to be?
+ * =============================================================================
+ *
+ * `checkDeliveryFile` above validates `file.type`, and `file.type` is whatever
+ * the browser inferred from the extension — it is a claim by the uploader, not
+ * a fact about the bytes. The bucket's `allowed_mime_types` checks the same
+ * claim, so both layers were agreeing with each other about something neither
+ * had looked at. Renaming `payload.exe` to `plan.pdf` satisfied all of it.
+ *
+ * The avatar path has never had this problem and is worth contrasting: it
+ * re-encodes through `sharp`, which fails closed on anything that is not an
+ * image, and the comment there already calls that "a content check as much as a
+ * resize". There is no equivalent for a PDF or a video — re-encoding a 50 MB
+ * MP4 to prove it is one is not a trade worth making — so the head of the file
+ * is read instead.
+ *
+ * -----------------------------------------------------------------------------
+ * WHAT THIS IS AND, MUCH MORE IMPORTANTLY, WHAT IT IS NOT
+ * -----------------------------------------------------------------------------
+ * IT IS NOT A VIRUS SCANNER. It reads at most sixteen bytes and compares them to
+ * a table. A genuinely malicious PDF is still a PDF and passes this check, as it
+ * should — the answer to that is a scanner, which is an external service and a
+ * separate decision. What this closes is the cheap case: a file whose bytes are
+ * one thing and whose declared type is another, which is what the two existing
+ * layers were structurally unable to see.
+ *
+ * TEXT HAS NO SIGNATURE, so `text/plain` and `text/csv` are checked the only way
+ * they can be: for NUL bytes in the head, which no text file has and almost
+ * every binary does. That is a heuristic and is named as one.
+ *
+ * MP4 AND MOV SHARE A SIGNATURE, both being ISO base media files with `ftyp` at
+ * offset 4. They are not told apart here, and should not be: the two are
+ * interchangeable for every purpose this product has, and a check that rejected
+ * a MOV for looking like an MP4 would be refusing a valid file to enforce a
+ * distinction nobody made.
+ */
+const HEAD_BYTES = 16;
+
+/** `true` when `bytes` begins with `signature` at `offset`. */
+function matchesAt(bytes: Uint8Array, offset: number, signature: readonly number[]): boolean {
+  if (bytes.length < offset + signature.length) return false;
+  return signature.every((byte, index) => bytes[offset + index] === byte);
+}
+
+const ASCII = (text: string): readonly number[] => [...text].map((c) => c.charCodeAt(0));
+
+/**
+ * One predicate per accepted type. Every key here must also be in
+ * {@link DELIVERY_MIME_TYPES}, and vice versa — the assertion below is what
+ * keeps the two lists from drifting, because a type present in one and absent
+ * from the other fails OPEN.
+ */
+const SIGNATURES: Record<string, (bytes: Uint8Array) => boolean> = {
+  'application/pdf': (b) => matchesAt(b, 0, ASCII('%PDF-')),
+  'image/png': (b) => matchesAt(b, 0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  'image/jpeg': (b) => matchesAt(b, 0, [0xff, 0xd8, 0xff]),
+  // RIFF....WEBP — four bytes of length sit between the two tags.
+  'image/webp': (b) => matchesAt(b, 0, ASCII('RIFF')) && matchesAt(b, 8, ASCII('WEBP')),
+  'video/mp4': (b) => matchesAt(b, 4, ASCII('ftyp')),
+  'video/quicktime': (b) => matchesAt(b, 4, ASCII('ftyp')),
+  // An .xlsx is a zip. All three local-header variants are accepted: 03 04 is a
+  // normal entry, 05 06 an empty archive, 07 08 a spanned one.
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': (b) =>
+    matchesAt(b, 0, [0x50, 0x4b, 0x03, 0x04]) ||
+    matchesAt(b, 0, [0x50, 0x4b, 0x05, 0x06]) ||
+    matchesAt(b, 0, [0x50, 0x4b, 0x07, 0x08]),
+  // See the header: a heuristic, and the only one available for text.
+  'text/plain': (b) => !b.includes(0),
+  'text/csv': (b) => !b.includes(0),
+};
+
+/**
+ * Reads the head of `file` and reports whether it looks like what it claims.
+ *
+ * Async, which is why it is separate from {@link checkDeliveryFile}: that one is
+ * called from form handlers that want an answer before doing any work, and this
+ * one is called from the single upload choke point, where reading bytes is
+ * already happening.
+ *
+ * UNKNOWN TYPES ARE REFUSED, not allowed. `checkDeliveryFile` has already
+ * rejected anything outside `DELIVERY_MIME_TYPES`, so reaching this with a type
+ * that has no entry means the two lists have drifted — and the safe reading of
+ * "we do not know how to check this" is no.
+ */
+export async function checkDeliveryFileContent(file: File): Promise<DeliveryFileCheck> {
+  const head = new Uint8Array(await file.slice(0, HEAD_BYTES).arrayBuffer());
+
+  const signature = SIGNATURES[file.type];
+  if (signature === undefined) {
+    return { ok: false, message: 'That kind of file cannot be checked, so it cannot be accepted.' };
+  }
+
+  if (!signature(head)) {
+    return {
+      ok: false,
+      message: 'That file does not look like the kind of file its name says it is.',
+    };
+  }
+
+  return { ok: true };
+}
+
+/**
  * Strips a browser-supplied filename down to something safe to store and to
  * render.
  *
@@ -199,6 +303,15 @@ async function uploadObject(bucket: string, path: string, file: File): Promise<v
 
   const check = checkDeliveryFile(file);
   if (!check.ok) throw new DataError('invalid', check.message ?? 'That file could not be used.');
+
+  /*
+   * THE ONE CHOKE POINT, and the reason the content check lives here rather
+   * than beside the three form-level calls to `checkDeliveryFile`: every byte
+   * that reaches either bucket goes through this function, so a fourth upload
+   * path added later inherits the check instead of forgetting it.
+   */
+  const content = await checkDeliveryFileContent(file);
+  if (!content.ok) throw new DataError('invalid', content.message ?? 'That file could not be used.');
 
   const supabase = await createSupabaseServerClient();
   const { error } = await supabase.storage.from(bucket).upload(path, file, {

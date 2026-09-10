@@ -12,6 +12,7 @@ import {
 } from '@/app/settings/settings-forms';
 import { Alert } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
+import { linkButtonClass } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader } from '@/components/ui/card';
 import { getActor, requireUser } from '@/lib/auth/session';
 import { getDataClient } from '@/lib/data';
@@ -157,6 +158,36 @@ export default async function SettingsPage({
         />
         <CardBody>
           <PasswordForm />
+        </CardBody>
+      </Card>
+
+      {/*
+        A PLAIN LINK, NOT A FORM. The export is a `GET` route handler that
+        answers with `Content-Disposition: attachment` — a Server Action can
+        return a value to a React tree but cannot hand the browser a file. It is
+        also why this needs no button state: the navigation is the download.
+
+        `download` is deliberately absent. The header already names the file, and
+        the attribute is ignored cross-origin anyway; leaving it off means the
+        server decides the filename in one place.
+      */}
+      <Card tone="raised">
+        <CardHeader
+          title="Your data"
+          description="Everything this account holds, as one JSON file you can keep."
+        />
+        <CardBody>
+          <p className="text-body-15 text-muted">
+            Your account, the offers you have published, the offers you have claimed, the reviews you
+            have written and the reports you have filed. It does not include reviews other people wrote
+            about you — those are their words — or the files themselves, which are named in the export
+            and downloaded from the pages that hold them.
+          </p>
+          <p className="mt-4">
+            <Link href="/settings/export" className={linkButtonClass({ variant: 'secondary' })}>
+              Download your data
+            </Link>
+          </p>
         </CardBody>
       </Card>
 

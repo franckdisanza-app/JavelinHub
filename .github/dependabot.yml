@@ -1,0 +1,65 @@
+# =============================================================================
+# Dependency updates, opened as pull requests rather than remembered.
+# =============================================================================
+#
+# `npm audit` reports zero vulnerabilities today, and nothing was keeping it
+# that way: the lockfile moves when somebody happens to run an install, which is
+# not a schedule. Every pull request opened here runs the full `verify` workflow
+# — typecheck, lint, build, unit tests, the two mock suites and the browser
+# suite — so an update that breaks something is red before it is merged rather
+# than after.
+#
+# GROUPED, and deliberately. Ungrouped, this opens a pull request per package
+# per week, each one costing a full CI run, and the reviewer learns to merge
+# them without reading. Three groups, chosen so that a red run points at
+# something:
+#
+#   * `next` on its own, because this project pins a Next version its own
+#     `AGENTS.md` warns is not the Next.js in anybody's training data, and a
+#     major move there is a real piece of work rather than a bump.
+#   * `react` with `react-dom`, which must always move together.
+#   * everything else in one group per ecosystem.
+#
+# SECURITY UPDATES ARE NOT GROUPED by GitHub and arrive on their own schedule
+# regardless of the interval below. That is the behaviour worth having: a fix
+# for a real advisory should not wait for Monday.
+
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      next:
+        patterns:
+          - next
+          - eslint-config-next
+      react:
+        patterns:
+          - react
+          - react-dom
+          - "@types/react"
+          - "@types/react-dom"
+      everything-else:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - next
+          - eslint-config-next
+          - react
+          - react-dom
+          - "@types/react"
+          - "@types/react-dom"
+
+  # The workflows themselves pin actions by major version (`actions/checkout@v4`),
+  # which floats within the major and pins across it. This is what moves the
+  # major when there is one.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3

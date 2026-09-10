@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import { JsonLd } from '@/components/json-ld';
 import { ListingCard } from '@/components/listing-card';
 import { InitialsAvatar } from '@/components/initials-avatar';
 import { avatarPublicUrl } from '@/lib/storage/avatars';
@@ -21,7 +22,9 @@ import {
   cachedReviewsForCoach,
 } from '@/lib/data/cached';
 import type { PublicReviewWithListing } from '@/lib/data/types';
+import { dataIsFabricated } from '@/lib/demo-data';
 import { firstValue } from '@/lib/search-params';
+import { coachStructuredData } from '@/lib/structured-data';
 
 export async function generateMetadata({ params }: PageProps<'/coaches/[id]'>): Promise<Metadata> {
   const { id } = await params;
@@ -132,6 +135,10 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
+      {/* Every field of this is rendered below it — see rule 1 in
+          `src/lib/structured-data.ts`. */}
+      <JsonLd data={coachStructuredData(coach)} />
+
       <p className="text-sm">
         <Link
           href={backHref}
@@ -326,14 +333,21 @@ export default async function CoachProfilePage({ params, searchParams }: PagePro
           the same pattern the disabled Buy button already uses, which explains
           itself immediately below itself.
 
-          This is not the same kind of stub as an inert button: the reviews above
-          are fabricated opinions attributed to named people, and the numbers at
-          the top of the page are computed from purchases nobody made. There is
-          deliberately NO JSON-LD `Review` or `AggregateRating` markup anywhere
-          on this page while that is true — publishing structured data would put
-          the fiction into search results, where no note travels with it.
+          GATED ON THE BACKEND FIRST. The two conditions after that clause mean
+          "there is content here", not "the content is invented", and on the
+          deployed database they are true of real reviews — see
+          `src/lib/demo-data.ts`.
+
+          This is not the same kind of stub as an inert button: on a fabricated
+          store the reviews above are invented opinions attributed to named
+          people, and the numbers at the top of the page are computed from
+          purchases nobody made. There is still deliberately NO JSON-LD `Review`
+          or `AggregateRating` on this page — not because of the fiction, but
+          because `aggregateRating` is not a property of a `Person` in
+          schema.org at all. The ratings are published where they are valid: on
+          each of that coach's offers. See `src/lib/structured-data.ts`.
         */}
-        {reviews.length > 0 || stats.sales_count > 0 ? (
+        {dataIsFabricated() && (reviews.length > 0 || stats.sales_count > 0) ? (
           <p className="mt-6 border-t border-line pt-4 text-body-15 text-muted">
             <strong className="font-semibold text-ink">
               The reviews and numbers on this page are demo data.

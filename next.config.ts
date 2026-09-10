@@ -20,14 +20,16 @@ import type { NextConfig } from "next";
  * untrusted input being turned back into a Location header; not doing that by
  * hand is the whole point.
  *
- * WHY `permanent: false` (307) AND NOT 308:
+ * WHY `permanent: true` (308), AND WHY IT WAS NOT ALWAYS:
  * the move IS permanent in intent, and 308 is the honest status for a renamed
- * canonical URL — but a 308 is cached by the browser indefinitely, and nothing
- * here is deployed or indexed yet. Two costs that matter more today than SEO
- * does: a cached 308 makes the redirect unobservable on a second page load, so
- * a reviewer cannot re-verify it without clearing browser state, and it would
- * strand any developer who later serves something else at these paths. Flip
- * this to `true` in the commit that first deploys the app publicly.
+ * canonical URL. It was held at 307 while nothing was deployed or indexed,
+ * because a 308 is cached by the browser indefinitely: it makes the redirect
+ * unobservable on a second page load, so a reviewer cannot re-verify it without
+ * clearing browser state, and it would strand any developer who later serves
+ * something else at these paths. That comment ended by saying to flip it "in the
+ * commit that first deploys the app publicly", which has happened — so it is
+ * flipped, and the two costs above are now the accepted price of not splitting
+ * the ranking signal between the old paths and the new ones.
  */
 /**
  * =============================================================================
@@ -38,78 +40,19 @@ import type { NextConfig } from "next";
  * form and an administrator suspension console is the gap worth closing first:
  * nothing stopped either page being framed by another origin.
  *
- * WHY THE CSP IS FOUR DIRECTIVES AND NOT A POLICY:
- * a real `default-src` / `script-src` policy needs per-request nonces, because
- * Next injects inline bootstrap scripts and `next/font` injects inline styles.
- * That is a measured rollout behind `Content-Security-Policy-Report-Only` and a
- * report endpoint, and shipping a guessed one breaks the site on the first
- * render. The four below need no nonce, restrict nothing the app does, and are
- * each worth having on their own:
+ * WHERE THE CSP WENT: `src/proxy.ts`.
+ * This file used to carry four directives — `frame-ancestors`, `base-uri`,
+ * `form-action`, `object-src` — with a note saying the `script-src` half needed
+ * a per-request nonce that a static `headers()` entry cannot mint, and setting
+ * out the order the rollout had to go in. Step 1 of that order was "move these
+ * headers into `src/proxy.ts`", and it has been done: the whole policy is now
+ * built per request in `contentSecurityPolicy()` there, including the four that
+ * used to be here, so there is exactly one place a directive is written.
  *
- *   frame-ancestors 'none'  nobody may frame us. The modern spelling of
- *                           X-Frame-Options, which is sent alongside it for
- *                           older browsers that only understand that one.
- *   base-uri 'self'         an injected <base> cannot re-point every relative
- *                           URL on the page at another origin.
- *   form-action 'self'      a form cannot be made to POST somewhere else.
- *                           Every form here is a Server Action against its own
- *                           route, so this costs nothing.
- *   object-src 'none'       no <object>, <embed> or <applet>. There are none in
- *                           `src/` — grep for them — and there is no plausible
- *                           future in which this product grows one, so this is
- *                           a whole class of legacy plugin injection closed for
- *                           free. It does NOT fall back to `default-src`, so it
- *                           has to be named to exist.
- *
- * DELIBERATELY NOT ADDED: `frame-src 'none'`. Nothing embeds an iframe today
- * either, but Stripe's checkout and 3-D Secure do, and this file already
- * declines to deny `payment` in `Permissions-Policy` for exactly that reason —
- * see below. A directive that is free today and a silent breakage on the commit
- * that adds checkout is not free.
- *
- * -----------------------------------------------------------------------------
- * WHAT THE `script-src` ROLLOUT IS ACTUALLY BLOCKED ON — verified, not guessed
- * -----------------------------------------------------------------------------
- * "Behind `Content-Security-Policy-Report-Only`" is the right plan and it does
- * not work from a standing start, because of an ordering in Next itself that is
- * easy to discover the expensive way:
- *
- *   `next/dist/server/app-render/app-render.js`
- *     const csp = headers['content-security-policy']
- *              || headers['content-security-policy-report-only'];
- *
- *   `next/dist/server/app-render/get-script-nonce-from-header.js`
- *     directives.find(d => d.startsWith('script-src'))
- *     || directives.find(d => d.startsWith('default-src'))
- *
- * So Next reads the ENFORCING header first, and only looks at the report-only
- * one when the enforcing header is absent. The policy above is present and has
- * no `script-src` and no `default-src` — so no nonce is ever extracted, no
- * nonce is attached to any framework script, and a report-only `script-src`
- * added beside it would report *every* Next bootstrap script as a violation.
- * That is not a measurement, it is noise that hides the one real finding.
- *
- * The rollout therefore has to go in this order, and each step is verifiable
- * before the next:
- *
- *   1. Move these headers into `src/proxy.ts`, which is where a per-request
- *      nonce can be minted. `headers()` here is static by definition.
- *   2. Put `script-src` WITH the nonce into the enforcing header, permissive
- *      enough to enforce nothing new, so that Next starts attaching the nonce.
- *   3. Only then add the strict report-only policy and a report endpoint, and
- *      read what comes back for a while.
- *   4. Tighten the enforcing header to match, one directive at a time.
- *
- * Two facts that make step 2 cheaper than it sounds, both measured here: the
- * app contains no inline `<script>`, no `dangerouslySetInnerHTML` and no
- * `next/script`, so the only inline scripts on any page are Next's own; and
- * every route already builds as `ƒ (Dynamic)`, so the "nonces disable static
- * optimization" cost the Next docs warn about has already been paid.
- *
- * CSP directives do NOT fall back to `default-src`, so naming only these three
- * leaves images, fonts and scripts unrestricted — which is deliberate: avatars
- * are served from the Supabase storage origin and an `img-src` written without
- * it would blank every card in the directory.
+ * The rest of the headers below stay, and are NOT a leftover. They are static
+ * by nature, and `headers()` matches `/:path*` — every path, including the
+ * `_next/static` and image routes the proxy's matcher deliberately excludes.
+ * A `nosniff` that stops applying to a served file is worse than useless.
  *
  * `Strict-Transport-Security` carries no `preload`. Preloading is a commitment
  * that is slow and awkward to reverse, and it belongs to whoever owns the
@@ -122,10 +65,10 @@ import type { NextConfig } from "next";
  * commit that adds checkout.
  */
 const SECURITY_HEADERS = [
-  {
-    key: "Content-Security-Policy",
-    value: "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
-  },
+  // No Content-Security-Policy here. It is per-request now and lives in
+  // `src/proxy.ts` — a second, static one written beside it would be enforced
+  // as well as the real one, and the intersection of two policies is the kind
+  // of thing that breaks a page for a reason nobody can find.
   { key: "X-Frame-Options", value: "DENY" },
   // Stops a browser second-guessing a Content-Type. It matters most for the
   // files this app hands back from storage, where the type is whatever the
@@ -155,18 +98,18 @@ const nextConfig: NextConfig = {
   },
   async redirects() {
     return [
-      { source: "/browse", destination: "/offers", permanent: false },
+      { source: "/browse", destination: "/offers", permanent: true },
       // `/listings/new` is listed BEFORE `/listings/:id` for readability only:
       // the `:id` rule below would already send it to `/offers/new`, since
       // `new` is a legal `:id` match and Next resolves the static
       // `/offers/new` segment ahead of the dynamic one. Stating it explicitly
       // means the intent survives a future change to either route's shape.
-      { source: "/listings/new", destination: "/offers/new", permanent: false },
+      { source: "/listings/new", destination: "/offers/new", permanent: true },
       // Single segment, deliberately: `/listings/:id` matches `/listings/abc`
       // and NOT `/listings/a/b`, which has never been a route here. The leading
       // slash before the colon is required — without it path-to-regexp treats
       // the pattern as a literal and can loop.
-      { source: "/listings/:id", destination: "/offers/:id", permanent: false },
+      { source: "/listings/:id", destination: "/offers/:id", permanent: true },
     ];
   },
 };

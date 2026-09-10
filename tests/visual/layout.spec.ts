@@ -32,6 +32,7 @@ const PUBLIC_PAGES = [
   '/login',
   '/signup',
   '/forgot-password',
+  '/help',
   '/legal/terms',
   '/legal/privacy',
   '/legal/refunds',
@@ -236,5 +237,151 @@ test.describe('streaming has not eaten the status codes', () => {
       const response = await page.goto(path);
       expect(response?.status(), `${path} should be 200`).toBe(200);
     }
+  });
+});
+
+/**
+ * =============================================================================
+ * The Content-Security-Policy, asked of a browser rather than of a string.
+ * =============================================================================
+ *
+ * `src/proxy.ts` enforces `script-src 'self' 'nonce-…' 'strict-dynamic'`, and
+ * the whole arrangement depends on something no other suite can see: Next
+ * reading the policy off the REQUEST headers and attaching the nonce to every
+ * script it emits. Assert the header alone and you assert nothing — a policy
+ * that Next never saw would still be present on the response, and every page
+ * would render as unstyled, un-hydrated HTML with the failure visible only in a
+ * console nobody is reading.
+ *
+ * `verify:pages` cannot ask this: it reads served HTML, where a blocked script
+ * looks exactly like an executed one. Only a real browser knows the difference,
+ * which is what this suite is for.
+ *
+ * THREE THINGS, and each fails independently:
+ *   1. the policy arrives, with a nonce in `script-src`;
+ *   2. the browser reports no violation on any public page;
+ *   3. React actually hydrated — the proof that the framework's own scripts ran
+ *      rather than merely being present in the markup.
+ */
+test.describe('the content security policy is enforced and nothing is blocked', () => {
+  test('the policy arrives with a per-request nonce, and it changes per request', async ({ page }) => {
+    const first = await page.goto('/offers');
+    const second = await page.goto('/coaches');
+
+    const policyOf = (response: typeof first) => response?.headers()['content-security-policy'] ?? '';
+    const nonceOf = (policy: string) => /'nonce-([A-Za-z0-9+/_-]+={0,2})'/.exec(policy)?.[1] ?? null;
+
+    expect(policyOf(first), 'no CSP on /offers').toContain("script-src 'self'");
+    expect(policyOf(first)).toContain("frame-ancestors 'none'");
+
+    const a = nonceOf(policyOf(first));
+    const b = nonceOf(policyOf(second));
+    expect(a, 'script-src carries no nonce, so Next attaches none').not.toBeNull();
+    expect(b).not.toBeNull();
+    // A nonce reused across requests is not a nonce. This is the assertion that
+    // would catch somebody hoisting it to module scope for a quiet win.
+    expect(a).not.toEqual(b);
+  });
+
+  for (const path of PUBLIC_PAGES) {
+    test(`${path} raises no CSP violation and hydrates`, async ({ page }) => {
+      const violations: string[] = [];
+      page.on('console', (message) => {
+        const text = message.text();
+        // Chromium's wording for a blocked resource. Matched on the two stable
+        // fragments rather than the whole sentence, which carries the URL.
+        if (/Content Security Policy|Refused to (load|execute|apply)/i.test(text)) {
+          violations.push(text.slice(0, 200));
+        }
+      });
+
+      await page.goto(path);
+
+      /*
+       * The hydration probe. Next sets `window.next` on the client only once
+       * its own bootstrap has run, so this is true exactly when the nonce'd
+       * scripts executed — and false, with no other symptom, if the policy
+       * blocked them.
+       */
+      await expect
+        .poll(() => page.evaluate(() => typeof (window as unknown as { next?: unknown }).next !== 'undefined'), {
+          timeout: 10_000,
+        })
+        .toBe(true);
+
+      expect(violations, `CSP violations on ${path}: ${JSON.stringify(violations, null, 2)}`).toEqual([]);
+    });
+  }
+});
+
+/**
+ * =============================================================================
+ * The consent gate at signup.
+ * =============================================================================
+ *
+ * WHY IT IS IN THIS SUITE, which says at the top that it covers public pages
+ * only. `/signup` is a public page, and signing UP provisions its own account
+ * rather than needing one — the thing that note rules out is signing IN.
+ *
+ * It is here because the other two suites cannot reach it. `verify-pages.mts`
+ * says so in as many words about the reset form — *"The form itself is a Server
+ * Action and out of this suite's reach"* — because submitting one means holding
+ * the encoded action id the client bundle carries. A browser has it.
+ *
+ * WHAT IS ACTUALLY AT RISK. `signUpAction` reads `formData.get('acceptTerms')`
+ * and the form renders `name="acceptTerms"`. Those two strings are the whole
+ * wiring, they live in different files, and nothing else in the product would
+ * change if one of them were edited: an account would simply be created with a
+ * consent record saying it agreed to documents nobody showed it. That is the
+ * failure this pair of assertions exists to catch, and it is invisible to a
+ * type checker.
+ */
+test.describe('signup requires agreeing to the terms', () => {
+  /** A fresh address per run: the throwaway store persists between them. */
+  const uniqueEmail = () => `consent-${Date.now()}-${Math.floor(Math.random() * 1e6)}@javelin.test`;
+
+  async function fillSignup(page: import('@playwright/test').Page, email: string) {
+    await page.goto('/signup');
+    await page.fill('#fullName', 'Consent Tester');
+    await page.fill('#email', email);
+    await page.fill('#password', 'consent-test-password');
+  }
+
+  test('refuses the submission when the box is not ticked', async ({ page }) => {
+    await fillSignup(page, uniqueEmail());
+
+    /*
+     * `noValidate` is on the form, so the browser's own `required` prompt does
+     * not intercept — which is what lets this reach the server at all, and is
+     * the case that matters: the checkbox attribute is a convenience and the
+     * action is the check.
+     */
+    await page.click('button[type="submit"]');
+
+    await expect(page.getByText('Please agree to the terms and the privacy notice.')).toBeVisible();
+    // Still on the form. A redirect here would mean an account was created.
+    await expect(page).toHaveURL(/\/signup$/);
+  });
+
+  test('creates the account when it is ticked', async ({ page }) => {
+    await fillSignup(page, uniqueEmail());
+    await page.check('#acceptTerms');
+    await page.click('button[type="submit"]');
+
+    // The mock has no mail, so a successful signup signs in and lands on the
+    // offers page. On Supabase this is the `confirm_email` arm instead — see
+    // `SignUpResult` — which is why this assertion belongs to a mock-backed
+    // suite rather than being written as a claim about the product.
+    await expect(page).toHaveURL(/\/offers/, { timeout: 15_000 });
+  });
+
+  test('links to both documents it asks the reader to agree to', async ({ page }) => {
+    await page.goto('/signup');
+    const label = page.locator('label[for="acceptTerms"]');
+    await expect(label.locator('a[href="/legal/terms"]')).toBeVisible();
+    await expect(label.locator('a[href="/legal/privacy"]')).toBeVisible();
+    // Never pre-ticked. Pre-ticked consent is not consent, and it would make the
+    // record the database stamps meaningless.
+    await expect(page.locator('#acceptTerms')).not.toBeChecked();
   });
 });

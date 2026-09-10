@@ -295,14 +295,30 @@ an administrator's takedown.
   project — no fake domain has an MX record. They skip with that reason. Running
   them again needs a second, test-only project, which is where the stuck-fixtures
   problem was already heading.
-* **Transactional email: the seam is built, one of three messages is wired, and
-  the finding is the interesting part.**
+* **Transactional email: ~~the seam is built~~ the seam SENDS now, one of three
+  messages is wired, and the finding is still the interesting part.**
 
   `src/lib/email/` has `sendEmail()` and the three notifications. `sendEmail`
   logs and skips while `RESEND_API_KEY` is unset — the supported local and CI
-  state, so no development run can mail a real person — and the provider call
-  itself is deliberately the one unwritten line, marked GAP, because guessing at
-  Resend's field names from memory is how an integration fails silently.
+  state, so no development run can mail a real person.
+
+  ~~The provider call is deliberately the one unwritten line, marked GAP.~~
+  **Written.** It was left out while the field names were a recollection rather
+  than a reading, which is the correct reason to leave an integration unwritten:
+  the failure mode of a subtly wrong one is silently not sending. They have since
+  been read from Resend's current API reference, and the two that bite are
+  recorded at the call site — `reply_to` is snake_case in the REST API where the
+  Node SDK spells it `replyTo`, and an unknown field is *ignored* rather than
+  rejected, so the mistake sends the message with no reply address and reports
+  success. The call carries a ten-second deadline, because it sits inside a
+  Server Action that has already written to the database and a provider that
+  accepts the connection and never answers would turn "the receipt did not send"
+  into "the purchase appears to have failed".
+
+  What is still needed outside the code: a verified sending domain, and
+  `EMAIL_FROM` naming an address on it. `assertRuntimeConfig()` refuses to start
+  a production server that has a key set beside the `.invalid` placeholder,
+  which is the one arrangement that looks configured and cannot deliver.
 
   **NEITHER PARTY TO AN ORDER CAN READ THE OTHER'S EMAIL ADDRESS**, and that was
   discovered by trying to wire the notifications rather than by reasoning about
@@ -599,6 +615,173 @@ them twice is how the two diverge.
   is filled in. A second banner says the drafts have not been reviewed by a
   lawyer and is unconditional: no code can verify that, so removing it is a
   deliberate edit somebody makes after the review.
+
+---
+
+## 7b. The round that came out of a launch-readiness audit
+
+Nine items below were not in this document at all before an audit went looking
+for them. They are grouped here rather than filed into the sections above
+because what they have in common is *how they were found*: by reading the
+repository against the question "what stops a real person using this", rather
+than by continuing a thread already started.
+
+* **The deployment was answering 500 on every route**, including `/`, which
+  needs no data layer — so it was a boot failure rather than a database one, and
+  `SESSION_SECRET` was absent from the production environment.
+  `assertRuntimeConfig()` had done exactly its job and refused to start; nothing
+  was listening. `.github/workflows/uptime.yml` now asks `/api/health` on a
+  schedule and fails a run when the answer is not `200` with
+  `"backend":"supabase"`. Its own header sets out the three limits that make it
+  a stopgap rather than a monitoring service.
+
+* **CI had been red, and therefore gating nothing.** `next build` prerenders
+  `/_not-found`, which runs the root layout's `generateMetadata`, which calls
+  `siteUrl()` — and that throws in production rather than falling back to
+  localhost. `verify.yml` passed three environment values and not
+  `NEXT_PUBLIC_SITE_URL`, so the build step failed and every suite after it was
+  skipped. Found by building pristine `main` in a clean tree, which is worth
+  recording as a method: the failure was invisible from inside a working copy
+  that had a `.env.local`.
+
+* **The demo-data disclaimer was not gated on the backend**, and that had become
+  a live falsehood rather than a stale comment. Four pages carry a note saying
+  the reviews and numbers on them are fabricated, each gated on whether there
+  was *content* to disclaim — which was the same question as "is it fabricated"
+  right up until `demo-teardown.sql` emptied the live database. From that
+  commit onward the first real buyer to write the first real review would have
+  been told, under their own words, that nobody wrote them. `dataIsFabricated()`
+  in `src/lib/demo-data.ts` is the missing clause, and its header explains why
+  the backend is the right test and the `is_demo` column is not.
+
+* **Nobody agreed to anything at signup.** No checkbox, no timestamp, no version
+  — so there was no way to show that any user had accepted the terms, and no way
+  to handle a future change to them. `0033_terms_acceptance.sql` adds two columns
+  that the SUBJECT cannot write: `handle_new_user()` stamps them from the
+  database clock, and `guard_profile_privilege_columns()` pins them against a
+  self-update, because a consent record its subject can edit is not a record.
+  Existing rows keep `null`, and must: an invented consent record cannot be told
+  from a real one.
+
+* **There was no data export** — Article 20 portability, the half of the pair
+  more often asked for than erasure, and the half that had been skipped.
+  `/settings/export` walks five self-scoped reads with the requester's own actor
+  and hands back a JSON file. It needed one new data-layer method,
+  `listMyReviews`, and that method needed no new policy:
+  `reviews_select_own_author` has admitted the read since 0002 and nothing had
+  ever called it — the fourth instance of the pattern this document keeps
+  finding.
+
+* **There was no way to contact anybody.** No `/contact`, no `/help`, no FAQ —
+  the routes did not exist, and `contactEmail` is `null`. `/help` is now a real
+  page that routes each situation to the control that handles it, and renders
+  the same red marker the legal documents use in place of the address, with
+  `noindex` on itself until it is filled in.
+
+* **The CSP had no `script-src`.** The four directives that shipped were each
+  worth having and the XSS-relevant half was absent, for a reason `next.config.ts`
+  documented at length: a nonce cannot be minted by a static `headers()` entry.
+  The policy now lives in `src/proxy.ts`, is built per request, and carries
+  `'nonce-…' 'strict-dynamic'`. The report-only step in that file's own rollout
+  plan was skipped deliberately, and the reason is written where the plan was.
+
+* **Uploaded files were never checked against their own bytes.** `file.type` is
+  the uploader's claim, the bucket's `allowed_mime_types` checks the same claim,
+  and both layers were agreeing about something neither had looked at — so
+  `payload.exe` renamed to `plan.pdf` passed. `checkDeliveryFileContent()` reads
+  the head of the file at the single upload choke point. **It is not a virus
+  scanner** and says so: a malicious PDF is still a PDF and still passes. That
+  remains open, and needs an external service.
+
+* **No structured data and one shared social card.** Offer and coach pages now
+  publish `Product` and `ProfilePage` JSON-LD, and each has its own
+  `opengraph-image` — a coach sharing their own offer was producing the identical
+  site-wide card. The rating is suppressed inside `offerStructuredData()` rather
+  than at the call sites, so a fabricated store cannot publish an invented
+  `aggregateRating` however many pages are added later.
+
+* **No unit tests, and three boundaries nothing could reach.** `npm run test:unit`
+  runs on `node:test` with no new dependency. It covers `safeNextPath` — which
+  had to move to `auth/paths.ts` to be importable outside the Next runtime — the
+  price parser, and the upload checks. Each is a pure function whose own comment
+  records a real bug that no existing suite was structurally able to assert.
+
+---
+
+## 7c. The round that came out of asking "what is missing to go live", 10 Sep
+
+Four findings, and what they have in common is that **none of them was visible
+from inside the repository**. The tree was green — typecheck, build, 43 unit
+tests, 1,222 authorization assertions — while three of the four were true.
+That is the method worth keeping: check the deployment, the database and the
+CI runs as artefacts in their own right, not as things the code implies.
+
+* **The deployment was answering 500 on every route, again**, including `/`,
+  which touches no data layer. `SESSION_SECRET` was absent from the Vercel
+  production environment — proven rather than inferred, by listing them: the
+  variable simply was not there. §7b recorded this same outage and the same
+  cause; what it did not do was fix it, because the fix is a dashboard action
+  and nothing in a repository can take one. **It is set now.** The lesson is
+  that `assertRuntimeConfig()` worked perfectly — it refused to start a server
+  that would have failed silently — and that a refusal nobody is watching is
+  indistinguishable from a crash. `uptime.yml` is the watcher, and it had never
+  run against a deployment that could pass.
+
+* **The `verify` workflow had never been green. Not once.** All three runs that
+  had ever existed failed in about thirty seconds at the typecheck step, with
+  eight `TS2304: Cannot find name 'PageProps'` errors. Next 16 GENERATES
+  `PageProps`, `LayoutProps` and `RouteContext` into `.next/types/routes.d.ts`,
+  which `tsconfig.json` includes — and a clean checkout has no `.next`. It
+  passed on a developer's machine for the one reason a runner cannot reproduce:
+  a `.next` left behind by the last `next dev`.
+
+  So the workflow written *because* "a control that depends on somebody typing
+  a command is not a control" had itself been controlling nothing since the
+  commit that added it. `npm run typecheck` is now `next typegen && tsc
+  --noEmit` — in the SCRIPT rather than in a workflow step, so a fresh clone
+  behaves the way the runner does.
+
+* **The live database had gone away entirely.** Its hostname stopped resolving
+  — NXDOMAIN, while `supabase.com` resolved — so `check:demo-data` exited 2,
+  which it distinguishes from a pass for exactly this reason. It was restored,
+  and `verify:supabase` then passed 116 assertions against it with nothing
+  missing. Two things this makes concrete rather than theoretical: the backup
+  rehearsal in `docs/DEPLOY.md` §Backups is still the step that has never been
+  done, and the free tier's pause behaviour is now a known operational fact
+  rather than a footnote.
+
+* **`0033_terms_acceptance.sql` was still unapplied**, three rounds after the
+  document that flagged it. It is applied now — and, more usefully, "is it
+  applied?" is no longer a sentence in `docs/DEPLOY.md` that a reader has to
+  trust. `verify:supabase` asserts it: *"0033 is applied — the two columns
+  exist"*. A migration whose absence is silent should be asserted rather than
+  described.
+
+* **Nobody had said how old you have to be**, which §7b's signup-consent work
+  had walked straight past: it added a record of agreeing to the terms without
+  the terms saying who may agree. `LEGAL.minimumAge` is the tenth fact and the
+  first that is not merely a sentence the documents cannot write — it is a
+  decision that changes what the software does, and its own comment in
+  `src/lib/legal.ts` says why this product in particular cannot dodge it.
+  Throwing is a school and club sport, and personalised delivery is an adult
+  coach and a buyer exchanging private video against an order. `/legal/terms`
+  now carries an eligibility section, `/legal/privacy` a children section, and
+  the signup checkbox grows the age half **only once the fact is filled in** —
+  a consent sentence reading "I am at least MINIMUMAGE" would be worse than no
+  sentence at all.
+
+  What it deliberately does not do is verify anything. Nothing asks for a date
+  of birth, and all three places say so rather than implying an assurance that
+  is not there.
+
+**Corrected from the same audit**: uploaded images are *not* unchecked, which an
+earlier reading of this round had recorded as a gap. `normaliseAvatar()` re-encodes
+every avatar through `sharp` and fails closed on anything it cannot decode, which
+is a stronger control than the magic-byte sniff `checkDeliveryFileContent()`
+performs on delivery files — re-encoding also drops EXIF and any payload riding
+in a container the sniff would have accepted. The open item is unchanged and is
+the one already recorded: **there is no virus scanner**, and a malicious PDF is
+still a PDF.
 
 ---
 

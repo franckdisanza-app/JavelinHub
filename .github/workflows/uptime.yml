@@ -1,0 +1,115 @@
+# =============================================================================
+# Is the deployment answering? Asked on a schedule, by something other than a
+# person noticing.
+# =============================================================================
+#
+# WHY THIS EXISTS. `docs/DEPLOY.md` ends with an instruction nobody had carried
+# out:
+#
+#   > **Point an uptime monitor at that path and alert on 503.** It exists to
+#   > catch the failures where the marketing page renders perfectly and the
+#   > product is dead.
+#
+# Nothing was pointed at it, and the deployment spent an unknown length of time
+# answering 500 to every request — including `/`, which needs no database — with
+# nothing anywhere raising it. `/api/health` was built precisely to make that
+# state visible and had been answering to nobody.
+#
+# -----------------------------------------------------------------------------
+# WHAT THIS IS NOT
+# -----------------------------------------------------------------------------
+# It is not a monitoring service, and it should be replaced by one the moment
+# there is a real user to notice an outage before it does. Three limits, all
+# GitHub's and none fixable here:
+#
+#   * **The schedule is best-effort.** A cron in Actions can be delayed by tens
+#     of minutes under load, so "every 15 minutes" is a hope rather than an
+#     interval.
+#   * **It stops on its own.** GitHub disables scheduled workflows in a
+#     repository with no pushes for 60 days, with one warning email. A quiet
+#     project is exactly when this matters most.
+#   * **The alert is a failed workflow run**, which reaches whoever has Actions
+#     notifications on and nobody else. There is no page, no escalation and no
+#     on-call.
+#
+# What it buys over nothing at all: the outage above would have produced a red
+# run within the hour instead of being found by hand, and it costs no account,
+# no secret and no money.
+#
+# -----------------------------------------------------------------------------
+# THE ORIGIN IS A VARIABLE, NOT A SECRET
+# -----------------------------------------------------------------------------
+# A public URL is not confidential and putting it in `secrets` would only make
+# it harder to read in a log. Set `SITE_ORIGIN` under Settings → Secrets and
+# variables → Actions → Variables to point this somewhere else; the default is
+# the project's current origin.
+
+name: uptime
+
+on:
+  schedule:
+    # Every 15 minutes. See the header on why this is approximate.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A run that is still going when the next one fires means the site is timing
+# out, which the running check will report on its own. Do not stack them.
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  health:
+    name: /api/health answers ok
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Ask the health endpoint
+        env:
+          ORIGIN: ${{ vars.SITE_ORIGIN || 'https://javelin-hub.vercel.app' }}
+        run: |
+          set -u
+          URL="${ORIGIN%/}/api/health"
+          echo "GET $URL"
+
+          # `--max-time` rather than a hang: a request that never returns is an
+          # outage too, and the job timeout would report it as infrastructure.
+          # Two retries with a pause, because a single cold start on a serverless
+          # platform is not an incident and paging on one would train everybody
+          # to ignore this.
+          BODY=""
+          STATUS=""
+          for attempt in 1 2 3; do
+            RESPONSE="$(curl --silent --show-error --max-time 20 --write-out '\n%{http_code}' "$URL" || true)"
+            STATUS="$(printf '%s' "$RESPONSE" | tail -n 1)"
+            BODY="$(printf '%s' "$RESPONSE" | sed '$d')"
+            echo "attempt $attempt: HTTP ${STATUS:-none}"
+            if [ "$STATUS" = "200" ]; then break; fi
+            sleep 10
+          done
+
+          echo "body: $BODY"
+
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::$URL answered ${STATUS:-nothing}. The deployment is not serving."
+            echo "::error::A 500 on every route usually means the boot check refused to start — read the Vercel runtime log for a line beginning 'Refusing to start:'."
+            exit 1
+          fi
+
+          # A 200 is not enough on its own. The health route reports which
+          # backend it is talking to, and `mock` from a production URL is the
+          # documented signature of a missing DATA_BACKEND: the marketing page
+          # renders and every page that reads data 500s.
+          case "$BODY" in
+            *'"backend":"supabase"'*) ;;
+            *)
+              echo "::error::$URL answered 200 but not with the supabase backend. Body: $BODY"
+              exit 1
+              ;;
+          esac
+
+          echo "OK — 200, backend supabase."

@@ -20,9 +20,11 @@ The app runs on either of **two interchangeable backends**, selected by
   `supabase/migrations/`. Implemented and registered.
 
 Switching between them is a config change; no calling code differs. **The
-Supabase project exists but its schema has not been pushed yet**, so `mock` is
-still the working default — see [`supabase/README.md`](supabase/README.md) for
-the two outstanding steps, both of which need project credentials.
+schema is applied to the live project and every migration through `0033` is
+pushed** — `npm run verify:supabase` asserts 120 of the rules against the real
+database, including that 0033 landed. `mock` remains the DEVELOPMENT default
+and the one the suites run against, for the reason `docs/DEPLOY.md` §1b gives:
+production is not where you look at a page.
 
 ## Getting started (mock backend)
 
@@ -109,6 +111,8 @@ touches `process.env`, and no secret is hardcoded anywhere.
 | `SEED_ADMIN_PASSWORD` | **none** | required on the mock backend; seeds the admin login. Unused on Supabase |
 | `NEXT_PUBLIC_SITE_URL` | `http://localhost:3000` | this app's own public origin, no trailing slash. It is the absolute base of every link GoTrue emails — password reset, signup confirmation, email change. Deliberately **not** derived from the request's `Host` header, which is attacker-controlled. Set it in production, and add the same origin to Supabase → Authentication → URL Configuration → Redirect URLs, or GoTrue refuses the redirect |
 | `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | empty | required when `DATA_BACKEND=supabase`; both are browser-safe by design |
+| `RESEND_API_KEY` | empty | the app's own transactional mail. **Unset is a supported state**: `sendEmail()` logs the message and returns `skipped`, so no local or CI run can mail a real person. Setting it switches the provider call on — and requires `EMAIL_FROM` to name a sender on a domain verified in Resend, which `assertRuntimeConfig()` checks at boot. Separate from GoTrue's own mail, which is dashboard configuration and no code |
+| `EMAIL_FROM` | `JavelinHub <noreply@javelinhub.invalid>` | required **if** `RESEND_API_KEY` is set. The default TLD is reserved by RFC 6761 and can never resolve, so an unset sender cannot become somebody else's mailbox |
 | `SUPABASE_SERVICE_ROLE_KEY` | empty | **exactly one file in `src/` reads it** — `src/lib/auth/account-deletion.ts`, which bans the GoTrue user on account deletion because `delete_my_account()` cannot reach the `auth` schema. That file builds **no** Supabase client; it makes one `fetch` to one admin endpoint. The key is `BYPASSRLS`, so a client built from it would ignore every policy — never construct one. Leave it blank and deletion still anonymises the profile and closes the app; what does not happen is the credential dying |
 
 ## Deploying to Vercel
@@ -161,6 +165,21 @@ returns early on `NEXT_PHASE=phase-production-build`, in as many words — so th
 cannot fail the CI build, which passes mock values deliberately. The check runs
 when a server actually starts.
 
+**One of the five IS needed by the build itself, and that is a separate fact
+from the boot check.** `next build` sets `NODE_ENV=production` and prerenders
+`/_not-found`, which runs the root layout's `generateMetadata`, which calls
+`siteUrl()` — and `siteUrl()` throws in production rather than falling back to
+localhost. So a build with `NEXT_PUBLIC_SITE_URL` unset fails with *"Missing
+required environment variable NEXT_PUBLIC_SITE_URL"* at the prerender step,
+whatever `register()` does or does not do.
+
+That was breaking CI, silently and completely: `.github/workflows/verify.yml`
+passed `DATA_BACKEND`, `SESSION_SECRET` and `SEED_ADMIN_PASSWORD` and not this
+one, so the build step failed and every suite after it was skipped. It now
+passes `https://ci.invalid` — a throwaway, because nothing in a CI build should
+know a deployment's address, and `metadataBase` is the only thing that reads it
+there.
+
 `SEED_ADMIN_PASSWORD` genuinely is mock-only and can be left unset: it seeds the
 mock store's admin account, and on Supabase nothing asks for it.
 
@@ -179,6 +198,9 @@ and `src/proxy.ts` deploys as the project's proxy (Vercel still labels it
   a second Supabase project would unblock. Read before deploying anything.
 * [`docs/ROADMAP.md`](docs/ROADMAP.md) — what is missing and in what order, with
   the file that documents each absence. Read before planning a phase.
+* [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — what to do when something has already
+  happened: the site is down, a reset email never arrived, somebody has to be
+  suspended, a data request landed. Read before an incident, not during one.
 * [`PROGRESS.md`](PROGRESS.md) — build log and quality bar.
 
 ## Scripts
@@ -187,15 +209,42 @@ and `src/proxy.ts` deploys as the project's proxy (Vercel still labels it
 npm run dev           # dev server
 npm run build         # production build
 npm run lint          # eslint
-npm run typecheck     # tsc --noEmit
+npm run typecheck     # next typegen && tsc --noEmit
+npm run test:unit     # pure functions, no server and no store (node:test)
 npm run verify:authz  # authorization regression suite (throwaway store)
 npm run verify:pages  # rendered-page regression suite (throwaway store + server)
 npm run verify:supabase   # the same rules, asked of the real database (read-only)
 npm run check:demo-data   # is there fabricated data in the database this points at?
-npm run verify:visual     # layout, computed style and 375px overflow, in a real browser
+npm run verify:visual     # layout, CSP, computed style and 375px overflow, in a real browser
 ```
 
-`verify:visual` is the third suite and the newest. It exists because
+**`typecheck` runs `next typegen` first, and that is not a convenience.**
+Next 16 generates `PageProps`, `LayoutProps` and `RouteContext` into
+`.next/types/routes.d.ts`, which `tsconfig.json` includes — so on a clean
+checkout `tsc` alone fails with eight `TS2304: Cannot find name 'PageProps'`
+before it has looked at a line of the app. That is exactly what had been
+failing every run of `.github/workflows/verify.yml` since it was added, while
+the same command passed for anybody with a `.next` left over from `next dev`.
+
+`test:unit` is the newest and the cheapest — no server, no store, no browser, no
+environment. It exists for the three boundaries the other suites are
+*structurally* unable to reach, each of which is a pure function:
+
+| What | Why nothing else could test it |
+|---|---|
+| `safeNextPath` | decides where a login may redirect to. `verify:authz` never renders; `verify:pages` reads served HTML. Its own comment records a shipped open-redirect (`/<tab>/evil.example`) that nothing executable was asserting |
+| `parsePriceToCents` | its own comment records a hundredfold overcharge (`62,50` → £6,250.00) and a per-penny undercharge. A wrongly parsed price simply renders as whatever the code produced, so a markup assertion agrees with the bug |
+| the upload checks | need a `File` and a storage backend, and the mock has no storage at all |
+
+It uses `node:test` and the same TypeScript loader the other scripts use, so it
+adds **no dependency**.
+
+To make `safeNextPath` reachable it moved from `session.ts` to `auth/paths.ts` —
+the module whose own header says it "imports nothing and never should", which is
+exactly what lets a plain Node script read it. `session.ts` re-exports it, so no
+call site changed.
+
+`verify:visual` exists because
 `PROGRESS.md` spent a section warning that **nobody had visually looked at any
 of these pages**, and that `verify:pages` reads served HTML rather than a
 laid-out DOM — so it cannot see computed style, geometry or 375px overflow.
@@ -205,6 +254,14 @@ This one can: it asserts that no public page scrolls sideways at 375px or
 `globals.css` documents as unreliable), that every standalone control clears
 44px, and that a withdrawn offer is still a 404. Chromium only, no secrets, its
 own throwaway mock store on port 3100.
+
+**It also owns the Content-Security-Policy**, for the same reason: the policy in
+`src/proxy.ts` carries a per-request nonce, and whether Next actually *attached*
+that nonce to its own scripts is invisible to a suite that reads HTML — a blocked
+script and an executed one look identical in the markup. So the suite asserts
+that the header arrives with a nonce, that the nonce changes between requests,
+that no page raises a CSP violation in the console, and that React hydrated,
+which is the proof the framework's scripts really ran.
 
 Two GitHub workflows run them. `.github/workflows/verify.yml` runs typecheck,
 lint, build and both mock suites on every push and pull request, and needs no

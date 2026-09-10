@@ -183,8 +183,40 @@ export default function PrivacyPage() {
           from your settings; for the rest, write to <Fact name="privacyEmail" />.
         </p>
         <p>
+          <strong>The copy and the portable form are the same button.</strong>{' '}
+          <Link href="/settings" className="underline underline-offset-2">
+            Your settings
+          </Link>{' '}
+          will hand you a JSON file containing your account, the offers you have published, the offers
+          you have claimed, the reviews you have written and the reports you have filed. It does not
+          contain reviews other people wrote about you: those are their words rather than your data,
+          and they are already public. The files exchanged against an order are named in it rather than
+          embedded, and are downloaded from the order itself.
+        </p>
+        <p>
           If you are unhappy with how we have handled a request you can complain to{' '}
           <Fact name="supervisoryAuthority" />.
+        </p>
+      </LegalSection>
+
+      <LegalSection id="children" title="Children">
+        <p>
+          JavelinHub is for people aged <Fact name="minimumAge" /> and over, and the{' '}
+          <Link href="/legal/terms#eligibility" className="underline underline-offset-2">
+            terms
+          </Link>{' '}
+          say so. We do not knowingly collect personal data from anyone below that age. We also do
+          not ask for a date of birth, so the requirement rests on the confirmation given at signup
+          rather than on a check &mdash; stated here plainly because a notice that implied
+          verification we do not perform would be the misleading version.
+        </p>
+        <p>
+          An adult may buy coaching intended for a young athlete, and where personalised delivery is
+          used that can mean uploading video of a child under an adult&rsquo;s account. Those files
+          live in private storage, are reachable only by the two parties to that order, and are
+          served through links that expire minutes after they are issued. If you believe a child
+          holds an account here, or that material about a child has been uploaded without the right
+          to do so, write to <Fact name="privacyEmail" /> and we will remove it.
         </p>
       </LegalSection>
 

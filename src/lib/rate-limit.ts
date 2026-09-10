@@ -196,6 +196,19 @@ export const LIMITS = {
    * not fail open.
    */
   writeUser: { limit: 60, windowSeconds: 60 * 60 },
+
+  /**
+   * Per USER. Downloading your own data from `/settings/export`.
+   *
+   * The only READ in this table, and it is here because it is the one read in
+   * the product that is unbounded by design: it walks every page of five
+   * self-scoped lists in one request, which is precisely what an export has to
+   * do and precisely what nothing else does.
+   *
+   * Ten an hour is far more than a person exercising a data-portability right
+   * will ever need — the honest number is one — and far less than a loop.
+   */
+  exportUser: { limit: 10, windowSeconds: 60 * 60 },
 } as const;
 
 export type LimitName = keyof typeof LIMITS;
