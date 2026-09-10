@@ -75,7 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           # Same hard floor as `verify.yml`: `register-ts.mjs` refuses to start
           # below 22.18, because native type stripping is what lets the scripts
