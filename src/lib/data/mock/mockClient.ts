@@ -671,8 +671,51 @@ function withUser(db: MockDb, application: CoachApplication): CoachApplicationWi
   };
 }
 
-const byCreatedAtDesc = (a: { created_at: string }, b: { created_at: string }): number =>
-  b.created_at.localeCompare(a.created_at);
+/**
+ * Newest first, with `id` as the tie-break.
+ *
+ * THE TIE-BREAK WAS MISSING HERE FOR SEVENTEEN CALL SITES, and `byPriceThen`
+ * above had described the consequence all along: "a sort without one is stable
+ * only by accident of the input order — which the keyset then pages through as
+ * though it were total, skipping rows."
+ *
+ * That is precisely what happened. `sliceWindow` filters with
+ * `isAfterCursor`, which compares `(key, id)`; this comparator compared only
+ * `key`. Two rows created in the same millisecond therefore came out in
+ * insertion order — ascending by creation — while page two asked for rows
+ * strictly BELOW the cursor in `(created_at desc, id desc)`. The tied row that
+ * had not been shown yet was filtered out and never appeared again.
+ *
+ * Invisible on a developer's machine, where fixtures are milliseconds apart,
+ * and reproducible on a CI runner, where they are not: the first run of
+ * `verify:authz` that ever executed in CI failed ten assertions on it, starting
+ * with a coach who could not be suspended because one of their offers was
+ * still on sale — the suite had withdrawn every offer the paged read returned,
+ * and the paged read had not returned all of them.
+ *
+ * `SupabaseDataClient` never had the bug: `seek()` issues two `.order()` calls
+ * and its own comment says "BOTH `.order()` CALLS MATTER". This is the mock
+ * catching up with the backend it is the twin of.
+ */
+const byCreatedAtDesc = (
+  a: { created_at: string; id: string },
+  b: { created_at: string; id: string },
+): number => {
+  if (a.created_at !== b.created_at) return b.created_at.localeCompare(a.created_at);
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+};
+
+/**
+ * The same, for `invites` — which has no `id` column, so its keyset ties on
+ * `code` and so must its sort. `KEYSETS.invites` names the same tie-break.
+ */
+const byCreatedAtThenCodeDesc = (
+  a: { created_at: string; code: string },
+  b: { created_at: string; code: string },
+): number => {
+  if (a.created_at !== b.created_at) return b.created_at.localeCompare(a.created_at);
+  return a.code < b.code ? 1 : a.code > b.code ? -1 : 0;
+};
 
 // ---------------------------------------------------------------------------
 
@@ -2379,7 +2422,17 @@ export class MockDataClient implements DataClient {
       requireAdmin(db, actor);
       const rows = db.removed_reviews
         .slice()
-        .sort((a, b) => (a.removed_at < b.removed_at ? 1 : a.removed_at > b.removed_at ? -1 : 0));
+        // `removed_at` desc, `id` desc — the same tie-break the keyset below
+        // uses. See `byCreatedAtDesc` for what a partial comparator costs here.
+        .sort((a, b) =>
+          a.removed_at !== b.removed_at
+            ? b.removed_at.localeCompare(a.removed_at)
+            : a.id < b.id
+              ? 1
+              : a.id > b.id
+                ? -1
+                : 0,
+        );
       // Keyed on `removed_at`, NOT on the review's own `created_at`: this log is
       // read in the order things were taken down. `KEYSETS.removedReviews` names
       // the same column, and the two must agree or "Next" skips rows.
@@ -2691,7 +2744,7 @@ export class MockDataClient implements DataClient {
     // enumerate codes.
     return readDb((db) => {
       requireAdmin(db, actor);
-      const rows = db.invites.slice().sort(byCreatedAtDesc);
+      const rows = db.invites.slice().sort(byCreatedAtThenCodeDesc);
       // `code`, not `id`: an invite has no `id` column. `KEYSETS.invites` names
       // the same tie-break for the SQL side.
       const window = sliceWindow(KEYSETS.invites, rows, page, (invite) => ({

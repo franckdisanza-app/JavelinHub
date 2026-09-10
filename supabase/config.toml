@@ -1,3 +1,29 @@
+# =============================================================================
+# THIS IS THE LOCAL CONFIGURATION. DO NOT RUN `supabase config push`.
+# =============================================================================
+#
+# `supabase config push` writes this file to the LINKED project, which for this
+# repository is the live one — and the values below are `supabase init`
+# defaults for a laptop, not a description of production. Pushing it would,
+# among other things:
+#
+#   * set `[auth] site_url` to `http://127.0.0.1:3000`, breaking every link
+#     GoTrue emails;
+#   * set `[auth.email] enable_confirmations = false`, TURNING OFF email
+#     confirmation on a live project where it is on — which is a security
+#     regression that looks like nothing at all until somebody signs up as
+#     an address they do not own;
+#   * lower `minimum_password_length` to 6 and `max_frequency` to one second.
+#
+# None of that would raise an error. `docs/DEPLOY.md` lists the three auth
+# settings this repository cannot reach and says to make them in the dashboard,
+# and this comment exists because the CLI offers a command that looks like the
+# automated way to do it and is in fact the way to undo them.
+#
+# The file is still worth keeping accurate for `supabase start`, which is what
+# it is for.
+# =============================================================================
+
 # For detailed configuration reference documentation, visit:
 # https://supabase.com/docs/guides/local-development/cli/config
 # A string used to distinguish different Supabase projects on the same host. Defaults to the

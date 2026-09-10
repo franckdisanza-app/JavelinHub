@@ -774,6 +774,30 @@ CI runs as artefacts in their own right, not as things the code implies.
   of birth, and all three places say so rather than implying an assurance that
   is not there.
 
+* **The mock skipped rows whenever two shared a timestamp**, and this one was
+  found BY the CI fix rather than beside it — the first run of `verify:authz`
+  that ever executed in CI failed ten assertions, starting with *"nothing of
+  theirs is on sale now — expected 0, got 1"*. The suite had drained every page
+  of a coach's offers, withdrawn each, and been told one was still on sale.
+
+  `sliceWindow` picks a page by filtering on `(key, id)` and taking the first
+  `limit`, which is the next page **only** if the array is already in
+  `(key desc, id desc)`. The mock's `byCreatedAtDesc` compared `created_at`
+  alone, for seventeen reads. Two rows in the same millisecond therefore came
+  out in insertion order, the cursor moved past the one with the higher id, and
+  the other could never satisfy `id < cursor.id` again. `byPriceThen`, four
+  lines above it, had described the exact failure in its own comment and tied
+  on `id`; the older comparator had simply never been brought into line.
+  `SupabaseDataClient` never had it — `seek()` issues two `.order()` calls and
+  says why.
+
+  The property that makes it worth recording: **a green local run was not
+  evidence.** It needed two fixtures in one millisecond, which is a fact about
+  the hardware. So the fix is three comparators, and the guard is two things
+  that do not depend on hardware — `sliceWindow` now THROWS when the rows it is
+  handed are not in keyset order, naming the read, and `tests/unit/pagination.test.mts`
+  ties the timestamps by construction rather than by luck.
+
 **Corrected from the same audit**: uploaded images are *not* unchecked, which an
 earlier reading of this round had recorded as a gap. `normaliseAvatar()` re-encodes
 every avatar through `sharp` and fails closed on anything it cannot decode, which

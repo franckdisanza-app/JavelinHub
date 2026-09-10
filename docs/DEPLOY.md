@@ -263,6 +263,15 @@ No `vercel.json` is needed. `src/proxy.ts` deploys as the project's proxy
 notifications, in `src/lib/email/`. Setting the dashboard SMTP does not switch
 those on, and switching those on does not fix the dashboard.
 
+**DO NOT REACH FOR `supabase config push`.** It is the command that looks like
+the automated way to make the three settings above, and it is the way to undo
+them: it writes `supabase/config.toml` — a `supabase init` default file for a
+laptop — to the linked project. That would set `site_url` back to
+`http://127.0.0.1:3000` and, worse, set `enable_confirmations = false`, turning
+OFF email confirmation on the live project silently. The file now carries the
+same warning at the top of itself. These three are dashboard actions, by hand,
+and that is why this section exists.
+
 ---
 
 ## After deploying

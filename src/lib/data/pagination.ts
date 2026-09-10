@@ -332,6 +332,8 @@ export function sliceWindow<Row>(
   const limit = normaliseLimit(page?.limit);
   const cursor = decodeCursor(spec, page?.cursor);
 
+  assertTotallySorted(spec, sorted, keyOf);
+
   const after = cursor
     ? sorted.filter((row) => {
         const key = keyOf(row);
@@ -342,6 +344,47 @@ export function sliceWindow<Row>(
   // `total` counts everything matching the filter, IGNORING the cursor — it is
   // "137 offers", not "113 offers left".
   return windowOf(spec, after.slice(0, limit + 1), limit, keyOf, sorted.length);
+}
+
+/**
+ * **THE ROWS MUST ALREADY BE SORTED THE WAY THE CURSOR PAGES THROUGH THEM**, and
+ * this is what says so out loud instead of skipping a row.
+ *
+ * `sliceWindow` selects the next page by FILTERING — keep every row strictly
+ * after the cursor in `(key, id)` — and then taking the first `limit`. That is
+ * only equivalent to "the next page" when the array is in exactly that order.
+ * Hand it an array sorted on `key` alone and the two disagree the moment two
+ * rows share a key: the tied row that sorted first is emitted, the cursor moves
+ * past it, and the tied row that sorted second is filtered out for ever.
+ *
+ * It is not a hypothetical. `byCreatedAtDesc` in the mock client compared only
+ * `created_at` for seventeen reads, which is invisible until two rows land in
+ * the same millisecond — so it survived every local run and failed ten
+ * assertions on the first CI run that ever executed the suite.
+ *
+ * A caller that gets this wrong now gets a thrown error naming the read, on the
+ * first page, rather than a quietly short list. This runs on the MOCK path only
+ * — `SupabaseDataClient` pages in SQL and never calls this — so the cost is a
+ * linear pass over an array that is already in memory, and the backend that
+ * cannot be deployed is the one that pays it.
+ */
+function assertTotallySorted<Row>(
+  spec: KeysetSpec,
+  rows: readonly Row[],
+  keyOf: (row: Row) => Keyset,
+): void {
+  for (let i = 1; i < rows.length; i += 1) {
+    const previous = keyOf(rows[i - 1]!);
+    const current = keyOf(rows[i]!);
+    if (!isAfterCursor(spec, previous, current.key, current.id)) {
+      throw new Error(
+        `sliceWindow(${spec.scope}): rows are not in keyset order — ` +
+          `(${previous.key}, ${previous.id}) is not before (${current.key}, ${current.id}). ` +
+          'The comparator that sorted them must tie-break on the same column the keyset does, ' +
+          'or this read silently skips rows. See byPriceThen / byCreatedAtDesc in mockClient.ts.',
+      );
+    }
+  }
 }
 
 /**
