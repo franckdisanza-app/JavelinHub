@@ -18,7 +18,7 @@
     "test:unit": "node --import ./scripts/register-ts.mjs --test \"tests/unit/*.test.mts\""
   },
   "dependencies": {
-    "@supabase/ssr": "^0.12.5",
+    "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.112.4",
     "next": "16.3.4",
     "react": "19.2.8",
@@ -26,15 +26,15 @@
     "sharp": "^0.35.4"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^26",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^9",
+    "eslint": "^10",
     "eslint-config-next": "16.3.4",
-    "supabase": "^2.115.0",
+    "supabase": "^2.117.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^7"
   }
 }
